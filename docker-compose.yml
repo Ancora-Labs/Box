@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  box:
+    image: node:20-bookworm-slim
+    working_dir: /workspace
+    env_file:
+      - .env
+    volumes:
+      - ./:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["sh", "-c", "npm install && npm run box:start"]
+    restart: unless-stopped

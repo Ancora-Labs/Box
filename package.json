@@ -1,0 +1,19 @@
+{
+  "name": "box-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Repo-agnostic autonomous engineering orchestrator starter",
+  "scripts": {
+    "box:start": "node src/cli.js start",
+    "box:once": "node src/cli.js once",
+    "worker:run": "node src/workers/run_task.js",
+    "doctor": "node src/cli.js doctor"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}

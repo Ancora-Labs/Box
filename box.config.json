@@ -1,0 +1,104 @@
+{
+  "loopIntervalMs": 20000,
+  "maxParallelWorkers": 2,
+  "defaultBranchPrefix": "box/task-",
+  "workerImage": "box-worker:local",
+  "workspaceDir": ".box-work",
+  "taskFile": "state/tasks.json",
+  "summaryFile": "state/project_summary.json",
+  "budgetFile": "state/budget.json",
+  "progressFile": "state/progress.txt",
+  "testsStateFile": "state/tests.json",
+  "copilotUsageFile": "state/copilot_usage.json",
+  "copilotUsageMonthlyFile": "state/copilot_usage_monthly.json",
+  "policyFile": "policy.json",
+  "git": {
+    "autoCreatePr": true
+  },
+  "planner": {
+    "useClaudeForPlanning": false,
+    "maxTasks": 5
+  },
+  "gates": {
+    "requireBuild": true,
+    "requireTests": true,
+    "requireLint": false,
+    "minCoveragePercent": 80
+  },
+  "claude": {
+    "model": "claude-sonnet-4-6",
+    "reviewMaxRetries": 2,
+    "reviewMaxTokens": 800,
+    "planMaxTokens": 1400,
+    "thinking": {
+      "type": "adaptive",
+      "effort": "medium"
+    }
+  },
+  "copilot": {
+    "strategy": "task-best",
+    "defaultModel": "Claude Sonnet 4.5",
+    "preferredModelsByTaskKind": {
+      "quality": "Claude Sonnet 4.5",
+      "stability": "GPT-5.3-Codex",
+      "production": "GPT-5.2-Codex",
+      "refactor": "GPT-5.2-Codex"
+    },
+    "opusModel": "Claude Opus 4.6",
+    "allowOpusEscalation": false,
+    "opusEscalationKeywords": [
+      "critical",
+      "security",
+      "architecture",
+      "incident",
+      "severe"
+    ],
+    "neverUseModels": [
+      "Claude Opus 4.6 (fast mode) (preview)"
+    ],
+    "allowedModels": [
+      "Claude Sonnet 4.5",
+      "GPT-5.2-Codex",
+      "GPT-5.3-Codex",
+      "Claude Opus 4.6"
+    ],
+    "maxMultiplier": 1,
+    "opusMinBudgetUsd": 2,
+    "opusMonthlyMaxCalls": 8,
+    "multipliers": {
+      "Claude Haiku 4.5": 0.33,
+      "Claude Sonnet 4.5": 1,
+      "Claude Sonnet 4.6": 1,
+      "Claude Opus 4.6": 3,
+      "Claude Opus 4.6 (fast mode) (preview)": 30,
+      "GPT-5 mini": 0,
+      "GPT-4.1": 0,
+      "GPT-5.2-Codex": 1,
+      "GPT-5.3-Codex": 1,
+      "Grok Code Fast 1": 0.25,
+      "Raptor mini": 0
+    },
+    "taskKindRouting": {
+      "default": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/box-plan-and-implement.prompt.md"
+      },
+      "quality": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/fix-failing-tests.prompt.md"
+      },
+      "production": {
+        "agent": "box-team-lead",
+        "promptFile": ".github/prompts/box-plan-and-implement.prompt.md"
+      },
+      "stability": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/box-plan-and-implement.prompt.md"
+      },
+      "refactor": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/box-plan-and-implement.prompt.md"
+      }
+    }
+  }
+}

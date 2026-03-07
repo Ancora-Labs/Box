@@ -1,0 +1,12 @@
+{
+  "protectedPaths": [
+    "src/core/**",
+    "infra/**"
+  ],
+  "requireReviewerApprovalForProtectedPaths": true,
+  "blockedCommands": [
+    "rm -rf /",
+    "git push --force",
+    "git reset --hard"
+  ]
+}
