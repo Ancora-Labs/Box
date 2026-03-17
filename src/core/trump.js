@@ -414,19 +414,25 @@ export async function runTrumpAnalysis(config, jesusDecision) {
   const sharedContext = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 ${context.repoInfo ? `Project: ${context.repoInfo.name} | Language: ${context.repoInfo.language} | Topics: ${context.repoInfo.topics.join(", ")}` : ""}
 
-## ⛔ ALREADY-DONE WORK — ABSOLUTE SKIP RULE
-The following PRs are MERGED and the following issues are CLOSED. This work is confirmed done.
+## ⛔ ALREADY-DONE WORK — SKIP & AUDIT RULE
+The following PRs are MERGED and the following issues are CLOSED.
 BEFORE planning ANY task for ANY worker, cross-reference the task against every item below.
-If the task domain, file area, or feature clearly matches a merged PR title or closed issue title, DO NOT plan it.
-Re-planning work that is already merged is a WASTE OF PREMIUM REQUESTS and will be rejected.
 
-MERGED PULL REQUESTS (confirmed done — DO NOT re-plan these domains):
+### SKIP vs REGRESSION-FIX decision:
+For each merged PR, check the LOCAL FILE CONTENT SNAPSHOT below. If the code shows the feature was
+implemented COMPLETELY and correctly → SKIP (do not re-plan).
+But if the local snapshot reveals that a merged PR's work is INCOMPLETE, BROKEN, or HALF-DONE
+(e.g. responsive PR merged but breakpoints are missing, accessibility PR merged but aria labels absent,
+performance PR merged but images still unoptimized) → plan it as kind: "regression-fix" (not "new").
+A regression-fix task costs fewer requests because the foundation exists — just the gaps need filling.
+
+MERGED PULL REQUESTS (verify quality against local snapshot before skipping):
 ${mergedPRsSummary}
 
 RECENT MERGED COMMITS (cross-reference before planning):
 ${mergedCommitsSummary}
 
-CLOSED ISSUES (already resolved — do not open tasks for these):
+CLOSED ISSUES (verify resolution quality — if poorly resolved, plan a regression-fix):
 ${closedIssueSummary}
 
 ## WHY JESUS CALLED YOU

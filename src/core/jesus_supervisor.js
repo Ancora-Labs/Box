@@ -223,10 +223,12 @@ ${workersList}`;
   if (!aiResult.ok || !aiResult.parsed) {
     await appendProgress(config, `[JESUS] AI call failed — ${aiResult.error || "no JSON"}`);
     chatLog(stateDir, jesusName, `AI failed: ${aiResult.error || "no JSON"}`);
+    const needsTrump = trumpAgeHours > 6;
     return {
       wait: false,
       wakeMoses: true,
-      callTrump: false,
+      callTrump: needsTrump,
+      trumpReason: needsTrump ? "AI call failed and no recent Trump analysis — must scan" : undefined,
       decision: "tactical",
       systemHealth: "unknown",
       thinking: "",
@@ -240,6 +242,13 @@ ${workersList}`;
   logAgentThinking(stateDir, jesusName, aiResult.thinking);
 
   const d = aiResult.parsed;
+
+  // Safety net: force callTrump=true when no valid trump analysis exists
+  if (!d.callTrump && trumpAgeHours > 6) {
+    d.callTrump = true;
+    d.trumpReason = (d.trumpReason || "") + " [OVERRIDE: no recent Trump analysis — forced callTrump=true]";
+    await appendProgress(config, `[JESUS] callTrump overridden to true — Trump analysis is ${trumpAgeHours === Infinity ? "missing" : trumpAgeHours.toFixed(1) + "h old"}`);
+  }
 
   chatLog(stateDir, jesusName,
     `Decision: ${d.decision || "?"} | Health: ${d.systemHealth || "?"} | callTrump: ${d.callTrump} | wakeMoses: ${d.wakeMoses}`

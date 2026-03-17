@@ -137,7 +137,7 @@ Write your full analysis in plain English first. Then:
     {
       "priority": 1,
       "role": "King David",
-      "kind": "backend | frontend | api | test | qa | devops | security | integration | scan",
+      "kind": "backend | frontend | api | test | qa | devops | security | integration | scan | regression-fix",
       "task": "Precise task title",
       "context": "Complete context: exact file paths, line numbers, issue numbers, what to do, expected output",
       "substeps": [
