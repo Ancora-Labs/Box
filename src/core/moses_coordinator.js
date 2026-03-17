@@ -179,9 +179,13 @@ function autoCompleteEligibleWaves(executionStrategy, completedTasks, activeInst
   const activeRoles = new Set(
     (activeInstructions || []).map((item) => String(item?.role || "").trim()).filter(Boolean)
   );
+  // Accept "done", "blocked", and "partial" as wave-completing statuses.
+  // Scan workers often return "blocked" or "partial" when they produce their analysis
+  // but can't access external APIs (e.g. GitHub PR diffs). Their output is still valid.
+  const acceptableStatuses = new Set(["done", "blocked", "partial"]);
   const doneRoles = new Set(
     (workerResults || [])
-      .filter((item) => String(item?.status || "").toLowerCase() === "done")
+      .filter((item) => acceptableStatuses.has(String(item?.status || "").toLowerCase()))
       .map((item) => String(item?.role || "").trim())
       .filter(Boolean)
   );
