@@ -49,6 +49,15 @@ export function parseVerificationReport(output) {
 }
 
 /**
+ * Parse BOX_PR_URL from worker output.
+ */
+export function parsePrUrl(output) {
+  const text = String(output || "");
+  const match = text.match(/BOX_PR_URL\s*=\s*(https:\/\/github\.com\/[^\s]+)/i);
+  return match ? match[1].trim() : null;
+}
+
+/**
  * Parse RESPONSIVE_MATRIX from worker output.
  * Expected format: RESPONSIVE_MATRIX: 320x568=pass, 360x640=fail, ...
  */
@@ -81,17 +90,24 @@ export function validateWorkerContract(workerKind, parsedResponse) {
   const output = parsedResponse?.fullOutput || parsedResponse?.summary || "";
   const report = parseVerificationReport(output);
   const responsiveMatrix = parseResponsiveMatrix(output);
+  const prUrl = parsePrUrl(output);
 
   const gaps = [];
   const evidence = {
     hasReport: !!report,
     report: report || {},
     responsiveMatrix: responsiveMatrix || {},
+    prUrl: prUrl || null,
     profile: profile.kind
   };
 
-  // If worker reported a non-done status, skip verification — it already knows it's not done
+  // If worker reported skipped (already-merged), pass immediately
   const status = String(parsedResponse?.status || "done").toLowerCase();
+  if (status === "skipped") {
+    return { passed: true, gaps: [], evidence, reason: "status=skipped, worker reported task already done" };
+  }
+
+  // If worker reported a non-done status, skip verification
   if (status !== "done") {
     return { passed: true, gaps: [], evidence, reason: `status=${status}, verification skipped` };
   }
@@ -103,15 +119,16 @@ export function validateWorkerContract(workerKind, parsedResponse) {
   }
 
   // No verification report at all — gap for any role with required fields
-  const hasRequiredFields = Object.values(profile.evidence).some(v => v === "required");
+  const hasRequiredFields = Object.values(profile.evidence).some(v => v === "required" && v !== "prUrl");
   if (!report && hasRequiredFields) {
     gaps.push("VERIFICATION_REPORT missing — worker did not provide any verification evidence");
     return { passed: false, gaps, evidence, reason: "no verification report" };
   }
 
-  // Check each required field
+  // Check each required field (except prUrl — handled separately below)
   for (const [field, requirement] of Object.entries(profile.evidence)) {
     if (requirement !== "required") continue;
+    if (field === "prUrl") continue;
 
     const value = report?.[field];
     if (!value || value === "n/a") {
@@ -119,7 +136,6 @@ export function validateWorkerContract(workerKind, parsedResponse) {
     } else if (value === "fail") {
       gaps.push(`${field.toUpperCase()} reported as FAIL — worker must fix before done`);
     }
-    // "pass" is accepted
   }
 
   // Responsive viewport count check for frontend roles
@@ -130,6 +146,13 @@ export function validateWorkerContract(workerKind, parsedResponse) {
     }
   } else if (profile.responsiveRequired && !responsiveMatrix) {
     gaps.push("RESPONSIVE_MATRIX missing — frontend role must verify responsive viewports");
+  }
+
+  // PR URL check — generic for all implementation roles that require it
+  if (profile.evidence.prUrl === "required") {
+    if (!prUrl) {
+      gaps.push("BOX_PR_URL missing — worker must push a branch and open a real GitHub PR. Prose claims of completion are not accepted.");
+    }
   }
 
   return {

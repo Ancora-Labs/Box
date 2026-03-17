@@ -258,10 +258,23 @@ async function mosesDecideNextActions(config, jesusDirective, trumpPlans, sessio
     .map(([kind, w]) => `  - "${w.name}" (kind: ${kind})`)
     .join("\n");
 
-  const trumpPlansSummary = trumpPlans?.plans
-    ? trumpPlans.plans.slice(0, 10).map((p, i) =>
-        `  ${i + 1}. [P${p.priority}] ${p.role}: ${p.task}`
-      ).join("\n")
+  // Pass FULL Trump plans to Moses — not truncated summaries.
+  // Moses must relay the complete plan to each worker so they have a detailed checklist.
+  const trumpPlansFull = trumpPlans?.plans
+    ? trumpPlans.plans.slice(0, 10).map((p, i) => {
+        const substeps = Array.isArray(p.substeps) ? p.substeps.map((s, j) => `    ${j + 1}. ${s}`).join("\n") : "";
+        const verification = Array.isArray(p.verification) ? p.verification.map((v, j) => `    ${j + 1}. ${v}`).join("\n") : "";
+        return [
+          `### PLAN ${i + 1} [Priority ${p.priority}] — ${p.role} (${p.kind || "general"})`,
+          `Task: ${p.task}`,
+          p.context ? `Context:\n${p.context}` : "",
+          substeps ? `Substeps:\n${substeps}` : "",
+          verification ? `Verification:\n${verification}` : "",
+          p.dependsOn ? `Depends on: ${Array.isArray(p.dependsOn) ? p.dependsOn.join(", ") : p.dependsOn}` : "",
+          p.preparesFor ? `Prepares for: ${Array.isArray(p.preparesFor) ? p.preparesFor.join(", ") : p.preparesFor}` : "",
+          p.estimatedComplexity ? `Complexity: ${p.estimatedComplexity}` : ""
+        ].filter(Boolean).join("\n");
+      }).join("\n\n")
     : "  No Trump analysis available";
   const trumpExecutionStrategy = formatTrumpExecutionStrategy(trumpPlans, config);
 
@@ -289,10 +302,17 @@ Priorities: ${(jesusDirective?.priorities || []).join(", ") || "none specified"}
 Jesus's work items:
 ${(jesusDirective?.workItems || []).map((w, i) => `  ${i+1}. [${w.taskKind || "task"}] P${w.priority || "?"}: ${w.task}`).join("\n") || "  none"}
 
-## TRUMP'S PLANS
-${trumpPlans?.analysis ? `Analysis: ${String(trumpPlans.analysis).slice(0, 500)}` : "No Trump analysis available"}
-Plans:
-${trumpPlansSummary}
+## TRUMP'S FULL ANALYSIS
+${trumpPlans?.analysis ? `Analysis: ${String(trumpPlans.analysis).slice(0, 2000)}` : "No Trump analysis available"}
+${trumpPlans?.strategicNarrative ? `\nStrategic Narrative: ${String(trumpPlans.strategicNarrative).slice(0, 3000)}` : ""}
+
+## TRUMP'S DETAILED PLANS — PASS THESE TO WORKERS
+IMPORTANT: Each plan below contains a complete implementation checklist that Trump prepared.
+When you dispatch a worker, you MUST include the FULL plan text (task + context + substeps + verification) in the worker's task field.
+Do NOT summarize or compress Trump's plans. The worker needs every detail to work autonomously in a single request.
+Copy-paste the relevant plan section into each worker's "task" field verbatim. Workers work best with exhaustive checklists.
+
+${trumpPlansFull}
 
 ## TRUMP EXECUTION STRATEGY
 ${trumpExecutionStrategy}
@@ -300,6 +320,7 @@ ${trumpExecutionStrategy}
 Honor Trump's dependency order. Prefer large coherent assignments, do not wake downstream workers early, and avoid same-cycle follow-up chatter unless absolutely necessary.
 Hardening policy: bundle same-area micro-fixes into a single hardening batch PR whenever safe. Avoid opening tiny single-purpose PRs when they can be combined without increasing risk.
 Dispatch policy: avoid report-only re-dispatch if the worker already produced a recent done result with concrete evidence.
+⚠️ CRITICAL: Each worker must receive a MASSIVE task description — hundreds of words minimum — containing the full plan, all substeps, all file paths, all verification steps. Workers that receive tiny 1-line tasks produce tiny incomplete work.
 
 ## CURRENT WORKER SESSIONS
 ${sessionSummary}

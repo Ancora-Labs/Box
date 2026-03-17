@@ -322,8 +322,11 @@ async function fetchFullRepoContext(config) {
     ghGet(base)
   ]);
 
-  // Also fetch closed issues to understand project history
-  const closedIssues = await ghGet(`${base}/issues?state=closed&per_page=20&sort=updated`);
+  // Fetch closed issues AND merged PRs to understand what's already done
+  const [closedIssues, mergedPRs] = await Promise.all([
+    ghGet(`${base}/issues?state=closed&per_page=20&sort=updated`),
+    ghGet(`${base}/pulls?state=closed&per_page=30&sort=updated&direction=desc`)
+  ]);
 
   const fileTree = Array.isArray(tree?.tree)
     ? tree.tree.filter(f => f.type === "blob").map(f => f.path).slice(0, 200)
@@ -351,6 +354,13 @@ async function fetchFullRepoContext(config) {
       title: i.title,
       labels: i.labels?.map(l => l.name) || []
     })) : [],
+    mergedPullRequests: Array.isArray(mergedPRs)
+      ? mergedPRs.filter(p => p.merged_at).slice(0, 20).map(p => ({
+          number: p.number,
+          title: p.title,
+          mergedAt: p.merged_at?.slice(0, 10)
+        }))
+      : [],
     pullRequests: Array.isArray(prs) ? prs.map(p => ({
       number: p.number,
       title: p.title,
@@ -388,8 +398,36 @@ export async function runTrumpAnalysis(config, jesusDecision) {
     .map(([kind, w]) => `  - "${w.name}" (kind: ${kind}, model: ${w.model})`)
     .join("\n");
 
+  // Build completed-work summary for Trump to skip already-done tasks
+  const mergedCommitsSummary = context.recentCommits.length > 0
+    ? context.recentCommits.map(c => `  ${c.sha} (${c.date?.slice(0, 10)}) — ${c.message}`).join("\n")
+    : "  No recent commits available";
+
+  const mergedPRsSummary = (context.mergedPullRequests || []).length > 0
+    ? context.mergedPullRequests.map(p => `  PR #${p.number} [merged ${p.mergedAt}]: ${p.title}`).join("\n")
+    : "  No merged PRs found";
+
+  const closedIssueSummary = context.closedIssues.length > 0
+    ? context.closedIssues.map(i => `  #${i.number}: ${i.title}`).join("\n")
+    : "  No closed issues available";
+
   const sharedContext = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 ${context.repoInfo ? `Project: ${context.repoInfo.name} | Language: ${context.repoInfo.language} | Topics: ${context.repoInfo.topics.join(", ")}` : ""}
+
+## ⛔ ALREADY-DONE WORK — ABSOLUTE SKIP RULE
+The following PRs are MERGED and the following issues are CLOSED. This work is confirmed done.
+BEFORE planning ANY task for ANY worker, cross-reference the task against every item below.
+If the task domain, file area, or feature clearly matches a merged PR title or closed issue title, DO NOT plan it.
+Re-planning work that is already merged is a WASTE OF PREMIUM REQUESTS and will be rejected.
+
+MERGED PULL REQUESTS (confirmed done — DO NOT re-plan these domains):
+${mergedPRsSummary}
+
+RECENT MERGED COMMITS (cross-reference before planning):
+${mergedCommitsSummary}
+
+CLOSED ISSUES (already resolved — do not open tasks for these):
+${closedIssueSummary}
 
 ## WHY JESUS CALLED YOU
 ${jesusDecision?.trumpReason || "Full strategic analysis required — project needs comprehensive scan"}
@@ -416,12 +454,6 @@ ${context.issues.length > 0 ? context.issues.map(i => `  #${i.number} [${i.label
 
 ## OPEN PULL REQUESTS (${context.pullRequests.length})
 ${context.pullRequests.length > 0 ? context.pullRequests.map(p => `  #${p.number} [${p.draft ? "DRAFT" : "ready"}]: ${p.title}`).join("\n") : "No open PRs"}
-
-## RECENT COMMITS
-${context.recentCommits.map(c => `  ${c.sha} ${c.date?.slice(0, 10)} — ${c.message} (${c.author})`).join("\n")}
-
-## RECENTLY CLOSED ISSUES
-${context.closedIssues.map(i => `  #${i.number}: ${i.title}`).join("\n")}
 
 ## AVAILABLE WORKERS
 ${workersList}
@@ -501,7 +533,10 @@ IMPORTANT CONSTRAINTS:
   Rules: count 1 premium request per worker dispatch. Include validation/retry cycles in the estimate. The hardCapTotal is what the system enforces — set it conservatively.
 - Include a \`productionReadinessCoverage\` array that states for each relevant production domain whether it is adequate, missing, or not applicable, with evidence-based justification.
 - Premium request estimates must reflect likely worker activations and validation cycles, not arbitrary round numbers.
-- Workers must receive large, complete task packets. Each worker must do substantial production-quality work (hundreds to thousands of lines) in a single request. Never assign trivial 10-line tasks.`;
+- Workers must receive large, complete task packets. Each worker must do substantial production-quality work (hundreds to thousands of lines) in a single request. Never assign trivial 10-line tasks.
+- CRITICAL: The \"context\" field in each plan is what the worker will literally receive as their task description. Write it as an exhaustive implementation checklist: every file to modify, every function to add/change, every edge case to handle, every test to write. The worker will use this as their reference and checklist — they will work through it item by item. Make it EXTREMELY detailed (500-2000 words per worker plan). The more detail here, the higher quality the worker output.
+- Include in each plan's context: the EXACT current state of the code (from the snapshot), what's wrong with it, what the fix should be, which files to create/modify, which patterns to follow from the existing codebase, what the verification steps are.
+- Think of each plan's context as a senior engineer's handoff document: if a new hire received this, they could execute perfectly without asking a single question.`;
 
   chatLog(stateDir, trumpName, "Calling AI for deep repository analysis (this may take a while)...");
   const aiResult = await callCopilotAgent(command, "trump", contextPrompt);

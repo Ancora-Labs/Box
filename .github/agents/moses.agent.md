@@ -95,9 +95,11 @@ Think through your coordination strategy first in plain English. Then:
     {
       "role": "King David",
       "action": "assign_new | continue | complete | skip",
-      "task": "Outcome-oriented task — worker must be able to start immediately with no questions",
+      "task": "Outcome-oriented task — worker must be able to start immediately with no questions. CRITICAL: This MUST be the full Trump plan for this worker including all substeps, file paths, verification steps, and context. Do NOT summarize. Workers work from this text as their implementation checklist.",
       "context": "File paths, issue numbers, background, constraints, dependencies, expected deliverable, and anti-goals — but do not micromanage the exact method unless safety requires it",
       "taskKind": "implementation | scan | test | qa | security | devops | refactor | analysis",
+      "estimatedComplexity": "low | medium | high | critical | massive",
+      "estimatedLines": 0,
       "isFollowUp": false,
       "previousResult": "Worker's last output summary if this is a follow-up"
     }

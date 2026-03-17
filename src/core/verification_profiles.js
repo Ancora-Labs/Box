@@ -26,11 +26,12 @@ const PROFILES = {
       responsive: "required",
       api:        "exempt",
       edgeCases:  "required",
-      security:   "optional"
+      security:   "optional",
+      prUrl:      "required"   // must open a real PR — generic for all implementation roles
     },
     responsiveRequired: true,
     minViewports: 5,
-    description: "Must verify build, responsive matrix (≥5 viewports), and edge cases."
+    description: "Must verify build, responsive matrix (≥5 viewports), edge cases, and open a real PR."
   },
   backend: {
     kind: "backend",
@@ -41,11 +42,12 @@ const PROFILES = {
       responsive: "exempt",
       api:        "optional",
       edgeCases:  "required",
-      security:   "optional"
+      security:   "optional",
+      prUrl:      "required"
     },
     responsiveRequired: false,
     minViewports: 0,
-    description: "Must verify build, tests, and edge cases."
+    description: "Must verify build, tests, edge cases, and open a real PR."
   },
   api: {
     kind: "api",
@@ -56,11 +58,12 @@ const PROFILES = {
       responsive: "exempt",
       api:        "required",
       edgeCases:  "required",
-      security:   "optional"
+      security:   "optional",
+      prUrl:      "required"
     },
     responsiveRequired: false,
     minViewports: 0,
-    description: "Must verify build, tests, API contract, and edge cases."
+    description: "Must verify build, tests, API contract, edge cases, and open a real PR."
   },
   integration: {
     kind: "integration",
@@ -101,11 +104,12 @@ const PROFILES = {
       responsive: "optional",
       api:        "optional",
       edgeCases:  "required",
-      security:   "optional"
+      security:   "optional",
+      prUrl:      "required"   // must open a real PR
     },
     responsiveRequired: false,
     minViewports: 0,
-    description: "Must verify build, tests, and edge cases. Responsive optional."
+    description: "Must verify build, tests, edge cases, and open a real PR."
   },
   security: {
     kind: "security",
@@ -116,11 +120,12 @@ const PROFILES = {
       responsive: "exempt",
       api:        "optional",
       edgeCases:  "required",
-      security:   "required"
+      security:   "required",
+      prUrl:      "required"
     },
     responsiveRequired: false,
     minViewports: 0,
-    description: "Must verify build, tests, edge cases, and security audit."
+    description: "Must verify build, tests, edge cases, security audit, and open a real PR."
   },
   devops: {
     kind: "devops",
@@ -131,11 +136,12 @@ const PROFILES = {
       responsive: "exempt",
       api:        "exempt",
       edgeCases:  "optional",
-      security:   "optional"
+      security:   "optional",
+      prUrl:      "required"
     },
     responsiveRequired: false,
     minViewports: 0,
-    description: "Must verify build passes. Tests and edge cases optional."
+    description: "Must verify build passes and open a real PR."
   },
   scanA: {
     kind: "scanA",
@@ -230,10 +236,20 @@ export function buildVerificationChecklist(workerKind) {
   }
 
   lines.push("");
-  lines.push("At the END of your response, you MUST include:");
+  lines.push("At the END of your response, you MUST include ALL of the following:");
   lines.push("VERIFICATION_REPORT: BUILD=<pass|fail|n/a>; TESTS=<pass|fail|n/a>; RESPONSIVE=<pass|fail|n/a>; API=<pass|fail|n/a>; EDGE_CASES=<pass|fail|n/a>; SECURITY=<pass|fail|n/a>");
+
+  const needsPrUrl = profile.evidence?.prUrl === "required";
+  if (needsPrUrl) {
+    lines.push("BOX_PR_URL=<https://github.com/...> (REQUIRED — you must push a branch and open a REAL PR. No PR URL = not done.)");
+  }
+
   lines.push("If any REQUIRED field is 'fail', you MUST fix the issue before reporting done. Do not defer known defects.");
   lines.push("If any REQUIRED field is missing or 'n/a', your task will be returned for rework.");
+  lines.push("");
+  lines.push("⚠️ CRITICAL: Do NOT claim BOX_STATUS=done if you did not make real file changes and open a real PR.");
+  lines.push("Saying 'I implemented X' or 'I fixed Y' in prose is NOT evidence. The gate checks BOX_PR_URL and VERIFICATION_REPORT fields.");
+  lines.push("If the task was ALREADY DONE in a previous wave (merged PR exists), report BOX_STATUS=skipped with BOX_SKIP_REASON=already-merged.");
 
   return lines.join("\n");
 }
