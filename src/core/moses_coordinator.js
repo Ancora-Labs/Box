@@ -107,10 +107,9 @@ function validateTrumpContract(trumpPlans) {
 }
 
 function toSessionStatusAfterResult(resultStatus) {
-  const normalized = String(resultStatus || "").toLowerCase();
-  if (normalized === "error") return "error";
   // A worker call is synchronous from Moses' perspective. Once a result is
-  // returned (done/partial/blocked), that worker is no longer actively running.
+  // returned (done/partial/blocked/error/timeout), that worker is no longer
+  // actively running and should be available for re-dispatch.
   return "idle";
 }
 
