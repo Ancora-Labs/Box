@@ -312,7 +312,9 @@ async function mainLoop(config) {
         await runMosesCycle(config, jesusDirective, trumpAnalysis);
         await waitForWorkersAndFinalize(config);
       } catch (err) {
-        warn(`[orchestrator] Moses continuation error: ${String(err?.message || err)}`);
+        const msg = String(err?.message || err).slice(0, 200);
+        warn(`[orchestrator] Moses continuation error: ${msg}`);
+        await appendProgress(config, `[LOOP][ERROR] Moses continuation failed: ${msg}`);
       }
       await sleep(RE_EVAL_SLEEP_MS);
     } else {
