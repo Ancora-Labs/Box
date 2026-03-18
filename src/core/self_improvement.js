@@ -108,6 +108,20 @@ async function analyzeWithAI(config, outcomes, knowledgeMemory) {
   const command = config.env?.copilotCliCommand || "copilot";
   const previousLessons = (knowledgeMemory.lessons || []).slice(-5)
     .map(l => `- [${l.source}] ${l.lesson}`).join("\n") || "None yet.";
+  const previousGaps = (knowledgeMemory.capabilityGaps || []).slice(-5)
+    .map(g => `- [${g.severity}] ${g.gap} → ${g.proposedFix || "no fix proposed"}`).join("\n") || "None yet.";
+
+  // Load health audit findings if available
+  const stateDir = config.paths?.stateDir || "state";
+  let healthAuditSection = "";
+  try {
+    const auditData = JSON.parse(
+      await fs.readFile(path.join(stateDir, "health_audit_findings.json"), "utf8")
+    );
+    if (Array.isArray(auditData?.findings) && auditData.findings.length > 0) {
+      healthAuditSection = `\n## JESUS HEALTH AUDIT FINDINGS (hierarchical detection)\n${JSON.stringify(auditData.findings, null, 2)}\nAnalyze these findings — they represent issues that WORKERS and MOSES missed but JESUS caught.\nFor each finding, determine if the system is MISSING A CAPABILITY that caused the gap.\n`;
+    }
+  } catch { /* no audit data */ }
 
   const prompt = `You are the BOX self-improvement analyzer. Your job is to analyze the results of a completed
 automation cycle and produce actionable improvements for the next cycle.
@@ -117,6 +131,10 @@ ${JSON.stringify(outcomes, null, 2)}
 
 ## PREVIOUS LESSONS LEARNED
 ${previousLessons}
+
+## PREVIOUSLY DETECTED CAPABILITY GAPS
+${previousGaps}
+${healthAuditSection}
 
 ## ANALYSIS REQUIREMENTS
 Analyze the cycle outcomes and produce a JSON response with these fields:
@@ -140,6 +158,20 @@ Analyze the cycle outcomes and produce a JSON response with these fields:
 5. "systemHealthScore" — Number 0-100 representing overall cycle health.
 
 6. "nextCyclePriorities" — Array of strings describing what the next cycle should focus on.
+
+7. "capabilityGaps" — CRITICAL: Array of objects describing what the system was STRUCTURALLY MISSING.
+   Each object: { "gap": string, "severity": "critical"|"important"|"minor", "capability": string, "proposedFix": string, "appliesToAllRepos": boolean }
+   
+   Examples of capability gaps:
+   - "Workers had no prompt for managing GitHub Actions variables" → proposedFix: "Add GitHub variable management instructions to worker context"
+   - "System did not detect stale branches after PR merge" → proposedFix: "Add post-merge branch cleanup to orchestrator"
+   - "No worker was assigned GitHub repo settings (branch protection)" → proposedFix: "Add repo-settings task to Noah's capabilities"
+   - "Workers couldn't fix CI because they didn't know the failing test" → proposedFix: "Inject CI failure logs into worker context"
+   
+   IMPORTANT: Think about what went WRONG or what was MISSED in this cycle.
+   What problem existed that NO part of the system (workers, Moses, Trump, Jesus) addressed?
+   What capability would have prevented the issue?
+   Would this gap appear in OTHER repositories too? Set appliesToAllRepos=true if so.
 
 Respond with ONLY valid JSON. No markdown, no explanation before or after.`;
 
@@ -285,6 +317,27 @@ export async function runSelfImprovementCycle(config) {
     knowledgeMemory.promptHints = analysis.promptHints;
   }
 
+  // Store capability gaps — these feed back into Jesus's health audit
+  const newGaps = Array.isArray(analysis.capabilityGaps) ? analysis.capabilityGaps : [];
+  if (newGaps.length > 0) {
+    if (!Array.isArray(knowledgeMemory.capabilityGaps)) knowledgeMemory.capabilityGaps = [];
+    for (const gap of newGaps) {
+      gap.detectedAt = new Date().toISOString();
+      // Avoid duplicate gaps
+      const isDuplicate = knowledgeMemory.capabilityGaps.some(
+        existing => existing.gap === gap.gap
+      );
+      if (!isDuplicate) {
+        knowledgeMemory.capabilityGaps.push(gap);
+      }
+    }
+    // Cap capability gaps
+    if (knowledgeMemory.capabilityGaps.length > 50) {
+      knowledgeMemory.capabilityGaps = knowledgeMemory.capabilityGaps.slice(-50);
+    }
+    await appendProgress(config, `[SELF-IMPROVEMENT] ${newGaps.length} capability gap(s) detected: ${newGaps.map(g => g.gap).join("; ").slice(0, 300)}`);
+  }
+
   await saveKnowledgeMemory(stateDir, knowledgeMemory);
 
   // 5. Apply safe config suggestions
@@ -314,9 +367,11 @@ export async function runSelfImprovementCycle(config) {
     analysis: {
       systemHealthScore: analysis.systemHealthScore || 0,
       lessonsCount: newLessons.length,
+      capabilityGapsCount: newGaps.length,
       configChangesApplied: appliedChanges.length,
       nextCyclePriorities: analysis.nextCyclePriorities || [],
-      workerFeedback: analysis.workerFeedback || []
+      workerFeedback: analysis.workerFeedback || [],
+      capabilityGaps: newGaps
     },
     appliedChanges
   };

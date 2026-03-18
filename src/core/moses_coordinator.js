@@ -106,7 +106,7 @@ function validateTrumpContract(trumpPlans) {
   };
 }
 
-function toSessionStatusAfterResult(resultStatus) {
+function toSessionStatusAfterResult(_resultStatus) {
   // A worker call is synchronous from Moses' perspective. Once a result is
   // returned (done/partial/blocked/error/timeout), that worker is no longer
   // actively running and should be available for re-dispatch.
@@ -764,6 +764,61 @@ export async function runMosesCycle(config, jesusDirective, trumpPlans) {
   }
 
   // Save final coordination report
+  // ── Post-Work Verification — catch what workers missed ─────────────────
+  const postWorkFindings = [];
+  // Check: did any worker report error/blocked status?
+  const errorWorkers = workerResults.filter(r => r.status === "error" || r.status === "blocked");
+  if (errorWorkers.length > 0) {
+    for (const ew of errorWorkers) {
+      postWorkFindings.push({
+        area: "worker-failure",
+        severity: "important",
+        finding: `${ew.role} ended with status=${ew.status}: ${String(ew.summary || "").slice(0, 200)}`,
+        suggestion: "Schedule retry with different approach or escalate to Jesus"
+      });
+    }
+  }
+
+  // Check: are there incomplete waves that should have been done this cycle?
+  const allWaves = Array.isArray(executionStrategy?.waves) ? executionStrategy.waves : [];
+  const currentWaveIds = filteredInstructions.map(i => i.role);
+  for (const wave of allWaves) {
+    const waveWorkers = Array.isArray(wave.workers) ? wave.workers : [];
+    const dispatched = waveWorkers.filter(w => currentWaveIds.includes(w));
+    if (dispatched.length > 0) {
+      const done = dispatched.filter(w =>
+        workerResults.some(r => r.role === w && (r.status === "done" || r.status === "partial"))
+      );
+      if (done.length < dispatched.length) {
+        const missing = dispatched.filter(w => !done.includes(w));
+        postWorkFindings.push({
+          area: "wave-incomplete",
+          severity: "warning",
+          finding: `Wave ${wave.id}: ${missing.join(", ")} did not complete successfully`,
+          suggestion: `Re-dispatch ${missing.join(", ")} in next cycle`
+        });
+      }
+    }
+  }
+
+  // Check: are worker PRs still open (not merged)?
+  const workerPRs = Object.values(sessions)
+    .flatMap(s => Array.isArray(s.createdPRs) ? s.createdPRs : [])
+    .filter(Boolean);
+  if (workerPRs.length > 0) {
+    postWorkFindings.push({
+      area: "pr-status",
+      severity: "info",
+      finding: `${workerPRs.length} worker PR(s) created — ensure they are reviewed and merged`,
+      suggestion: "Workers should self-merge when CI is green; if not, follow up next cycle"
+    });
+  }
+
+  if (postWorkFindings.length > 0) {
+    chatLog(stateDir, mosesName, `Post-work verification: ${postWorkFindings.length} finding(s)`);
+    await appendProgress(config, `[MOSES][VERIFY] Post-work: ${postWorkFindings.length} finding(s) — ${postWorkFindings.filter(f => f.severity === "important").length} important`);
+  }
+
   const coordination = {
     summary: mosesPlan.summary,
     statusReport: mosesPlan.statusReport,
@@ -771,6 +826,7 @@ export async function runMosesCycle(config, jesusDirective, trumpPlans) {
     executionStrategy: activeTrumpPlans?.executionStrategy || null,
     appliedDispatchCap: executionStrategy.dispatchCap,
     workerResults,
+    postWorkFindings,
     activeSessions: Object.keys(sessions).length,
     coordinatedAt: new Date().toISOString(),
     jesusDecision: jesusDirective?.decision,

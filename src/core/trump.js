@@ -119,6 +119,280 @@ function inferLanguage(filePath) {
   return map[ext] || "text";
 }
 
+// ── Project Type Classification ────────────────────────────────────────────
+
+function classifyProjectType(repoInfo, fileTree, packageJson) {
+  const signals = {
+    type: "generic",
+    confidence: "low",
+    indicators: []
+  };
+
+  const files = (fileTree || []).map(f => f.toLowerCase());
+  const deps = Object.keys(packageJson?.dependencies || {}).concat(
+    Object.keys(packageJson?.devDependencies || {})
+  ).map(d => d.toLowerCase());
+  const topics = (repoInfo?.topics || []).map(t => t.toLowerCase());
+  const description = String(repoInfo?.description || "").toLowerCase();
+  const _language = String(repoInfo?.language || "").toLowerCase();
+
+  const scores = {
+    fintech: 0,
+    ecommerce: 0,
+    saas: 0,
+    blog: 0,
+    portfolio: 0,
+    dashboard: 0,
+    api: 0,
+    mobile: 0,
+    "real-time": 0,
+    "data-pipeline": 0
+  };
+
+  // Fintech signals
+  const fintechDeps = ["stripe", "@stripe/stripe-js", "plaid", "paypal", "braintree", "square", "adyen"];
+  const fintechKeywords = ["payment", "fintech", "banking", "transaction", "wallet", "invoice", "billing", "subscription"];
+  for (const d of deps) { if (fintechDeps.some(fd => d.includes(fd))) scores.fintech += 3; }
+  for (const k of fintechKeywords) { if (description.includes(k) || topics.includes(k)) scores.fintech += 2; }
+  if (files.some(f => f.includes("payment") || f.includes("checkout") || f.includes("billing"))) scores.fintech += 2;
+
+  // E-commerce signals
+  const ecomDeps = ["shopify", "snipcart", "medusa", "saleor", "commerce", "cart"];
+  const ecomKeywords = ["ecommerce", "e-commerce", "shop", "store", "product", "cart", "catalog"];
+  for (const d of deps) { if (ecomDeps.some(ed => d.includes(ed))) scores.ecommerce += 3; }
+  for (const k of ecomKeywords) { if (description.includes(k) || topics.includes(k)) scores.ecommerce += 2; }
+  if (files.some(f => f.includes("product") || f.includes("cart") || f.includes("catalog"))) scores.ecommerce += 2;
+
+  // SaaS signals
+  const saasDeps = ["next-auth", "@auth/core", "clerk", "supabase", "firebase", "prisma", "@prisma/client"];
+  const saasKeywords = ["saas", "platform", "dashboard", "multi-tenant", "subscription", "api"];
+  for (const d of deps) { if (saasDeps.some(sd => d.includes(sd))) scores.saas += 2; }
+  for (const k of saasKeywords) { if (description.includes(k) || topics.includes(k)) scores.saas += 2; }
+  if (files.some(f => f.includes("api/") || f.includes("auth") || f.includes("middleware"))) scores.saas += 1;
+
+  // Blog / Content site signals
+  const blogDeps = ["contentlayer", "mdx", "@next/mdx", "sanity", "contentful", "strapi"];
+  const blogKeywords = ["blog", "content", "article", "post", "cms", "editorial"];
+  for (const d of deps) { if (blogDeps.some(bd => d.includes(bd))) scores.blog += 3; }
+  for (const k of blogKeywords) { if (description.includes(k) || topics.includes(k)) scores.blog += 2; }
+
+  // Portfolio / Landing page signals
+  const portfolioKeywords = ["portfolio", "personal", "landing", "resume", "cv", "showcase"];
+  for (const k of portfolioKeywords) { if (description.includes(k) || topics.includes(k)) scores.portfolio += 3; }
+  if (files.length < 30 && !files.some(f => f.includes("api/"))) scores.portfolio += 1;
+
+  // Dashboard / Admin signals
+  const dashDeps = ["recharts", "chart.js", "d3", "victory", "ag-grid", "tanstack"];
+  for (const d of deps) { if (dashDeps.some(dd => d.includes(dd))) scores.dashboard += 2; }
+  if (files.some(f => f.includes("dashboard") || f.includes("admin") || f.includes("analytics"))) scores.dashboard += 2;
+
+  // API-only signals
+  const apiDeps = ["express", "fastify", "hono", "koa", "nest"];
+  for (const d of deps) { if (apiDeps.some(ad => d.includes(ad))) scores.api += 3; }
+  if (!files.some(f => f.includes("components/") || f.includes("pages/") || f.includes("app/"))) scores.api += 2;
+
+  // Real-time signals
+  const rtDeps = ["socket.io", "ws", "pusher", "ably", "livekit"];
+  for (const d of deps) { if (rtDeps.some(rd => d.includes(rd))) scores["real-time"] += 3; }
+
+  // Mobile signals
+  const mobileDeps = ["react-native", "expo", "capacitor", "ionic"];
+  for (const d of deps) { if (mobileDeps.some(md => d.includes(md))) scores.mobile += 5; }
+
+  // Find the top type
+  const sorted = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const [topType, topScore] = sorted[0];
+  const [secondType, secondScore] = sorted[1] || ["generic", 0];
+
+  if (topScore >= 4) {
+    signals.type = topType;
+    signals.confidence = topScore >= 7 ? "high" : "medium";
+    signals.indicators.push(`${topType}: score ${topScore}`);
+    if (secondScore >= 3) {
+      signals.secondaryType = secondType;
+      signals.indicators.push(`secondary: ${secondType} (score ${secondScore})`);
+    }
+  } else if (topScore >= 2) {
+    signals.type = topType;
+    signals.confidence = "low";
+    signals.indicators.push(`${topType}: score ${topScore} (low confidence)`);
+  }
+
+  return signals;
+}
+
+function determineComplexityCeiling(projectType, secondaryType) {
+  // Maps project type to production readiness requirements with priority levels
+  // "critical" = must have, "important" = should have, "optional" = nice to have
+  const ceilings = {
+    fintech: {
+      description: "Financial technology — handles money, requires bank-grade security and reliability",
+      dimensions: {
+        security: { priority: "critical", scope: "PCI-DSS awareness, input validation on ALL endpoints, CSRF+XSS protection, rate limiting, fraud detection signals, auth token rotation, secrets audit, dependency vulnerability scan" },
+        reliability: { priority: "critical", scope: "Error boundaries, retry+circuit breaker on payment flows, idempotent transactions, graceful degradation, health checks" },
+        testing: { priority: "critical", scope: "100% business logic unit tests, integration tests on payment/transaction flows, E2E for critical money paths" },
+        performance: { priority: "important", scope: "Sub-200ms API responses, optimized DB queries, caching for read-heavy paths" },
+        observability: { priority: "critical", scope: "Structured logging on all transactions, error tracking (Sentry), audit trail for financial operations" },
+        "ci-cd": { priority: "important", scope: "Full CI with lint+type-check+test, staging environment, rollback strategy" },
+        "ui-ux": { priority: "important", scope: "Responsive design, clear error states, loading states, form validation" },
+        documentation: { priority: "important", scope: "API docs, architecture overview, deployment runbook" },
+        "github-settings": { priority: "important", scope: "Branch protection, required reviews, auto-delete branches, dependabot" },
+        "new-features": { priority: "important", scope: "Complete payment flows, proper error handling UI, email notifications" }
+      }
+    },
+    ecommerce: {
+      description: "E-commerce — product catalog, cart, checkout, order management",
+      dimensions: {
+        security: { priority: "critical", scope: "Payment input validation, CSRF, XSS, rate limiting on checkout, auth, secrets management" },
+        "ui-ux": { priority: "critical", scope: "Full responsive design, product pages, cart UX, checkout flow, empty/loading/error states, accessibility WCAG 2.1 AA" },
+        performance: { priority: "critical", scope: "Image optimization, lazy loading, CDN, Core Web Vitals targets, SSR/SSG for product pages" },
+        testing: { priority: "important", scope: "Unit tests for cart/price logic, integration tests for checkout, E2E for purchase flow" },
+        reliability: { priority: "important", scope: "Error boundaries, retry on payment, inventory consistency, graceful degradation" },
+        "ci-cd": { priority: "important", scope: "CI pipeline, build optimization, staging, SEO validation" },
+        observability: { priority: "important", scope: "Error tracking, analytics, conversion tracking" },
+        documentation: { priority: "optional", scope: "README, API docs if headless" },
+        "github-settings": { priority: "optional", scope: "Branch protection, auto-delete branches" },
+        "new-features": { priority: "critical", scope: "Complete product pages, cart, checkout, search/filter, order confirmation" }
+      }
+    },
+    saas: {
+      description: "SaaS platform — multi-user, auth, API, dashboard",
+      dimensions: {
+        security: { priority: "critical", scope: "Auth/authz, session management, RBAC, input validation, CSRF, rate limiting, API key management" },
+        reliability: { priority: "critical", scope: "Error boundaries, graceful degradation, retry logic, health checks, data backup strategy" },
+        testing: { priority: "critical", scope: "Unit tests for business logic, integration tests for API, E2E for auth+core flows" },
+        performance: { priority: "important", scope: "API response times, query optimization, caching, pagination" },
+        "ui-ux": { priority: "important", scope: "Responsive dashboard, loading/error states, accessibility, onboarding flow" },
+        observability: { priority: "important", scope: "Structured logging, error tracking, uptime monitoring, usage analytics" },
+        "ci-cd": { priority: "important", scope: "Full CI, staging environment, database migrations, rollback" },
+        documentation: { priority: "important", scope: "API documentation, architecture docs, onboarding guide" },
+        "github-settings": { priority: "important", scope: "Branch protection, required reviews, dependabot, code scanning" },
+        "new-features": { priority: "important", scope: "Complete CRUD flows, user management, settings, notifications" }
+      }
+    },
+    blog: {
+      description: "Blog / Content site — articles, SEO, static generation",
+      dimensions: {
+        performance: { priority: "critical", scope: "SSG/ISR, image optimization, Core Web Vitals, lazy loading, minimal JS" },
+        "ui-ux": { priority: "critical", scope: "Responsive design, reading experience, typography, dark mode, accessibility" },
+        "new-features": { priority: "important", scope: "SEO meta tags, sitemap, RSS feed, social sharing, search" },
+        testing: { priority: "optional", scope: "Basic component tests, accessibility tests" },
+        security: { priority: "optional", scope: "Content sanitization if user input exists, security headers" },
+        reliability: { priority: "optional", scope: "Error boundaries, 404 handling" },
+        "ci-cd": { priority: "optional", scope: "Build + deploy pipeline, preview environments" },
+        observability: { priority: "optional", scope: "Analytics, basic error tracking" },
+        documentation: { priority: "optional", scope: "README with setup instructions" },
+        "github-settings": { priority: "optional", scope: "Auto-delete branches" }
+      }
+    },
+    portfolio: {
+      description: "Portfolio / Landing page — showcase, minimal complexity",
+      dimensions: {
+        "ui-ux": { priority: "critical", scope: "Responsive design, animations, visual polish, accessibility" },
+        performance: { priority: "critical", scope: "Fast load times, image optimization, Core Web Vitals" },
+        "new-features": { priority: "important", scope: "Contact form, SEO, social links, project showcase" },
+        testing: { priority: "optional", scope: "Visual regression tests if complex animations" },
+        security: { priority: "optional", scope: "Form input validation if contact form exists" },
+        reliability: { priority: "optional", scope: "Error boundaries" },
+        "ci-cd": { priority: "optional", scope: "Deploy pipeline" },
+        observability: { priority: "optional", scope: "Analytics" },
+        documentation: { priority: "optional", scope: "README" },
+        "github-settings": { priority: "optional", scope: "Auto-delete branches" }
+      }
+    },
+    dashboard: {
+      description: "Dashboard / Admin panel — data visualization, CRUD operations",
+      dimensions: {
+        "ui-ux": { priority: "critical", scope: "Responsive tables/charts, loading states, filters, pagination, accessibility" },
+        performance: { priority: "critical", scope: "Virtualized lists, chart rendering optimization, data caching, lazy loading" },
+        security: { priority: "critical", scope: "Auth/authz, RBAC, input validation, CSRF, session management" },
+        testing: { priority: "important", scope: "Unit tests for data transformations, integration tests for API calls, E2E for critical admin flows" },
+        reliability: { priority: "important", scope: "Error boundaries, retry on API calls, graceful degradation" },
+        "ci-cd": { priority: "important", scope: "CI pipeline, type checking, staging" },
+        observability: { priority: "important", scope: "Error tracking, usage analytics" },
+        documentation: { priority: "optional", scope: "API docs, data model documentation" },
+        "github-settings": { priority: "optional", scope: "Branch protection" },
+        "new-features": { priority: "important", scope: "Export functionality, advanced filters, bulk operations" }
+      }
+    },
+    api: {
+      description: "API service — backend-only, no UI",
+      dimensions: {
+        security: { priority: "critical", scope: "Input validation on ALL endpoints, auth/authz, rate limiting, CORS, injection prevention, API key management" },
+        testing: { priority: "critical", scope: "Unit tests for business logic, integration tests for all endpoints, contract tests" },
+        reliability: { priority: "critical", scope: "Error handling, retry logic, circuit breakers, health checks, graceful shutdown" },
+        performance: { priority: "important", scope: "Response time targets, query optimization, connection pooling, caching" },
+        observability: { priority: "critical", scope: "Structured logging, request tracing, error tracking, metrics" },
+        "ci-cd": { priority: "important", scope: "Full CI, database migrations, staging, rollback strategy" },
+        documentation: { priority: "critical", scope: "OpenAPI/Swagger docs, architecture docs, deployment guide" },
+        "github-settings": { priority: "important", scope: "Branch protection, required reviews, dependabot" },
+        "ui-ux": { priority: "optional", scope: "N/A for API-only" },
+        "new-features": { priority: "important", scope: "Complete CRUD, pagination, filtering, versioning" }
+      }
+    },
+    "real-time": {
+      description: "Real-time application — WebSocket/streaming, live updates",
+      dimensions: {
+        reliability: { priority: "critical", scope: "Connection recovery, message ordering, backpressure handling, graceful reconnection" },
+        performance: { priority: "critical", scope: "Low-latency message delivery, efficient serialization, connection pooling" },
+        security: { priority: "critical", scope: "WebSocket auth, message validation, rate limiting per connection" },
+        testing: { priority: "important", scope: "Connection lifecycle tests, message ordering tests, load tests" },
+        observability: { priority: "important", scope: "Connection metrics, message throughput, error rates" },
+        "ci-cd": { priority: "important", scope: "CI pipeline, load testing in CI" },
+        "ui-ux": { priority: "important", scope: "Real-time UI updates, connection status indicators" },
+        documentation: { priority: "important", scope: "Protocol documentation, message format docs" },
+        "github-settings": { priority: "optional", scope: "Branch protection" },
+        "new-features": { priority: "important", scope: "Presence, typing indicators, message history" }
+      }
+    },
+    generic: {
+      description: "Generic project — apply balanced production standards",
+      dimensions: {
+        security: { priority: "important", scope: "Input validation, auth if applicable, security headers" },
+        testing: { priority: "important", scope: "Unit tests for business logic, integration tests for key flows" },
+        reliability: { priority: "important", scope: "Error handling, graceful degradation" },
+        performance: { priority: "important", scope: "Reasonable load times, optimization where needed" },
+        "ui-ux": { priority: "important", scope: "Responsive design if UI exists, accessibility basics" },
+        "ci-cd": { priority: "important", scope: "CI pipeline, automated checks" },
+        observability: { priority: "optional", scope: "Error tracking, basic logging" },
+        documentation: { priority: "important", scope: "README, setup instructions" },
+        "github-settings": { priority: "optional", scope: "Auto-delete branches, branch protection" },
+        "new-features": { priority: "important", scope: "Feature completeness based on project goals" }
+      }
+    }
+  };
+
+  const primary = ceilings[projectType] || ceilings.generic;
+
+  // If there's a secondary type, merge its critical dimensions as important
+  if (secondaryType && ceilings[secondaryType]) {
+    const secondary = ceilings[secondaryType];
+    for (const [dim, spec] of Object.entries(secondary.dimensions)) {
+      if (spec.priority === "critical" && primary.dimensions[dim]?.priority !== "critical") {
+        primary.dimensions[dim] = { ...spec, priority: "important", scope: `${spec.scope} (from ${secondaryType} secondary type)` };
+      }
+    }
+  }
+
+  return primary;
+}
+
+function formatComplexityCeiling(ceiling) {
+  const lines = [`PROJECT TYPE: ${ceiling.description}`, ""];
+  const priorityOrder = ["critical", "important", "optional"];
+  for (const priority of priorityOrder) {
+    const dims = Object.entries(ceiling.dimensions)
+      .filter(([, spec]) => spec.priority === priority);
+    if (dims.length === 0) continue;
+    lines.push(`### ${priority.toUpperCase()} DIMENSIONS:`);
+    for (const [dim, spec] of dims) {
+      lines.push(`  - **${dim}**: ${spec.scope}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 async function buildRepoSignals(localRepoDir, files) {
   const directoryCounts = new Map();
   const keywordHits = {
@@ -394,6 +668,26 @@ export async function runTrumpAnalysis(config, jesusDecision) {
   const localSnapshot = await buildLocalRepoSnapshot(config);
   const planningPolicy = buildTrumpPlanningPolicy(config);
 
+  // ── Project Type Classification & Complexity Ceiling ─────────────────────
+  // Read package.json from local snapshot for dependency analysis
+  let packageJson = {};
+  try {
+    const localDir = await resolveLocalRepoDir(config);
+    if (localDir) {
+      packageJson = JSON.parse(await fs.readFile(path.join(localDir, "package.json"), "utf8"));
+    }
+  } catch { /* no package.json available */ }
+
+  const projectClassification = classifyProjectType(context.repoInfo, context.fileTree, packageJson);
+  const complexityCeiling = determineComplexityCeiling(
+    projectClassification.type,
+    projectClassification.secondaryType
+  );
+  const ceilingText = formatComplexityCeiling(complexityCeiling);
+
+  chatLog(stateDir, trumpName, `Project classified as: ${projectClassification.type} (${projectClassification.confidence}) — ceiling applied`);
+  await appendProgress(config, `[TRUMP] Project type: ${projectClassification.type} (${projectClassification.confidence})${projectClassification.secondaryType ? ` + ${projectClassification.secondaryType}` : ""}`);
+
   const workersList = Object.entries(registry?.workers || {})
     .map(([kind, w]) => `  - "${w.name}" (kind: ${kind}, model: ${w.model})`)
     .join("\n");
@@ -425,9 +719,30 @@ export async function runTrumpAnalysis(config, jesusDecision) {
   const sharedContext = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 ${context.repoInfo ? `Project: ${context.repoInfo.name} | Language: ${context.repoInfo.language} | Topics: ${context.repoInfo.topics.join(", ")}` : ""}
 
-## YOUR MISSION — FULL PRODUCTION READINESS
-You are the deep strategic analyst for this repository. Your job is to make this project **fully production-ready**
-at a **senior engineer level**. This means you must evaluate and plan work across ALL of the following dimensions:
+## PROJECT CLASSIFICATION
+Type: ${projectClassification.type} (confidence: ${projectClassification.confidence})
+${projectClassification.secondaryType ? `Secondary type: ${projectClassification.secondaryType}` : ""}
+Indicators: ${projectClassification.indicators.join(", ") || "generic signals"}
+
+## COMPLEXITY CEILING — What a senior big-tech engineer expects for THIS project type
+${ceilingText}
+
+⚠️ THIS CEILING IS YOUR GUIDE. Do NOT blindly add everything from all 10 dimensions.
+Focus your planning on CRITICAL dimensions first, then IMPORTANT ones. OPTIONAL dimensions
+should only be addressed if the critical/important ones are already satisfactory.
+A portfolio site does NOT need the same security infrastructure as a fintech app.
+A blog does NOT need rate limiting or circuit breakers.
+Plan what THIS specific project type ACTUALLY NEEDS at production level.
+
+## YOUR MISSION — TARGETED PRODUCTION READINESS
+You are the deep strategic analyst for this repository. Your job is to make this project **production-ready**
+at a **senior engineer level** — but SCOPED to what THIS project type actually needs.
+
+The COMPLEXITY CEILING above defines your target. Plan work that hits CRITICAL dimensions fully,
+IMPORTANT dimensions substantially, and only touch OPTIONAL dimensions if everything else is solid.
+Do NOT waste worker premium requests on things this project type doesn't need.
+
+Evaluate and plan work across the following dimensions, PRIORITIZED by the complexity ceiling:
 
 ### 1. NEW FEATURES & CAPABILITIES
 - What features are missing for a complete product?
@@ -547,6 +862,12 @@ DOSSIER MODE
 
 Produce a long-form senior-staff execution dossier for this repository.
 Do not emit JSON.
+
+IMPORTANT: This project is classified as "${projectClassification.type}" (${projectClassification.confidence} confidence).
+Your analysis MUST be calibrated to this project type's complexity ceiling.
+Focus deepest analysis on CRITICAL dimensions, substantial analysis on IMPORTANT ones,
+and only brief notes on OPTIONAL dimensions. Do NOT over-engineer for the project type.
+
 Write substantial sections covering:
 1. Architecture reading and technology stack assessment
 2. FULL production readiness gap analysis across ALL 10 dimensions listed in YOUR MISSION above
@@ -689,6 +1010,17 @@ IMPORTANT CONSTRAINTS:
 
   const analysis = {
     ...aiResult.parsed,
+    projectClassification,
+    complexityCeiling: {
+      type: projectClassification.type,
+      secondaryType: projectClassification.secondaryType || null,
+      confidence: projectClassification.confidence,
+      description: complexityCeiling.description,
+      criticalDimensions: Object.entries(complexityCeiling.dimensions)
+        .filter(([, s]) => s.priority === "critical").map(([d]) => d),
+      importantDimensions: Object.entries(complexityCeiling.dimensions)
+        .filter(([, s]) => s.priority === "important").map(([d]) => d)
+    },
     dossierPath: path.join(stateDir, "trump_dossier.md"),
     analyzedAt: new Date().toISOString(),
     model: trumpModel,

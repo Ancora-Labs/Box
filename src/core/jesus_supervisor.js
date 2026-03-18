@@ -32,6 +32,150 @@ async function callCopilotAgent(command, agentSlug, contextPrompt) {
   return parseAgentOutput(stdout || stderr);
 }
 
+// ── Hierarchical System Health Audit ─────────────────────────────────────────
+// Jesus runs this audit on every cycle. It checks for structural problems that
+// workers and Moses might have missed. When gaps are found, they're injected
+// into the Jesus directive as specific remediation items AND fed to the self-
+// improvement system as capability gaps.
+
+async function runSystemHealthAudit(config, githubState, mosesCoordination, sessions) {
+  const findings = [];
+
+  // 1. CI Health — is main branch green?
+  if (githubState.latestMainCi) {
+    if (githubState.latestMainCi.conclusion !== "success") {
+      findings.push({
+        area: "ci",
+        severity: "critical",
+        finding: `CI on ${githubState.latestMainCi.branch} is ${githubState.latestMainCi.conclusion} (commit ${githubState.latestMainCi.commit})`,
+        remediation: "Dispatch a worker to fix CI immediately — broken main blocks all progress",
+        capabilityNeeded: "ci-fix"
+      });
+    }
+  } else {
+    findings.push({
+      area: "ci",
+      severity: "warning",
+      finding: "No CI runs found on default branch — CI may not be configured",
+      remediation: "Set up GitHub Actions CI workflow if missing",
+      capabilityNeeded: "ci-setup"
+    });
+  }
+
+  // 2. Failed CI runs on open PR branches
+  if (githubState.failedCiRuns.length > 0) {
+    for (const run of githubState.failedCiRuns) {
+      findings.push({
+        area: "ci",
+        severity: "important",
+        finding: `Failed CI: ${run.name} on branch ${run.branch} (${run.commit})`,
+        remediation: `Fix CI failure on ${run.branch} — this blocks PR merge`,
+        capabilityNeeded: "ci-fix"
+      });
+    }
+  }
+
+  // 3. Stale PRs — open PRs that might be abandoned or forgotten
+  if (githubState.pullRequests.length > 0) {
+    const stalePRs = githubState.pullRequests.filter(p => !p.draft);
+    if (stalePRs.length > 3) {
+      findings.push({
+        area: "github-hygiene",
+        severity: "warning",
+        finding: `${stalePRs.length} open non-draft PRs — possible stale or duplicate PRs`,
+        remediation: "Review open PRs: close duplicates, merge ready ones, or update stale ones",
+        capabilityNeeded: "pr-management"
+      });
+    }
+  }
+
+  // 4. Worker session health — detect stuck or errored workers
+  const workerIssues = [];
+  for (const [role, session] of Object.entries(sessions)) {
+    if (session?.status === "error") {
+      workerIssues.push(`${role}: errored`);
+    }
+    if (session?.status === "working") {
+      const lastActive = session.lastActiveAt ? new Date(session.lastActiveAt).getTime() : 0;
+      const minutesSinceActive = lastActive ? (Date.now() - lastActive) / 60000 : Infinity;
+      if (minutesSinceActive > 60) {
+        workerIssues.push(`${role}: stuck working for ${minutesSinceActive.toFixed(0)}m`);
+      }
+    }
+  }
+  if (workerIssues.length > 0) {
+    findings.push({
+      area: "worker-health",
+      severity: "warning",
+      finding: `Worker issues detected: ${workerIssues.join("; ")}`,
+      remediation: "Reset stuck workers, investigate error causes",
+      capabilityNeeded: "worker-recovery"
+    });
+  }
+
+  // 5. Moses coordination gaps — did Moses complete all planned waves?
+  const completedTasks = Array.isArray(mosesCoordination?.completedTasks)
+    ? mosesCoordination.completedTasks : [];
+  const executionWaves = Array.isArray(mosesCoordination?.executionStrategy?.waves)
+    ? mosesCoordination.executionStrategy.waves : [];
+  if (executionWaves.length > 0) {
+    const incompleteWaves = executionWaves.filter(w => {
+      const waveId = String(w?.id || "").trim().toLowerCase();
+      return waveId && !completedTasks.some(t => String(t).toLowerCase().includes(waveId));
+    });
+    if (incompleteWaves.length > 0) {
+      findings.push({
+        area: "execution-gaps",
+        severity: "important",
+        finding: `${incompleteWaves.length} wave(s) not yet completed: ${incompleteWaves.map(w => w.id).join(", ")}`,
+        remediation: "Continue execution of incomplete waves in next Moses cycle",
+        capabilityNeeded: "wave-continuation"
+      });
+    }
+  }
+
+  // 6. Knowledge memory — check if self-improvement detected critical issues
+  try {
+    const stateDir = config.paths?.stateDir || "state";
+    const km = await readJson(path.join(stateDir, "knowledge_memory.json"), {});
+    const criticalLessons = (km.lessons || []).filter(l => l.severity === "critical").slice(-3);
+    const capGaps = Array.isArray(km.capabilityGaps) ? km.capabilityGaps.slice(-5) : [];
+
+    if (criticalLessons.length > 0) {
+      findings.push({
+        area: "system-learning",
+        severity: "warning",
+        finding: `Self-improvement flagged ${criticalLessons.length} critical lesson(s): ${criticalLessons.map(l => l.lesson).join("; ").slice(0, 300)}`,
+        remediation: "Address critical lessons in next cycle planning",
+        capabilityNeeded: "system-improvement"
+      });
+    }
+
+    if (capGaps.length > 0) {
+      for (const gap of capGaps.slice(0, 3)) {
+        findings.push({
+          area: "capability-gap",
+          severity: gap.severity || "warning",
+          finding: `Missing capability: ${gap.gap}`,
+          remediation: gap.proposedFix || "Add missing capability to system",
+          capabilityNeeded: gap.capability || "unknown"
+        });
+      }
+    }
+  } catch { /* knowledge memory not available — no-op */ }
+
+  return findings;
+}
+
+function formatHealthAuditFindings(findings) {
+  if (findings.length === 0) return "  No structural issues detected — system is healthy.";
+
+  return findings.map((f, i) => {
+    const icon = f.severity === "critical" ? "🔴" : f.severity === "important" ? "🟡" : "🟢";
+    return `  ${i + 1}. ${icon} [${f.area}] ${f.finding}\n     → ${f.remediation}`;
+  }).join("\n");
+}
+
 // ── GitHub Intelligence ──────────────────────────────────────────────────────
 
 async function fetchGitHubState(config) {
@@ -136,6 +280,20 @@ export async function runJesusCycle(config) {
     readJson(path.join(stateDir, "worker_sessions.json"), {})
   ]);
 
+  // ── Hierarchical Health Audit — detect what lower layers missed ──────────
+  const healthFindings = await runSystemHealthAudit(config, githubState, mosesCoordination, sessions);
+  if (healthFindings.length > 0) {
+    const criticalCount = healthFindings.filter(f => f.severity === "critical").length;
+    await appendProgress(config, `[JESUS][AUDIT] ${healthFindings.length} finding(s) — ${criticalCount} critical`);
+    chatLog(stateDir, jesusName, `Health audit: ${healthFindings.length} findings (${criticalCount} critical)`);
+
+    // Persist findings for self-improvement to consume
+    await writeJson(path.join(stateDir, "health_audit_findings.json"), {
+      findings: healthFindings,
+      auditedAt: new Date().toISOString()
+    });
+  }
+
   const activeSessions = Object.keys(sessions).filter(k => sessions[k]?.status === "working").length;
   const lastCycleAt = lastDirective?.decidedAt ? new Date(lastDirective.decidedAt).toLocaleString() : "never";
   const trumpLastRunAt = trumpAnalysis?.analyzedAt ? new Date(trumpAnalysis.analyzedAt).toLocaleString() : "never";
@@ -213,6 +371,12 @@ ${mosesCoordination?.completedTasks ? `  Completed tasks: ${mosesCoordination.co
 **Trump's Last Analysis:**
 ${trumpAnalysis?.projectHealth ? `  Health: ${trumpAnalysis.projectHealth}` : "  No analysis available"}
 ${trumpAnalysis?.keyFindings ? `  Key findings: ${trumpAnalysis.keyFindings}` : ""}
+${trumpAnalysis?.projectClassification ? `  Project type: ${trumpAnalysis.projectClassification.type} (${trumpAnalysis.projectClassification.confidence})` : ""}
+
+**Hierarchical System Health Audit (detected by YOU — issues workers/Moses may have missed):**
+${formatHealthAuditFindings(healthFindings)}
+${healthFindings.filter(f => f.severity === "critical").length > 0 ? "\n⚠️ CRITICAL FINDINGS ABOVE — these MUST be addressed. Workers and Moses missed them." : ""}
+${healthFindings.filter(f => f.area === "capability-gap").length > 0 ? "\n⚠️ CAPABILITY GAPS DETECTED — the system is missing abilities that caused failures. Consider requesting Trump to plan fixes." : ""}
 
 **Available Workers:**
 ${workersList}`;
