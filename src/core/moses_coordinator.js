@@ -20,14 +20,13 @@ import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendAlert, appendProgress } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { runWorkerConversation } from "./worker_runner.js";
-import { buildAgentArgs, cleanupPromptFile, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
+import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { validateWorkerContract, decideRework } from "./verification_gate.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
-  const { args, promptFile } = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
   const result = await spawnAsync(command, args, { env: process.env });
-  cleanupPromptFile(promptFile);
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
   if (result.status !== 0) {
@@ -275,15 +274,15 @@ async function mosesDecideNextActions(config, jesusDirective, trumpPlans, sessio
   const trumpExecutionStrategy = formatTrumpExecutionStrategy(trumpPlans, config);
 
   const sessionSummary = Object.entries(sessions)
-    .map(([role, s]) => `  ${role}: status=${s.status} messages=${s.history?.length || 0} lastTask="${s.lastTask || "none"}"`)
+    .map(([role, s]) => `  ${role}: ${s.status} msgs=${s.history?.length || 0}`)
     .join("\n") || "  No active sessions";
 
   const workerResults = currentResults.length > 0
     ? currentResults.map(r => `  ${r.role}: ${r.status} — ${String(r.summary || "").slice(0, 200)}`).join("\n")
     : "  No results yet";
 
-  // Truncate Jesus thinking to keep prompt within Windows cmd-line limit
-  const jesusThinkingTruncated = String(jesusDirective?.thinking || "").slice(0, 2000);
+  // Truncate Jesus thinking aggressively to keep prompt within Windows 32KB cmd-line limit
+  const jesusThinkingTruncated = String(jesusDirective?.thinking || "").slice(0, 800);
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 
 ## JESUS'S STRATEGIC ANALYSIS (truncated)
@@ -299,7 +298,7 @@ Work items:
 ${(jesusDirective?.workItems || []).map((w, i) => `  ${i+1}. [${w.taskKind || "task"}] P${w.priority || "?"}: ${w.task}`).join("\n") || "  none"}
 
 ## TRUMP ANALYSIS SUMMARY
-${trumpPlans?.analysis ? String(trumpPlans.analysis).slice(0, 1000) : "No analysis"}
+${trumpPlans?.analysis ? String(trumpPlans.analysis).slice(0, 500) : "No analysis"}
 
 ## TRUMP PLANS (compact — full context auto-injected into workers)
 IMPORTANT: Dispatch workers by role as shown below. The full Trump plan context will be AUTOMATICALLY injected into each worker's task. You just need to specify the correct role and include the plan task + substeps.
