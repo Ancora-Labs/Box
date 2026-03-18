@@ -22,6 +22,7 @@ import { runJesusCycle } from "./jesus_supervisor.js";
 import { runTrumpAnalysis } from "./trump.js";
 import { runMosesCycle } from "./moses_coordinator.js";
 import { runSelfImprovementCycle } from "./self_improvement.js";
+import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
 import { readJson, writeJson } from "./fs_utils.js";
 
@@ -112,6 +113,8 @@ export async function runDaemon(config) {
   } else {
     // No checkpoint at all — first ever run, Jesus must initialize
     await appendProgress(liveConfig, "[STARTUP] No checkpoint found — first run, Jesus activating");
+    // Capture pre-work baseline tag before any changes (non-fatal)
+    await capturePreWorkBaseline(liveConfig);
     await runStartupCycle(liveConfig);
   }
 
@@ -466,8 +469,18 @@ async function mainLoop(config) {
         continue;
       }
 
-      // All work done — run post-completion cleanup and self-improvement, then system sleeps.
+      // All work done — run post-completion cleanup, project completion, and self-improvement.
       await postCompletionCleanup(config);
+
+      // Project completion: tag, release, and record (runs once per project)
+      const alreadyCompleted = await isProjectAlreadyCompleted(config);
+      if (!alreadyCompleted) {
+        try {
+          await runProjectCompletion(config);
+        } catch (err) {
+          warn(`[orchestrator] project completion error: ${String(err?.message || err)}`);
+        }
+      }
 
       // Run self-improvement analysis (AI-driven, reads cycle outcomes)
       try {
