@@ -24,7 +24,7 @@ const CLAUDE_RATE_LIMIT_BACKOFF_MS = Number(process.env.BOX_CLAUDE_RATE_LIMIT_BA
 const CLAUDE_COST_WINDOW_DAYS = Math.max(1, Number(process.env.BOX_CLAUDE_COST_WINDOW_DAYS || "30"));
 const CLAUDE_COST_START_AT = String(process.env.BOX_CLAUDE_COST_START_AT || "").trim();
 const CLAUDE_COST_END_AT = String(process.env.BOX_CLAUDE_COST_END_AT || "").trim();
-const GITHUB_TOKEN = process.env.GITHUB_FINEGRADED || "";
+const GITHUB_TOKEN = process.env.GITHUB_FINEGRADED || process.env.GITHUB_TOKEN || process.env.GITHUB_TOKENPERSONAL || "";
 const GITHUB_BILLING_SUMMARY_URL = process.env.BOX_GITHUB_BILLING_SUMMARY_URL
   || `https://api.github.com/users/${COPILOT_SOURCE_ACCOUNT}/settings/billing/premium_request/usage`;
 const GITHUB_API_VERSION = process.env.BOX_GITHUB_API_VERSION || "2022-11-28";
@@ -384,20 +384,40 @@ async function fetchOneTimeCopilotUsage() {
   }
 
   const { year, month } = getCurrentUtcYearMonth();
-  const url = new URL(GITHUB_BILLING_SUMMARY_URL);
+  let url;
+  try {
+    url = new URL(GITHUB_BILLING_SUMMARY_URL);
+  } catch (error) {
+    return {
+      quotaRequests: null,
+      usedRequests: null,
+      remainingRequests: null,
+      source: "github-billing-fetch-failed",
+      fetchedAt: new Date().toISOString(),
+      lastError: `github-billing-url-invalid:${String(error?.message || error)}`
+    };
+  }
   url.searchParams.set("year", String(year));
   url.searchParams.set("month", String(month));
 
-  try {
-    const response = await fetch(url.toString(), {
+  const fetchUsage = async (apiVersion) => {
+    return fetch(url.toString(), {
       method: "GET",
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
         Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "X-GitHub-Api-Version": apiVersion,
         "user-agent": "BOX/1.0"
       }
     });
+  };
+
+  try {
+    let response = await fetchUsage(GITHUB_API_VERSION);
+    // Some custom API versions can break this endpoint; retry with stable default.
+    if (!response.ok && GITHUB_API_VERSION !== "2022-11-28") {
+      response = await fetchUsage("2022-11-28");
+    }
 
     if (!response.ok) {
       return {
@@ -2675,12 +2695,7 @@ function renderHtml() {
       }
 
       var copilotRemaining = Number(data.usage.copilot.monthly.remainingRequests || 0);
-      var copilotSource = String(data.usage.copilot.monthly.source || '');
-      if (copilotSource.includes('unconfigured') || copilotSource.includes('failed')) {
-        document.getElementById("m-copilot").textContent = 'N/A';
-      } else {
-        document.getElementById("m-copilot").textContent = formatRequestCount(copilotRemaining);
-      }
+      document.getElementById("m-copilot").textContent = formatRequestCount(copilotRemaining);
 
       // Alerts card
       var alertTotal = Number((data.alerts && data.alerts.total) || 0);
