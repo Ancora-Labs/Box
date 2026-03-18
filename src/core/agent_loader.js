@@ -182,11 +182,27 @@ export function parseAgentOutput(raw) {
 
 function tryParseJson(text) {
   const s = String(text || "");
-  try { return JSON.parse(s); } catch {}
+  try {
+    return JSON.parse(s);
+  } catch {
+    // fall through to fenced/deep parse attempts
+  }
   const fenceMatch = s.match(/```json\s*([\s\S]*?)```/);
-  if (fenceMatch) { try { return JSON.parse(fenceMatch[1].trim()); } catch {} }
+  if (fenceMatch) {
+    try {
+      return JSON.parse(fenceMatch[1].trim());
+    } catch {
+      // try additional extraction strategies below
+    }
+  }
   const anyFence = s.match(/```\s*([\s\S]*?)```/);
-  if (anyFence) { try { return JSON.parse(anyFence[1].trim()); } catch {} }
+  if (anyFence) {
+    try {
+      return JSON.parse(anyFence[1].trim());
+    } catch {
+      // try additional extraction strategies below
+    }
+  }
   // Find last top-level JSON object
   let lastCandidate = null;
   let i = 0;
@@ -204,7 +220,13 @@ function tryParseJson(text) {
       else if (ch === "}") { depth--; if (depth === 0) { lastCandidate = s.slice(start, i + 1); i++; break; } }
     }
   }
-  if (lastCandidate) { try { return JSON.parse(lastCandidate); } catch {} }
+  if (lastCandidate) {
+    try {
+      return JSON.parse(lastCandidate);
+    } catch {
+      // return null when all parse strategies fail
+    }
+  }
   return null;
 }
 

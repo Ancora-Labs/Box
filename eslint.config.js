@@ -20,8 +20,6 @@ export default [
         varsIgnorePattern: "^_",
         caughtErrorsIgnorePattern: "^_"
       }],
-      // Allow empty catch blocks (used widely for non-critical I/O)
-      "no-empty": ["error", { allowEmptyCatch: true }],
       "no-console": "off"
     }
   }
