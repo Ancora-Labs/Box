@@ -266,29 +266,36 @@ async function postCompletionCleanup(config) {
       }
     }
 
-    // 2. Delete remote branches created by BOX that are already merged
+    // 2. Delete remote branches created by BOX that have no open PR
+    //    Squash merges create different commit hashes, so compare-based checks
+    //    miss them. Instead: if it's a BOX branch with no open PR, it's stale.
     const branchesRes = await fetch(`${base}/branches?per_page=100`, { headers });
     if (branchesRes.ok) {
       const branches = await branchesRes.json();
+      // Collect branches that still have an open PR
+      const openPrBranches = new Set();
+      const openPrsRes = await fetch(`${base}/pulls?state=open&per_page=100`, { headers });
+      if (openPrsRes.ok) {
+        const ops = await openPrsRes.json();
+        for (const pr of ops) {
+          if (pr.head?.ref) openPrBranches.add(pr.head.ref);
+        }
+      }
+
+      const boxPrefixes = ["box/", "wave", "pr-", "qa/", "scan/"];
       for (const branch of branches) {
         const name = branch.name;
         if (name === "main" || name === "master" || name === "develop") continue;
-        if (!name.startsWith("box/") && !name.startsWith("wave") && !name.startsWith("pr-") && !name.startsWith("qa/")) continue;
+        if (!boxPrefixes.some(p => name.startsWith(p))) continue;
+        if (openPrBranches.has(name)) continue; // still used by an open PR
 
-        // Check if this branch's HEAD is merged into default branch
         try {
-          const mergeCheckRes = await fetch(`${base}/compare/main...${encodeURIComponent(name)}`, { headers });
-          if (mergeCheckRes.ok) {
-            const comparison = await mergeCheckRes.json();
-            if (comparison.status === "behind" || comparison.status === "identical" || comparison.ahead_by === 0) {
-              const deleteRes = await fetch(`${base}/git/refs/heads/${encodeURIComponent(name)}`, {
-                method: "DELETE",
-                headers
-              });
-              if (deleteRes.ok) {
-                await appendProgress(config, `[CLEANUP] Deleted merged remote branch: ${name}`);
-              }
-            }
+          const deleteRes = await fetch(`${base}/git/refs/heads/${encodeURIComponent(name)}`, {
+            method: "DELETE",
+            headers
+          });
+          if (deleteRes.ok) {
+            await appendProgress(config, `[CLEANUP] Deleted stale branch: ${name}`);
           }
         } catch { /* non-fatal */ }
       }

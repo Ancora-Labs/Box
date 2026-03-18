@@ -334,14 +334,58 @@ async function recordCompletedProject(config, summary, releaseInfo) {
   await appendProgress(config, `[LIFECYCLE] Project recorded in completion ledger: ${repo} (${summary.totalMergedPrs} PRs)`);
 }
 
+/**
+ * Delete all BOX-created branches that no longer have an open PR.
+ * Handles squash merges correctly — doesn't rely on commit comparison.
+ */
+async function cleanupStaleBranches(config) {
+  const token = config.env?.githubToken;
+  const repo = config.env?.targetRepo;
+  if (!token || !repo) return;
+
+  const base = `https://api.github.com/repos/${repo}`;
+  const branches = await ghGet(`${base}/branches?per_page=100`, token);
+  if (!Array.isArray(branches)) return;
+
+  // Collect branches still used by an open PR
+  const openPrs = await ghGet(`${base}/pulls?state=open&per_page=100`, token) || [];
+  const openPrBranches = new Set(openPrs.map(pr => pr.head?.ref).filter(Boolean));
+
+  const boxPrefixes = ["box/", "wave", "pr-", "qa/", "scan/"];
+  let deleted = 0;
+
+  for (const branch of branches) {
+    const name = branch.name;
+    if (name === "main" || name === "master" || name === "develop") continue;
+    if (!boxPrefixes.some(p => name.startsWith(p))) continue;
+    if (openPrBranches.has(name)) continue;
+
+    try {
+      const res = await fetch(`${base}/git/refs/heads/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+        headers: ghHeaders(token)
+      });
+      if (res.ok) {
+        deleted++;
+        await appendProgress(config, `[LIFECYCLE] Deleted stale branch: ${name}`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  if (deleted > 0) {
+    await appendProgress(config, `[LIFECYCLE] Cleaned up ${deleted} stale branches`);
+  }
+}
+
 // ── PUBLIC API ───────────────────────────────────────────────────────────────
 
 /**
  * Full project completion sequence. Called by the orchestrator when all work is done.
  *
  * 1. Collect work summary (PRs, workers, outcomes)
- * 2. Create completion tag + GitHub release
- * 3. Record in completed_projects.json
+ * 2. Clean up stale BOX branches
+ * 3. Create completion tag + GitHub release
+ * 4. Record in completed_projects.json
  */
 export async function runProjectCompletion(config) {
   const repo = config.env?.targetRepo;
@@ -354,6 +398,7 @@ export async function runProjectCompletion(config) {
     await appendProgress(config, "[LIFECYCLE] ── Project completion sequence starting ──");
 
     const summary = await collectWorkSummary(config);
+    await cleanupStaleBranches(config);
     const releaseInfo = await createCompletionRelease(config, summary);
     await recordCompletedProject(config, summary, releaseInfo);
 
