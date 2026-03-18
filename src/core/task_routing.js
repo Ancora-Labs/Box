@@ -19,7 +19,7 @@ export async function resolveTaskRoute(config, task) {
   };
 
   const promptPath = `${config.rootDir}/${selected.promptFile}`;
-  let templateText = "";
+  let templateText;
   try {
     templateText = await fs.readFile(promptPath, "utf8");
   } catch {
