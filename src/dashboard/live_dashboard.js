@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import http from "node:http";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
@@ -232,6 +232,49 @@ function runRebaseCommand() {
       resolve({ ok: false, exitCode: 1, output: String(error?.message || error) });
     });
   });
+}
+
+// ── Daemon start/stop (dashboard stays alive) ────────────────────────────────
+
+function startDaemonDetached() {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("node", ["src/cli.js", "start"], {
+        cwd: ROOT,
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      });
+      child.unref();
+      const pid = child.pid;
+      resolve({ ok: true, pid, message: `Daemon started pid=${pid}` });
+    } catch (err) {
+      resolve({ ok: false, pid: 0, message: String(err?.message || err) });
+    }
+  });
+}
+
+async function stopDaemon() {
+  const status = await getDaemonStatus();
+  if (!status.running || !status.pid) {
+    return { ok: true, message: "Daemon was not running" };
+  }
+  const pid = status.pid;
+  // Write stop request so daemon exits gracefully
+  try {
+    const stopFile = path.join(STATE_DIR, "stop_request.json");
+    await fs.writeFile(stopFile, JSON.stringify({ requestedAt: new Date().toISOString(), reason: "dashboard-stop" }), "utf8");
+  } catch { /* best effort */ }
+  // Wait up to 6s for graceful exit
+  for (let waited = 0; waited < 6000; waited += 500) {
+    await new Promise(r => setTimeout(r, 500));
+    if (!isProcessAlive(pid)) {
+      return { ok: true, message: `Daemon pid=${pid} stopped gracefully` };
+    }
+  }
+  // Force kill
+  try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  return { ok: true, message: `Daemon pid=${pid} force-killed` };
 }
 
 async function readJsonSafe(filePath, fallback) {
@@ -1592,6 +1635,11 @@ function renderHtml() {
         <h1>BOX Mission Control</h1>
         <div class="hero-live" id="hero-live"><span id="hero-live-text">All Systems Operational</span></div>
       </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <button id="daemon-start-btn" class="action-btn" type="button" style="background:#0d3320;border-color:#00ff88;color:#00ff88;font-size:13px;padding:5px 14px;font-weight:600">Start Daemon</button>
+        <button id="daemon-stop-btn" class="action-btn" type="button" style="background:#3a1c1c;border-color:#ff4444;font-size:13px;padding:5px 14px">Stop Daemon</button>
+        <span id="daemon-status-text" class="muted" style="font-size:12px"></span>
+      </div>
       <p id="meta">Connecting...</p>
     </section>
 
@@ -2735,6 +2783,18 @@ function renderHtml() {
           heroLive.classList.add("is-idle");
         }
       }
+
+      // Update daemon control buttons based on status
+      var daemonRunning = runtimeStatus !== "offline";
+      var dStartBtn = document.getElementById("daemon-start-btn");
+      var dStopBtn = document.getElementById("daemon-stop-btn");
+      var dStatusSpan = document.getElementById("daemon-status-text");
+      if (dStartBtn) dStartBtn.style.display = daemonRunning ? "none" : "";
+      if (dStopBtn) dStopBtn.style.display = daemonRunning ? "" : "none";
+      if (dStatusSpan && data.runtime.daemonPid) {
+        dStatusSpan.textContent = daemonRunning ? "PID " + data.runtime.daemonPid : "";
+      }
+
       document.getElementById("m-project").textContent = data.runtime.projectLabel || data.runtime.targetRepo || "unknown";
       var roleRegistry = (data.runtime && data.runtime.roleRegistry) ? data.runtime.roleRegistry : {};
       var roleLayerMap = buildRoleLayerMap(roleRegistry);
@@ -2948,6 +3008,42 @@ function renderHtml() {
     if (forceRebaseBtn) {
       forceRebaseBtn.addEventListener("click", triggerForceRebase);
     }
+
+    // ── Daemon control buttons ────────────────────────────────
+    var daemonStartBtn = document.getElementById("daemon-start-btn");
+    var daemonStopBtn = document.getElementById("daemon-stop-btn");
+    var daemonStatusText = document.getElementById("daemon-status-text");
+
+    async function triggerDaemonStart() {
+      if (daemonStartBtn) { daemonStartBtn.disabled = true; daemonStartBtn.textContent = "Starting..."; }
+      try {
+        const resp = await fetch("/api/daemon-start", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        const payload = await resp.json();
+        if (daemonStatusText) daemonStatusText.textContent = payload.message || (payload.ok ? "Started" : "Failed");
+      } catch (err) {
+        if (daemonStatusText) daemonStatusText.textContent = "Start failed: " + String(err);
+      } finally {
+        setTimeout(function() { tick(); }, 1500);
+        if (daemonStartBtn) { daemonStartBtn.disabled = false; daemonStartBtn.textContent = "Start Daemon"; }
+      }
+    }
+
+    async function triggerDaemonStop() {
+      if (daemonStopBtn) { daemonStopBtn.disabled = true; daemonStopBtn.textContent = "Stopping..."; }
+      try {
+        const resp = await fetch("/api/daemon-stop", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        const payload = await resp.json();
+        if (daemonStatusText) daemonStatusText.textContent = payload.message || (payload.ok ? "Stopped" : "Failed");
+      } catch (err) {
+        if (daemonStatusText) daemonStatusText.textContent = "Stop failed: " + String(err);
+      } finally {
+        setTimeout(function() { tick(); }, 1500);
+        if (daemonStopBtn) { daemonStopBtn.disabled = false; daemonStopBtn.textContent = "Stop Daemon"; }
+      }
+    }
+
+    if (daemonStartBtn) daemonStartBtn.addEventListener("click", triggerDaemonStart);
+    if (daemonStopBtn) daemonStopBtn.addEventListener("click", triggerDaemonStop);
   </script>
 </body>
 </html>`;
@@ -2995,6 +3091,38 @@ async function serve(req, res) {
     const data = await collectDashboardData();
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(data));
+    return;
+  }
+
+  if (url.pathname === "/api/daemon-start") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "method-not-allowed" }));
+      return;
+    }
+    const status = await getDaemonStatus();
+    if (status.running) {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, message: `Daemon already running pid=${status.pid}` }));
+      return;
+    }
+    // Clear stale stop request before starting
+    try { await fs.writeFile(path.join(STATE_DIR, "stop_request.json"), "{}", "utf8"); } catch { /* best effort */ }
+    const result = await startDaemonDetached();
+    res.writeHead(result.ok ? 200 : 500, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  if (url.pathname === "/api/daemon-stop") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "method-not-allowed" }));
+      return;
+    }
+    const result = await stopDaemon();
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(result));
     return;
   }
 

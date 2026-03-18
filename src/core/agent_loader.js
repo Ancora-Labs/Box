@@ -11,7 +11,7 @@
  * Edit an agent's behavior by editing their .agent.md file — no code changes needed.
  */
 
-import { existsSync, appendFileSync } from "node:fs";
+import { existsSync, appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isModelBanned } from "./model_policy.js";
@@ -88,15 +88,17 @@ export function toCopilotModelSlug(name) {
 // If no agent file exists, falls back to plain --model + -p call.
 
 // Windows limits total CLI argument length to ~32KB (CreateProcessW).
-// Hard-cap prompt at 28KB to leave room for other args/flags.
-const PROMPT_HARD_CAP = 28_000;
+// For prompts >25KB, write to a temp file and pass a short -p telling the agent to read it.
+const PROMPT_FILE_THRESHOLD = 25_000;
+const STATE_DIR = path.join(__dirname, "..", "..", "state");
 
 export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
   const args = [];
 
   if (allowAll) {
-    args.push("--allow-all-tools");
+    args.push("--allow-all");
     args.push("--no-ask-user");
+    args.push("--autopilot");
   }
 
   if (agentSlug && agentFileExists(agentSlug)) {
@@ -116,8 +118,10 @@ export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
   }
 
   let promptText = String(prompt);
-  if (promptText.length > PROMPT_HARD_CAP) {
-    promptText = promptText.slice(0, PROMPT_HARD_CAP) + "\n\n[TRUNCATED — prompt exceeded Windows CLI limit]";
+  if (promptText.length > PROMPT_FILE_THRESHOLD) {
+    const promptFile = path.join(STATE_DIR, `prompt_${agentSlug || "agent"}_${Date.now()}.md`);
+    writeFileSync(promptFile, promptText, "utf8");
+    promptText = `Your full instructions are in the file: ${promptFile}\nRead that file NOW with your read_file / view tool, then follow every instruction in it.`;
   }
   args.push("-p", promptText);
   return args;

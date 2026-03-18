@@ -665,7 +665,6 @@ export async function runTrumpAnalysis(config, jesusDecision) {
   chatLog(stateDir, trumpName, "Awakening — full repository scan starting...");
 
   const context = await fetchFullRepoContext(config);
-  const localSnapshot = await buildLocalRepoSnapshot(config);
   const planningPolicy = buildTrumpPlanningPolicy(config);
 
   // ── Project Type Classification & Complexity Ceiling ─────────────────────
@@ -840,9 +839,36 @@ ${jesusDecision?.trumpReason || "Full strategic analysis required — project ne
 
 Design the plan so that upstream workers prepare downstream prerequisites whenever practical. If frontend/API/backend/auth work is related, sequence it deliberately instead of waking everyone at once.
 
-## REPO FILE STRUCTURE (${context.fileTree.length} files)
-${context.fileTree.slice(0, 80).join("\n")}
-${context.fileTree.length > 80 ? `... and ${context.fileTree.length - 80} more files` : ""}
+## MANDATORY: READ EVERY SOURCE FILE BEFORE WRITING ANYTHING
+You have FULL tool access. The repo is at: ${process.cwd()}
+
+### STEP 1 — DISCOVER (do this FIRST, before any analysis)
+Run these commands using your tools:
+- list_dir on the repo root to see top-level files
+- list_dir on src/, src/core/, src/providers/, docker/, .github/
+- Read package.json, box.config.json, policy.json, docker-compose.yml
+
+### STEP 2 — READ EVERY SOURCE FILE (do this SECOND)
+Use view (or read_file) to read the COMPLETE contents of EVERY .js file under:
+- src/cli.js, src/config.js
+- EVERY file in src/core/ (orchestrator.js, worker_runner.js, trump.js, jesus_supervisor.js, moses_coordinator.js, agent_loader.js, task_routing.js, policy_engine.js, gates.js, state_tracker.js, budget_controller.js, checkpoint_engine.js, doctor.js, project_scanner.js, fs_utils.js, logger.js, and any others)
+- EVERY file in src/providers/ (all subdirectories)
+- EVERY file in src/workers/
+- EVERY file in src/dashboard/
+- EVERY file in docker/
+- EVERY .agent.md file in .github/agents/
+Read them one by one. Do NOT skip any file. Do NOT summarize from file names.
+
+### STEP 3 — ONLY THEN WRITE YOUR ANALYSIS
+After reading ALL source files, write your analysis based on ACTUAL CODE you read.
+Reference specific function names, line numbers, variable names, and code patterns.
+If your analysis mentions a file, you MUST have read it first.
+
+CRITICAL RULES:
+- Do NOT write any analysis before completing Step 1 and Step 2.
+- Do NOT say "insufficient context provided" — if you need info, READ THE FILE.
+- Do NOT base analysis on file names alone — read the actual code.
+- Every finding MUST reference actual code you read (function names, patterns, line numbers).
 
 ## OPEN ISSUES (${context.issues.length})
 ${context.issues.length > 0 ? context.issues.map(i => `  #${i.number} [${i.labels.join(", ") || "no labels"}]: ${i.title}`).join("\n") : "No open issues"}
@@ -851,10 +877,7 @@ ${context.issues.length > 0 ? context.issues.map(i => `  #${i.number} [${i.label
 ${context.pullRequests.length > 0 ? context.pullRequests.map(p => `  #${p.number} [${p.draft ? "DRAFT" : "ready"}]: ${p.title}`).join("\n") : "No open PRs"}
 
 ## AVAILABLE WORKERS
-${workersList}
-
-## LOCAL FILE CONTENT SNAPSHOT
-${localSnapshot.text || "No local repository snapshot available in this runtime."}`;
+${workersList}`;
 
   const dossierPrompt = `${sharedContext}
 
@@ -887,11 +910,10 @@ Each recommended worker should receive a large work packet with prerequisites, s
 Workers SHOULD install new packages, add new files, create new components, and add missing tooling. This is NOT just a regression audit — it is a full production readiness transformation.
 
 IMPORTANT CONSTRAINTS:
-- You have NO direct tool access in this run.
-- Never claim that you executed commands or attempted tool calls.
-- Never include lines like "Tool X does not exist".
-- Base analysis only on the provided repository context and local file snapshot.
-- If a detail is missing, state "insufficient context provided" instead of guessing.
+- You have FULL tool access: view, list_dir, grep_search. USE THEM.
+- BEFORE writing your dossier, you MUST read every source file using the view tool.
+- The repo is at: ${process.cwd()}. Read files directly.
+- Do NOT say "insufficient context provided" — if you need info, READ THE FILE with your tools.
 - Do NOT provide speculative time/hour estimates for workers.
 - Discover the most important production-level dimensions for THIS target repo and go beyond baseline depth.
 - Review the full production-readiness surface. For each major domain, state whether it is already adequate, missing and required, or not applicable.
@@ -932,17 +954,18 @@ Write a substantial senior-level narrative before the final JSON. The final JSON
 ${dossierText ? dossierText.slice(0, 5000) : "No prior dossier generated."}
 
 IMPORTANT CONSTRAINTS:
-- You have NO direct tool access in this run.
-- Never claim command execution or tool failures.
-- Use only supplied context and snapshot evidence.
+- You have FULL tool access: view, list_dir, grep_search. USE THEM.
+- BEFORE writing your plan, READ every important source file using the view tool.
+- The repo is at: ${process.cwd()}. Read files directly.
+- Do NOT say "insufficient context provided" — if you need info, READ THE FILE.
 - No speculative hour/time estimates.
 - Discover repo-specific production priorities across ALL 10 dimensions in YOUR MISSION.
 - This is NOT just a regression audit. Plan NEW features, NEW libraries, NEW tooling, NEW tests, NEW infrastructure that the project needs to be production-ready.
 - Workers CAN install npm packages, create new files, add new libraries, write new components, add monitoring/analytics/testing tools.
 - Evaluate the full production-readiness surface and explicitly classify major domains as already adequate, missing and required, or not applicable.
 - Do not silently omit common production domains such as auth/session management, token rotation, anomaly detection, SEO, performance, observability, rollback safety, and deployment/platform security.
-- Every plan item must include evidence anchors from provided context.
-- If evidence is missing, explicitly write "insufficient context provided".
+- Every plan item must include evidence anchors: file paths, function names, line numbers from code you actually read.
+- If evidence is missing, READ THE FILE with your tools — do NOT write "insufficient context provided".
 - All output and JSON fields must be in English only.
 - MANDATORY: Include a \`requestBudget\` object. The system will HARD-CAP all premium requests to this number. The budget is binding — once exhausted no more workers run.
   Structure: { "estimatedPremiumRequestsTotal": <number>, "errorMarginPercent": <number 10-30>, "hardCapTotal": <number = total * (1 + margin/100) rounded up>, "confidence": "high|medium|low", "byWave": [{"waveId": "...", "requests": <n>}], "byRole": [{"role": "...", "requests": <n>}] }
@@ -952,7 +975,7 @@ IMPORTANT CONSTRAINTS:
 - Workers must receive large, complete task packets. Each worker must do substantial production-quality work (hundreds to thousands of lines) in a single request. Never assign trivial 10-line tasks.
 - Workers SHOULD add new npm packages, create new files, add testing frameworks, add monitoring tools, add missing libraries. This is full production readiness, not just fixing existing code.
 - CRITICAL: The "context" field in each plan is what the worker will literally receive as their task description. Write it as an exhaustive implementation checklist: every file to modify, every function to add/change, every edge case to handle, every test to write, every npm package to install. The worker will use this as their reference and checklist — they will work through it item by item. Make it EXTREMELY detailed (500-2000 words per worker plan). The more detail here, the higher quality the worker output.
-- Include in each plan's context: the EXACT current state of the code (from the snapshot), what's wrong with it, what the fix should be, which files to create/modify, which patterns to follow from the existing codebase, what the verification steps are, which npm packages to install.
+- Include in each plan's context: the EXACT current state of the code (which you read with your tools), what's wrong with it, what the fix should be, which files to create/modify, which patterns to follow from the existing codebase, what the verification steps are, which npm packages to install.
 - Think of each plan's context as a senior engineer's handoff document: if a new hire received this, they could execute perfectly without asking a single question.`;
 
   chatLog(stateDir, trumpName, "Calling AI for deep repository analysis (this may take a while)...");
