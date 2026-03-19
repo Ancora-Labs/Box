@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-function must(value, key) {
+function must(value, _key) {
   if (!value || !value.trim()) {
     return null;
   }

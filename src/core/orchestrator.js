@@ -216,7 +216,6 @@ export async function runOnce(config) {
 
 export async function runDaemon(config) {
   info("daemon started");
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       await runOnce(config);
