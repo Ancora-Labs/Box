@@ -946,6 +946,7 @@ async function collectDashboardData() {
     jesusDirective,
     trumpAnalysis,
     alertsData,
+    suggestionsData,
     premiumUsageLog,
     completedProjects
   ] = await Promise.all([
@@ -958,6 +959,7 @@ async function collectDashboardData() {
     readJsonSafe(path.join(STATE_DIR, "jesus_directive.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "trump_analysis.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "alerts.json"), { entries: [] }),
+    readJsonSafe(path.join(STATE_DIR, "worker_suggestions.json"), { entries: [] }),
     readJsonSafe(path.join(STATE_DIR, "premium_usage_log.json"), []),
     readJsonSafe(path.join(STATE_DIR, "completed_projects.json"), [])
   ]);
@@ -1021,12 +1023,9 @@ async function collectDashboardData() {
   } else if (hasWorkingWorkers) {
     systemStatus = "working";
     systemStatusText = "Workers Active";
-  } else if (completedEntry) {
-    systemStatus = "completed";
-    systemStatusText = "Project Completed";
   } else {
     systemStatus = "idle";
-    systemStatusText = "System Idle";
+    systemStatusText = completedEntry ? "System Idle (last project completed)" : "System Idle";
   }
 
   return {
@@ -1066,6 +1065,10 @@ async function collectDashboardData() {
     taskInsights: {},
     issues: { total: 0, list: [] },
     alerts: deriveAlerts(alertsData),
+    suggestions: {
+      total: Array.isArray(suggestionsData?.entries) ? suggestionsData.entries.length : 0,
+      list: Array.isArray(suggestionsData?.entries) ? suggestionsData.entries.slice(-30).reverse() : []
+    },
     tests: {},
     premiumRequestEstimate: derivePremiumEstimate(trumpAnalysis, copilotUsedRequests, copilotQuota),
     usage: {
@@ -1632,6 +1635,157 @@ function renderHtml() {
       user-select: none;
     }
     .details-panel > summary::-webkit-details-marker { display: none; }
+
+    /* ── Leadership Pipeline ───────────────────────────────────── */
+    .lp-panel { margin-bottom: 12px; position: relative; overflow: hidden; }
+    .lp-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+    .lp-header h2 { margin: 0; font-size: 13px; text-transform: uppercase; font-family: "IBM Plex Mono", Consolas, monospace; }
+    .lp-progress { display: flex; align-items: center; gap: 10px; }
+    .lp-pct-ring {
+      width: 52px; height: 52px; position: relative;
+    }
+    .lp-pct-ring svg { width: 52px; height: 52px; transform: rotate(-90deg); }
+    .lp-pct-ring .ring-bg { fill: none; stroke: rgba(80,103,121,0.15); stroke-width: 5; }
+    .lp-pct-ring .ring-fg { fill: none; stroke: #22c27e; stroke-width: 5; stroke-linecap: round; transition: stroke-dashoffset 0.8s ease, stroke 0.4s; }
+    .lp-pct-text {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-family: "IBM Plex Mono", Consolas, monospace; font-size: 13px; font-weight: 700; color: var(--ink);
+    }
+    .lp-chain {
+      display: flex; align-items: center; justify-content: center;
+      gap: 0; padding: 18px 10px 14px; flex-wrap: wrap;
+    }
+    .lp-node {
+      flex: 0 1 180px; border-radius: 12px; border: 2px solid var(--line);
+      background: var(--card); padding: 10px 12px; text-align: center;
+      transition: border-color 0.4s, box-shadow 0.4s, transform 0.3s;
+      position: relative; z-index: 1;
+    }
+    .lp-node.active { border-color: rgba(34,194,126,0.7); box-shadow: 0 0 18px rgba(34,194,126,0.25); }
+    .lp-node.flash { animation: nodeFlash 0.6s ease; }
+    .lp-node-emoji { font-size: 26px; margin-bottom: 2px; }
+    .lp-node-name {
+      font-family: "IBM Plex Mono", Consolas, monospace; font-size: 12px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .lp-node-role { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    .lp-node-status {
+      margin-top: 4px; font-size: 11px; font-family: "IBM Plex Mono", Consolas, monospace;
+      color: var(--muted); min-height: 15px;
+    }
+    @keyframes nodeFlash {
+      0% { transform: scale(1); box-shadow: 0 0 0 rgba(34,194,126,0); }
+      30% { transform: scale(1.06); box-shadow: 0 0 28px rgba(34,194,126,0.5); }
+      100% { transform: scale(1); box-shadow: 0 0 18px rgba(34,194,126,0.25); }
+    }
+    .lp-arrow {
+      flex: 0 0 60px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; position: relative;
+      height: 50px;
+    }
+    .lp-arrow-line {
+      width: 40px; height: 3px; background: rgba(120,140,160,0.25);
+      border-radius: 2px; position: relative; overflow: hidden;
+    }
+    .lp-arrow-line::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, #22c27e, transparent);
+      transform: translateX(-110%); transition: none;
+    }
+    .lp-arrow.active .lp-arrow-line { background: rgba(34,194,126,0.35); }
+    .lp-arrow.active .lp-arrow-line::after { animation: arrowTravel 1.2s ease-in-out; }
+    .lp-arrow-tip {
+      font-size: 16px; color: rgba(120,140,160,0.4); line-height: 1;
+      transition: color 0.3s;
+    }
+    .lp-arrow.active .lp-arrow-tip { color: #22c27e; }
+    .lp-arrow-label {
+      font-size: 9px; color: var(--muted); font-family: "IBM Plex Mono", Consolas, monospace;
+      text-align: center; margin-top: 2px; max-width: 70px; line-height: 1.1;
+    }
+    @keyframes arrowTravel {
+      0% { transform: translateX(-110%); }
+      100% { transform: translateX(110%); }
+    }
+
+    /* ── Message Feed ──────────────────────────────────────────── */
+    .lp-feed {
+      padding: 8px 14px 12px; max-height: 180px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .lp-msg {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 11px; font-family: "IBM Plex Mono", Consolas, monospace;
+      padding: 5px 8px; border-radius: 8px;
+      background: rgba(222, 237, 247, 0.5); border: 1px solid rgba(89,124,148,0.15);
+      animation: msgSlideIn 0.4s ease;
+    }
+    .lp-msg-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+    .lp-msg-from { font-weight: 700; white-space: nowrap; }
+    .lp-msg-text { color: var(--muted); line-height: 1.35; }
+    .lp-msg-time { margin-left: auto; white-space: nowrap; color: rgba(80,103,121,0.5); font-size: 10px; }
+    .lp-msg.new { background: rgba(34,194,126,0.12); border-color: rgba(34,194,126,0.3); }
+    @keyframes msgSlideIn {
+      0% { opacity: 0; transform: translateX(-12px); }
+      100% { opacity: 1; transform: translateX(0); }
+    }
+
+    /* ── Request Flash Overlay ─────────────────────────────────── */
+    .req-flash-container {
+      position: fixed; top: 0; left: 0; right: 0;
+      pointer-events: none; z-index: 9999;
+      display: flex; flex-direction: column; align-items: center;
+      padding-top: 80px; gap: 8px;
+    }
+    .req-flash {
+      pointer-events: none;
+      background: linear-gradient(135deg, rgba(0,30,60,0.95), rgba(0,70,140,0.92));
+      border: 2px solid #00d4ff;
+      border-radius: 16px; padding: 18px 32px;
+      color: #fff; text-align: center;
+      box-shadow: 0 0 60px rgba(0,212,255,0.4), 0 20px 40px rgba(0,0,0,0.3);
+      animation: reqFlashIn 0.4s ease, reqFlashOut 0.5s ease 2.5s forwards;
+    }
+    .req-flash-emoji { font-size: 40px; margin-bottom: 4px; }
+    .req-flash-title {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 16px; font-weight: 800; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #00d4ff;
+    }
+    .req-flash-detail {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 12px; color: rgba(200,230,255,0.8); margin-top: 4px;
+    }
+    .req-flash-model {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 11px; color: rgba(180,220,255,0.6); margin-top: 2px;
+    }
+    @keyframes reqFlashIn {
+      0% { opacity: 0; transform: scale(0.7) translateY(-20px); }
+      60% { opacity: 1; transform: scale(1.05) translateY(0); }
+      100% { transform: scale(1); }
+    }
+    @keyframes reqFlashOut {
+      0% { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(0.9) translateY(-10px); }
+    }
+
+    /* ── Worker card flash on request ──────────────────────────── */
+    .ws-card.req-pulse {
+      animation: wsReqPulse 1.5s ease;
+    }
+    @keyframes wsReqPulse {
+      0% { box-shadow: 0 0 0 rgba(0,212,255,0); }
+      20% { box-shadow: 0 0 30px rgba(0,212,255,0.6), inset 0 0 20px rgba(0,212,255,0.15); }
+      100% { box-shadow: 0 0 0 rgba(0,212,255,0); }
+    }
+
+    @media (max-width: 720px) {
+      .lp-chain { flex-direction: column; align-items: center; }
+      .lp-arrow { flex: 0 0 30px; height: 30px; }
+      .lp-arrow-line { width: 3px; height: 20px; }
+      .lp-arrow-tip { transform: rotate(90deg); }
+    }
   </style>
 </head>
 <body>
@@ -1679,34 +1833,81 @@ function renderHtml() {
       <article class="card"><div class="k">Alerts</div><div class="v" id="m-alerts">0</div><div class="sub" id="m-alerts-sub">no alerts</div></article>
     </section>
 
-    <!-- Leadership Flow: Jesus → Moses -->
-    <section class="panel lf-panel">
-      <h2>Leadership Communication</h2>
-      <div class="lf-row">
-        <div class="lf-card jesus">
-          <div class="lf-name">⚡ Jesus</div>
-          <div class="lf-status" id="lf-jesus-status">—</div>
-          <div class="lf-detail" id="lf-jesus-detail">—</div>
-          <details style="margin-top:6px">
-            <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Reasoning ▾</summary>
-            <div id="lf-jesus-reasoning" class="lf-reasoning">Awaiting Jesus analysis...</div>
-          </details>
-        </div>
-        <div class="lf-arrow-wrap" id="lf-arrow">
-          <span class="lf-arrow-sym">⟹</span>
-          <div class="lf-arrow-label" id="lf-arrow-label">no directive yet</div>
-        </div>
-        <div class="lf-card moses">
-          <div class="lf-name">📋 Moses</div>
-          <div class="lf-status" id="lf-moses-status">—</div>
-          <div class="lf-detail" id="lf-moses-detail">—</div>
-          <details style="margin-top:6px">
-            <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Report ▾</summary>
-            <div id="lf-moses-report" class="lf-reasoning">Awaiting Moses coordination...</div>
-          </details>
+    <!-- Leadership Pipeline: Jesus → Trump → Moses → Workers -->
+    <section class="panel lp-panel" id="lp-panel">
+      <div class="lp-header">
+        <h2>Leadership Pipeline</h2>
+        <div class="lp-progress">
+          <div class="lp-pct-ring" id="lp-pct-ring">
+            <svg viewBox="0 0 52 52">
+              <circle class="ring-bg" cx="26" cy="26" r="22"/>
+              <circle class="ring-fg" id="lp-ring-fg" cx="26" cy="26" r="22"
+                stroke-dasharray="138.23" stroke-dashoffset="138.23"/>
+            </svg>
+            <div class="lp-pct-text" id="lp-pct-text">0%</div>
+          </div>
+          <span style="font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace" id="lp-pct-label">0 / 0 tasks</span>
         </div>
       </div>
+      <div class="lp-chain" id="lp-chain">
+        <!-- Jesus -->
+        <div class="lp-node" id="lp-node-jesus" data-entity="jesus">
+          <div class="lp-node-emoji">⚡</div>
+          <div class="lp-node-name">Jesus</div>
+          <div class="lp-node-role">CEO Supervisor</div>
+          <div class="lp-node-status" id="lp-jesus-status">—</div>
+        </div>
+        <div class="lp-arrow" id="lp-arrow-jt">
+          <div style="display:flex;align-items:center;gap:2px">
+            <div class="lp-arrow-line"></div>
+            <span class="lp-arrow-tip">▸</span>
+          </div>
+          <div class="lp-arrow-label" id="lp-arrow-jt-label">—</div>
+        </div>
+        <!-- Trump -->
+        <div class="lp-node" id="lp-node-trump" data-entity="trump">
+          <div class="lp-node-emoji">📊</div>
+          <div class="lp-node-name">Trump</div>
+          <div class="lp-node-role">Deep Planner</div>
+          <div class="lp-node-status" id="lp-trump-status">—</div>
+        </div>
+        <div class="lp-arrow" id="lp-arrow-tm">
+          <div style="display:flex;align-items:center;gap:2px">
+            <div class="lp-arrow-line"></div>
+            <span class="lp-arrow-tip">▸</span>
+          </div>
+          <div class="lp-arrow-label" id="lp-arrow-tm-label">—</div>
+        </div>
+        <!-- Moses -->
+        <div class="lp-node" id="lp-node-moses" data-entity="moses">
+          <div class="lp-node-emoji">📋</div>
+          <div class="lp-node-name">Moses</div>
+          <div class="lp-node-role">Lead Manager</div>
+          <div class="lp-node-status" id="lp-moses-status">—</div>
+        </div>
+        <div class="lp-arrow" id="lp-arrow-mw">
+          <div style="display:flex;align-items:center;gap:2px">
+            <div class="lp-arrow-line"></div>
+            <span class="lp-arrow-tip">▸</span>
+          </div>
+          <div class="lp-arrow-label" id="lp-arrow-mw-label">—</div>
+        </div>
+        <!-- Workers -->
+        <div class="lp-node" id="lp-node-workers" data-entity="workers">
+          <div class="lp-node-emoji">👷</div>
+          <div class="lp-node-name">Workers</div>
+          <div class="lp-node-role">Execution Team</div>
+          <div class="lp-node-status" id="lp-workers-status">—</div>
+        </div>
+      </div>
+      <!-- Message Feed -->
+      <div class="lp-feed" id="lp-feed">
+        <div class="muted" style="font-size:11px;text-align:center">Waiting for leadership activity...</div>
+      </div>
     </section>
+
+    <!-- Request Flash Container (fixed overlay) -->
+    <div class="req-flash-container" id="req-flash-container"></div>
 
     <!-- Workers Live Grid -->
     <section class="panel workers-live">
@@ -1872,6 +2073,13 @@ function renderHtml() {
           </table>
         </div>
         <div class="panel" style="box-shadow:none">
+          <h2>Worker Optimization Suggestions</h2>
+          <table>
+            <thead><tr><th>When</th><th>Worker</th><th>Suggestion</th><th>PR/Branch</th></tr></thead>
+            <tbody id="suggestions-body"><tr><td colspan="4" class="muted">No suggestions</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel" style="box-shadow:none">
           <h2>Copilot Live Detail</h2>
           <pre id="copilot-live-detail">Worker detayi yukleniyor...</pre>
         </div>
@@ -1890,6 +2098,16 @@ function renderHtml() {
     let selectedTrumpPlanKey = null;
     let trumpPlanUserSelected = false;
     let trumpPlanFingerprint = '';
+
+    // ── Change detection state ────────────────────────────────
+    var prevJesusDecidedAt = null;
+    var prevTrumpAnalyzedAt = null;
+    var prevMosesCoordinatedAt = null;
+    var prevTotalPremiumReqs = 0;
+    var prevWorkerStatuses = {};
+    var prevPremiumByWorker = {};
+    var leadershipMessages = [];
+    var LP_MSG_LIMIT = 25;
 
     function esc(v) {
       var value = (v === null || v === undefined) ? "" : v;
@@ -2226,56 +2444,243 @@ function renderHtml() {
       return Math.floor(mins / 60) + 'h ago';
     }
 
-    function renderLeadershipFlow(data) {
-      var jesus = (data && data.leadership && data.leadership.jesus) ? data.leadership.jesus : {};
-      var moses = (data && data.leadership && data.leadership.moses) ? data.leadership.moses : {};
+    // ── Leadership Pipeline + Change Detection ─────────────────────────
+    function detectLeadershipChanges(data) {
+      var changes = { jesusNew: false, trumpNew: false, mosesNew: false, newWorkers: [], reqFlashes: [] };
+      var jesus = (data && data.leadership && data.leadership.jesus) || {};
+      var trump = (data && data.leadership && data.leadership.trump) || {};
+      var moses = (data && data.leadership && data.leadership.moses) || {};
+      var wa = data && data.workerActivity ? data.workerActivity : {};
+      var puBw = (data && data.premiumUsageByWorker && data.premiumUsageByWorker.byWorker) || {};
 
-      // Jesus card
+      // Jesus decided
+      if (jesus.decidedAt && jesus.decidedAt !== prevJesusDecidedAt) {
+        changes.jesusNew = true;
+        if (prevJesusDecidedAt) {
+          leadershipMessages.unshift({
+            icon: '⚡', from: 'Jesus', to: jesus.callTrump ? 'Trump' : 'Moses',
+            text: jesus.callTrump
+              ? 'Activate Trump for deep analysis: ' + String(jesus.trumpReason || jesus.briefForMoses || '').slice(0, 100)
+              : 'Directive to Moses: ' + String(jesus.briefForMoses || jesus.decision || '').slice(0, 100),
+            time: jesus.decidedAt, isNew: true
+          });
+        }
+        prevJesusDecidedAt = jesus.decidedAt;
+      }
+
+      // Trump analyzed
+      if (trump.analyzedAt && trump.analyzedAt !== prevTrumpAnalyzedAt) {
+        changes.trumpNew = true;
+        if (prevTrumpAnalyzedAt) {
+          var planCount = Array.isArray(trump.plans) ? trump.plans.length : 0;
+          leadershipMessages.unshift({
+            icon: '📊', from: 'Trump', to: 'Moses',
+            text: planCount + ' plans created, health: ' + String(trump.projectHealth || '?') + ' — ' + String(trump.analysis || '').slice(0, 80),
+            time: trump.analyzedAt, isNew: true
+          });
+        }
+        prevTrumpAnalyzedAt = trump.analyzedAt;
+      }
+
+      // Moses coordinated
+      if (moses.coordinatedAt && moses.coordinatedAt !== prevMosesCoordinatedAt) {
+        changes.mosesNew = true;
+        if (prevMosesCoordinatedAt) {
+          var activeSess = Number(moses.activeSessions || 0);
+          leadershipMessages.unshift({
+            icon: '📋', from: 'Moses', to: 'Workers',
+            text: 'Dispatched ' + activeSess + ' workers: ' + String(moses.summary || moses.statusReport || '').slice(0, 100),
+            time: moses.coordinatedAt, isNew: true
+          });
+        }
+        prevMosesCoordinatedAt = moses.coordinatedAt;
+      }
+
+      // Workers changed status (became working)
+      Object.keys(wa).forEach(function(name) {
+        var st = String((wa[name] || {}).status || '').toLowerCase();
+        var prevSt = prevWorkerStatuses[name] || 'idle';
+        if (st === 'working' && prevSt !== 'working') {
+          changes.newWorkers.push(name);
+          leadershipMessages.unshift({
+            icon: '👷', from: 'Moses', to: name,
+            text: 'Task assigned: ' + String((wa[name] || {}).lastTask || '').slice(0, 100),
+            time: (wa[name] || {}).lastActiveAt || new Date().toISOString(), isNew: true
+          });
+        }
+        prevWorkerStatuses[name] = st;
+      });
+
+      // Premium request consumed
+      Object.keys(puBw).forEach(function(name) {
+        var w = puBw[name] || {};
+        var prevCount = prevPremiumByWorker[name] || 0;
+        var nowCount = Number(w.count || 0);
+        if (nowCount > prevCount && prevCount > 0) {
+          var diff = nowCount - prevCount;
+          var lastEntry = (w.entries && w.entries.length) ? w.entries[w.entries.length - 1] : {};
+          for (var ri = 0; ri < diff; ri++) {
+            changes.reqFlashes.push({
+              worker: name,
+              model: String(lastEntry.model || '?'),
+              taskKind: String(lastEntry.taskKind || ''),
+              count: nowCount
+            });
+          }
+        }
+        prevPremiumByWorker[name] = nowCount;
+      });
+
+      // Trim old messages
+      while (leadershipMessages.length > LP_MSG_LIMIT) leadershipMessages.pop();
+      // Clear isNew flag after 6 seconds
+      var cutoff = Date.now() - 6000;
+      leadershipMessages.forEach(function(m) {
+        if (m.isNew && m.time && new Date(m.time).getTime() < cutoff) m.isNew = false;
+      });
+
+      return changes;
+    }
+
+    function showRequestFlash(flash) {
+      var container = document.getElementById('req-flash-container');
+      if (!container) return;
+      var emojis = {
+        'King David': '👑', 'Esther': '💎', 'Aaron': '🔌', 'Joseph': '🔗',
+        'Samuel': '🧪', 'Isaiah': '🔍', 'Noah': '🚢', 'Elijah': '🛡️',
+        'Issachar': '📊', 'Ezra': '📝'
+      };
+      var emoji = emojis[flash.worker] || '🤖';
+      var el = document.createElement('div');
+      el.className = 'req-flash';
+      el.innerHTML =
+        '<div class="req-flash-emoji">💎</div>' +
+        '<div class="req-flash-title">PREMIUM REQUEST</div>' +
+        '<div class="req-flash-detail">' + emoji + ' ' + esc(flash.worker) + ' — #' + esc(flash.count) + '</div>' +
+        '<div class="req-flash-model">model: ' + esc(flash.model) + (flash.taskKind ? ' | ' + esc(flash.taskKind) : '') + '</div>';
+      container.appendChild(el);
+      // Also pulse the worker card
+      var wsCard = document.querySelector('.ws-card[data-worker="' + flash.worker.replace(/"/g, '\\"') + '"]');
+      if (wsCard) {
+        wsCard.classList.remove('req-pulse');
+        void wsCard.offsetWidth;
+        wsCard.classList.add('req-pulse');
+      }
+      // Remove flash after animation ends
+      setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 3200);
+    }
+
+    function renderLeadershipPipeline(data, changes) {
+      var jesus = (data && data.leadership && data.leadership.jesus) || {};
+      var trump = (data && data.leadership && data.leadership.trump) || {};
+      var moses = (data && data.leadership && data.leadership.moses) || {};
+      var wa = data && data.workerActivity ? data.workerActivity : {};
+
+      // Progress ring
+      var tasks = data && data.tasks ? data.tasks : {};
+      var total = Math.max(1, Number(tasks.total || 0));
+      var passed = Number((tasks.totals || {}).passed || 0);
+      var pct = tasks.total > 0 ? Math.round((passed / total) * 100) : 0;
+      var circumference = 2 * Math.PI * 22; // r=22
+      var offset = circumference - (pct / 100) * circumference;
+      var ringFg = document.getElementById('lp-ring-fg');
+      var pctText = document.getElementById('lp-pct-text');
+      var pctLabel = document.getElementById('lp-pct-label');
+      if (ringFg) {
+        ringFg.style.strokeDasharray = String(circumference);
+        ringFg.style.strokeDashoffset = String(offset);
+        ringFg.style.stroke = pct >= 100 ? '#00ff88' : pct >= 50 ? '#22c27e' : pct >= 25 ? '#d4a017' : '#7dc4ff';
+      }
+      if (pctText) pctText.textContent = pct + '%';
+      if (pctLabel) pctLabel.textContent = passed + ' / ' + (tasks.total || 0) + ' tasks';
+
+      // Jesus node
       var health = String(jesus.systemHealth || 'unknown');
       var healthIcon = health === 'healthy' ? '🟢' : health === 'critical' ? '🔴' : '🟡';
-      var lfJesusStatus = document.getElementById('lf-jesus-status');
-      if (lfJesusStatus) {
-        lfJesusStatus.textContent = healthIcon + ' ' + health.toUpperCase() + ' | ' + String(jesus.decision || 'waiting');
-      }
-      var lfJesusDetail = document.getElementById('lf-jesus-detail');
-      if (lfJesusDetail) {
-        lfJesusDetail.textContent = jesus.briefForMoses
-          ? String(jesus.briefForMoses).slice(0, 130)
-          : 'No directive yet';
-      }
-      var lfJesusReasoning = document.getElementById('lf-jesus-reasoning');
-      if (lfJesusReasoning) {
-        lfJesusReasoning.textContent = String(jesus.thinking || jesus.reasoning || 'Awaiting Jesus analysis...');
-        lfJesusReasoning.title = 'Decided: ' + String(jesus.decidedAt || '') + ' | Model: ' + String(jesus.model || '');
+      var jesusStatusEl = document.getElementById('lp-jesus-status');
+      if (jesusStatusEl) jesusStatusEl.textContent = healthIcon + ' ' + String(jesus.decision || 'waiting');
+      var jesusNode = document.getElementById('lp-node-jesus');
+      if (jesusNode) {
+        jesusNode.classList.toggle('active', !!jesus.decidedAt);
+        if (changes.jesusNew) { jesusNode.classList.remove('flash'); void jesusNode.offsetWidth; jesusNode.classList.add('flash'); }
       }
 
-      // Arrow — active when Jesus sent directive within the last 90 seconds
-      var arrowEl = document.getElementById('lf-arrow');
-      var arrowLabel = document.getElementById('lf-arrow-label');
-      var decidedAt = jesus.decidedAt ? new Date(jesus.decidedAt).getTime() : 0;
-      var arrowActive = decidedAt > 0 && (Date.now() - decidedAt) < 90000;
-      if (arrowEl) {
-        arrowEl.classList.toggle('active', arrowActive);
-      }
-      if (arrowLabel) {
-        arrowLabel.textContent = decidedAt ? ('sent ' + relativeTime(jesus.decidedAt)) : 'no directive yet';
+      // Jesus → Trump arrow
+      var arrowJT = document.getElementById('lp-arrow-jt');
+      var arrowJTLabel = document.getElementById('lp-arrow-jt-label');
+      if (arrowJT) arrowJT.classList.toggle('active', changes.jesusNew);
+      if (arrowJTLabel) arrowJTLabel.textContent = jesus.callTrump ? 'analyze' : (jesus.decidedAt ? 'directive' : '—');
+
+      // Trump node
+      var trumpStatusEl = document.getElementById('lp-trump-status');
+      var planCount = Array.isArray(trump.plans) ? trump.plans.length : 0;
+      if (trumpStatusEl) trumpStatusEl.textContent = planCount > 0 ? (planCount + ' plans | ' + String(trump.projectHealth || '?')) : 'waiting';
+      var trumpNode = document.getElementById('lp-node-trump');
+      if (trumpNode) {
+        trumpNode.classList.toggle('active', planCount > 0);
+        if (changes.trumpNew) { trumpNode.classList.remove('flash'); void trumpNode.offsetWidth; trumpNode.classList.add('flash'); }
       }
 
-      // Moses card
-      var lfMosesStatus = document.getElementById('lf-moses-status');
-      if (lfMosesStatus) {
-        lfMosesStatus.textContent = String(moses.statusReport || 'Awaiting coordination...');
+      // Trump → Moses arrow
+      var arrowTM = document.getElementById('lp-arrow-tm');
+      var arrowTMLabel = document.getElementById('lp-arrow-tm-label');
+      if (arrowTM) arrowTM.classList.toggle('active', changes.trumpNew);
+      if (arrowTMLabel) arrowTMLabel.textContent = planCount > 0 ? (planCount + ' plans') : '—';
+
+      // Moses node
+      var mosesStatusEl = document.getElementById('lp-moses-status');
+      var activeSessions = Number(moses.activeSessions || 0);
+      var completedCount = Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0;
+      if (mosesStatusEl) mosesStatusEl.textContent = activeSessions + ' active | ' + completedCount + ' done';
+      var mosesNode = document.getElementById('lp-node-moses');
+      if (mosesNode) {
+        mosesNode.classList.toggle('active', !!moses.coordinatedAt);
+        if (changes.mosesNew) { mosesNode.classList.remove('flash'); void mosesNode.offsetWidth; mosesNode.classList.add('flash'); }
       }
-      var lfMosesDetail = document.getElementById('lf-moses-detail');
-      if (lfMosesDetail) {
-        var activeSessions = Number(moses.activeSessions || 0);
-        var completed = Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0;
-        lfMosesDetail.textContent = activeSessions + ' active | ' + completed + ' completed';
+
+      // Moses → Workers arrow
+      var arrowMW = document.getElementById('lp-arrow-mw');
+      var arrowMWLabel = document.getElementById('lp-arrow-mw-label');
+      if (arrowMW) arrowMW.classList.toggle('active', changes.mosesNew || changes.newWorkers.length > 0);
+      if (arrowMWLabel) arrowMWLabel.textContent = activeSessions > 0 ? ('dispatch ' + activeSessions) : '—';
+
+      // Workers node
+      var workingNames = Object.keys(wa).filter(function(n) { return String((wa[n] || {}).status || '').toLowerCase() === 'working'; });
+      var workersStatusEl = document.getElementById('lp-workers-status');
+      if (workersStatusEl) workersStatusEl.textContent = workingNames.length > 0 ? (workingNames.length + ' working') : 'idle';
+      var workersNode = document.getElementById('lp-node-workers');
+      if (workersNode) {
+        workersNode.classList.toggle('active', workingNames.length > 0);
+        if (changes.newWorkers.length > 0) { workersNode.classList.remove('flash'); void workersNode.offsetWidth; workersNode.classList.add('flash'); }
       }
-      var lfMosesReport = document.getElementById('lf-moses-report');
-      if (lfMosesReport) {
-        lfMosesReport.textContent = String(moses.summary || 'Awaiting Moses coordination...');
+
+      // Message feed
+      var feedEl = document.getElementById('lp-feed');
+      if (feedEl && leadershipMessages.length > 0) {
+        feedEl.innerHTML = leadershipMessages.map(function(m) {
+          var cls = m.isNew ? 'lp-msg new' : 'lp-msg';
+          return '<div class="' + cls + '">' +
+            '<span class="lp-msg-icon">' + esc(m.icon) + '</span>' +
+            '<span class="lp-msg-from">' + esc(m.from) + ' → ' + esc(m.to) + '</span>' +
+            '<span class="lp-msg-text">' + esc(m.text) + '</span>' +
+            '<span class="lp-msg-time">' + esc(relativeTime(m.time)) + '</span>' +
+            '</div>';
+        }).join('');
+      } else if (feedEl && leadershipMessages.length === 0) {
+        feedEl.innerHTML = '<div class="muted" style="font-size:11px;text-align:center">Waiting for leadership activity...</div>';
       }
+
+      // Request flashes
+      if (changes.reqFlashes.length > 0) {
+        changes.reqFlashes.forEach(function(flash) {
+          showRequestFlash(flash);
+        });
+      }
+    }
+
+    // Keep old renderLeadershipFlow as a no-op since applyState still calls it
+    function renderLeadershipFlow(data) {
+      // Replaced by renderLeadershipPipeline — called separately
     }
 
     function renderWorkerGrid(data) {
@@ -2345,6 +2750,15 @@ function renderHtml() {
     function renderCelebration(data) {
       var banner = document.getElementById('celebration-banner');
       if (!banner) return;
+
+      // Only show completion/celebration banner in true completed mode.
+      // While daemon is running (working/idle), keep monitoring UI focused on live state.
+      var runtimeStatus = String((data && data.runtime && data.runtime.systemStatus) || 'offline').toLowerCase();
+      if (runtimeStatus !== 'completed') {
+        banner.style.display = 'none';
+        celebrationAnimated = false;
+        return;
+      }
 
       // Project completion from ledger takes priority
       var pc = data.projectCompleted;
@@ -2937,9 +3351,21 @@ function renderHtml() {
       });
       document.getElementById("alerts-body").innerHTML = renderRows(alertRows, 3);
 
+      const suggestionRows = (data.suggestions && data.suggestions.list ? data.suggestions.list : []).map((s) => {
+        const link = s.prUrl
+          ? ('<a href="' + esc(s.prUrl) + '" target="_blank" rel="noopener noreferrer">PR</a>')
+          : esc(s.branch || '-');
+        return '<tr><td>' + esc(s.timestamp || '-') + '</td><td>' + esc(s.worker || '-') + '</td><td>' + esc(s.message || '-') + '</td><td>' + link + '</td></tr>';
+      });
+      document.getElementById("suggestions-body").innerHTML = renderRows(suggestionRows, 4);
+
       renderWorkerActivity(data.workerActivity || {}, data.taskInsights || {}, roleLayerMap);
       renderLeadershipPanel(data);
-      renderLeadershipFlow(data);
+
+      // ── Leadership pipeline with change detection ──
+      var changes = detectLeadershipChanges(data);
+      renderLeadershipPipeline(data, changes);
+
       renderTrumpPlanBoard(data);
       renderWorkerGrid(data);
       renderPremiumUsagePanel(data);
