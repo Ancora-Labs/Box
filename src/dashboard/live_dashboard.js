@@ -16,7 +16,7 @@ const STATE_DIR = path.join(ROOT, "state");
 const PORT = Number(process.env.BOX_DASHBOARD_PORT || "8787");
 const TARGET_REPO = process.env.TARGET_REPO || "";
 const CLAUDE_CREDIT_USD = Number(process.env.BOX_CLAUDE_CREDIT_USD || "5");
-const COPILOT_TIER1_MONTHLY_REQUESTS = Number(process.env.BOX_COPILOT_TIER1_MONTHLY_REQUESTS || process.env.BOX_COPILOT_MONTHLY_QUOTA || "1500");
+const COPILOT_TIER1_MONTHLY_REQUESTS = Number(process.env.BOX_COPILOT_TIER1_MONTHLY_REQUESTS || process.env.BOX_COPILOT_MONTHLY_QUOTA || "2500");
 const CLAUDE_PLATFORM_TOTAL_COST_USD = process.env.BOX_CLAUDE_PLATFORM_TOTAL_COST_USD;
 const COPILOT_SOURCE_ACCOUNT = process.env.BOX_COPILOT_SOURCE_ACCOUNT || "CanerDoqdu";
 const CLAUDE_ADMIN_API_KEY = process.env.CLAUDE_ADMIN_API_KEY || process.env.ANTHROPIC_ADMIN_API_KEY || "";
@@ -1977,7 +1977,7 @@ function renderHtml() {
         </div>
         <div class="pulse-cell">
           <div class="pulse-cell-label">Copilot Used</div>
-          <div class="pulse-cell-value" id="pulse-copilot">0 <span class="dim">/ 1500</span></div>
+          <div class="pulse-cell-value" id="pulse-copilot">0 <span class="dim">/ 2500</span></div>
           <div class="pulse-cell-sub" id="pulse-copilot-sub">loading...</div>
         </div>
         <div class="pulse-cell">
@@ -3430,7 +3430,7 @@ function renderHtml() {
       var copilotEl = document.getElementById('pulse-copilot');
       if (copilotEl) {
         var used = Math.round(Number(reqs.copilotUsed || 0));
-        var quota = Number(reqs.copilotQuota || 1500);
+        var quota = Number(reqs.copilotQuota || 2500);
         copilotEl.innerHTML = String(used) + ' <span class="dim">/ ' + formatRequestCount(quota) + '</span>';
       }
       var copilotSub = document.getElementById('pulse-copilot-sub');
