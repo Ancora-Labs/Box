@@ -25,7 +25,8 @@ const CLAUDE_RATE_LIMIT_BACKOFF_MS = Number(process.env.BOX_CLAUDE_RATE_LIMIT_BA
 const CLAUDE_COST_WINDOW_DAYS = Math.max(1, Number(process.env.BOX_CLAUDE_COST_WINDOW_DAYS || "30"));
 const CLAUDE_COST_START_AT = String(process.env.BOX_CLAUDE_COST_START_AT || "").trim();
 const CLAUDE_COST_END_AT = String(process.env.BOX_CLAUDE_COST_END_AT || "").trim();
-const GITHUB_TOKEN = process.env.GITHUB_FINEGRADED || process.env.GITHUB_TOKEN || process.env.GITHUB_TOKENPERSONAL || "";
+const GITHUB_TOKEN = process.env.GITHUB_FINEGRADED || process.env.GITHUBFINEGRADEDPERSONALINTEL || process.env.GITHUB_TOKEN || process.env.GITHUB_TOKENPERSONAL || "";
+const GITHUB_BILLING_TOKEN = process.env.GITHUBFINEGRADEDPERSONALINTEL || process.env.GITHUB_FINEGRADED || GITHUB_TOKEN;
 const GITHUB_BILLING_SUMMARY_URL = process.env.BOX_GITHUB_BILLING_SUMMARY_URL
   || `https://api.github.com/users/${COPILOT_SOURCE_ACCOUNT}/settings/billing/premium_request/usage`;
 const GITHUB_API_VERSION = process.env.BOX_GITHUB_API_VERSION || "2022-11-28";
@@ -421,7 +422,7 @@ function parseCopilotUsageFromSummary(payload) {
 }
 
 async function fetchOneTimeCopilotUsage() {
-  if (!GITHUB_TOKEN || !GITHUB_BILLING_SUMMARY_URL) {
+  if (!GITHUB_BILLING_TOKEN || !GITHUB_BILLING_SUMMARY_URL) {
     return {
       quotaRequests: null,
       usedRequests: null,
@@ -453,7 +454,7 @@ async function fetchOneTimeCopilotUsage() {
     return fetch(url.toString(), {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Authorization: `Bearer ${GITHUB_BILLING_TOKEN}`,
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": apiVersion,
         "user-agent": "BOX/1.0"
@@ -496,6 +497,7 @@ async function fetchOneTimeCopilotUsage() {
       quotaRequests: parsed.quota,
       usedRequests: parsed.used,
       remainingRequests: parsed.remaining,
+      byModel: parsed.byModel || null,
       source: "github-billing-usage-summary",
       fetchedAt: new Date().toISOString(),
       lastError: null
@@ -1163,7 +1165,10 @@ async function collectDashboardData() {
         copilotUsedPct: Number(copilotUsedPercent.toFixed(2)),
         copilotUsed: copilotUsedRequests,
         copilotQuota: Number(copilotQuota),
-        copilotRemaining: copilotRemainingRequests
+        copilotRemaining: copilotRemainingRequests,
+        copilotByModel: Array.isArray(copilotApiUsage?.byModel)
+          ? copilotApiUsage.byModel.map(m => ({ model: m.model, qty: m.grossQuantity }))
+          : []
       },
       workersActive: Object.entries(workerSessions || {}).filter(([, s]) => s?.status === "working").map(([name, s]) => ({
         name,
@@ -1971,9 +1976,9 @@ function renderHtml() {
           <div class="pulse-cell-sub" id="pulse-premium-sub">this month</div>
         </div>
         <div class="pulse-cell">
-          <div class="pulse-cell-label">Copilot Remaining</div>
-          <div class="pulse-cell-value" id="pulse-copilot">0</div>
-          <div class="pulse-cell-sub" id="pulse-copilot-sub">used: 0%</div>
+          <div class="pulse-cell-label">Copilot Used</div>
+          <div class="pulse-cell-value" id="pulse-copilot">0 <span class="dim">/ 1500</span></div>
+          <div class="pulse-cell-sub" id="pulse-copilot-sub">loading...</div>
         </div>
         <div class="pulse-cell">
           <div class="pulse-cell-label">Workers</div>
@@ -3421,13 +3426,24 @@ function renderHtml() {
       var premSub = document.getElementById('pulse-premium-sub');
       if (premSub) premSub.textContent = 'this month';
 
-      // Copilot remaining
+      // Copilot used / quota
       var copilotEl = document.getElementById('pulse-copilot');
       if (copilotEl) {
-        copilotEl.textContent = formatRequestCount(reqs.copilotRemaining || 0);
+        var used = Math.round(Number(reqs.copilotUsed || 0));
+        var quota = Number(reqs.copilotQuota || 1500);
+        copilotEl.innerHTML = String(used) + ' <span class="dim">/ ' + formatRequestCount(quota) + '</span>';
       }
       var copilotSub = document.getElementById('pulse-copilot-sub');
-      if (copilotSub) copilotSub.textContent = 'used: ' + String(Number(reqs.copilotUsedPct || 0).toFixed(1)) + '% of ' + formatRequestCount(reqs.copilotQuota || 0);
+      if (copilotSub) {
+        var pct = Number(reqs.copilotUsedPct || 0).toFixed(1);
+        var models = reqs.copilotByModel || [];
+        if (models.length > 0) {
+          var top3 = models.slice().sort(function(a,b){ return (b.qty||0)-(a.qty||0); }).slice(0,3);
+          copilotSub.textContent = pct + '% — ' + top3.map(function(m){ return (m.model||'').replace(/^Auto:\s*/,'').split(' ').slice(-2).join(' ') + ': ' + Math.round(m.qty); }).join(', ');
+        } else {
+          copilotSub.textContent = pct + '% used';
+        }
+      }
 
       // Workers active count
       var wcountEl = document.getElementById('pulse-workers-count');
