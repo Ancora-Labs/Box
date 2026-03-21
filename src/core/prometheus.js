@@ -55,10 +55,8 @@ async function collectScanTargets(repoRoot) {
   const allowedExt = new Set([".js", ".mjs", ".cjs", ".json", ".md", ".yml", ".yaml", ".txt", ".ps1", ".sh"]);
 
   async function walk(absDir, relDir = "") {
-    let entries = [];
-    try {
-      entries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
+    const entries = await fs.readdir(absDir, { withFileTypes: true }).catch(() => null);
+    if (!entries) {
       return;
     }
 
@@ -143,11 +141,13 @@ async function createPrometheusRepoExport(repoRoot, stateDir, scanTargets, criti
 
   for (const target of scanTargets) {
     const absPath = path.join(repoRoot, target);
-    let content = "";
-    try {
-      content = await fs.readFile(absPath, "utf8");
-    } catch (err) {
-      const reason = String(err?.message || err);
+    const contentResult = await fs.readFile(absPath, "utf8")
+      .then((value) => ({ content: value, reason: null }))
+      .catch((err) => ({ content: null, reason: String(err?.message || err) }));
+
+    let content = contentResult.content;
+    if (contentResult.reason) {
+      const reason = contentResult.reason;
       readErrors.push({ file: target, reason });
       content = `READ_ERROR: ${reason}`;
     }
@@ -399,7 +399,7 @@ export async function runPrometheusAnalysis(config, options = {}) {
 
   const workersList = Object.entries(registry?.workers || {})
     .map(([kind, w]) => `  - "${w.name}" (kind: ${kind}, model: ${w.model})`)
-    .join("\n");
+    .join("\n") || "  (none configured)";
 
   let rejectionHint = "";
   let accepted = null;
@@ -424,6 +424,9 @@ You are Prometheus — BOX Self-Evolution Engine & Key Planner. Your job is to:
 ## OPERATOR OBJECTIVE
 ${userPrompt}
 
+## AVAILABLE WORKERS
+${workersList}
+
 ## GROUNDED INPUT SOURCE
   - BOX already exported the full repository into chunk files using direct filesystem access.
   - Read manifest first: ${repoExport.manifestPath}
@@ -445,6 +448,9 @@ ${userPrompt}
 - enforcePrometheusExecutionStrategy: ${planningPolicy.enforcePrometheusExecutionStrategy}
 - If maxTasks is UNLIMITED, include ALL materially distinct actionable tasks you find (no arbitrary 3/5/10 cap).
 - Do not optimize for brevity. Optimize for completeness, depth, and implementation-ready detail.
+
+## AVAILABLE WORKERS
+${workersList}
 
 ${rejectionHint}
 
