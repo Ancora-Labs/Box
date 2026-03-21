@@ -282,6 +282,15 @@
       }
     }
   },
+  "interventionOptimizer": {
+    "enabled": true,
+    "sparseDataThreshold": 3,
+    "defaultSuccessProbability": 0.8,
+    "defaultImpact": 0.7,
+    "defaultRiskCost": 0.3,
+    "defaultSampleCount": 3,
+    "budgetUnit": "workerSpawns"
+  },
   "selfDev": {
     "enabled": true,
     "recoveryTag": "box/recovery-v0.1.0-pre-selfdev",
