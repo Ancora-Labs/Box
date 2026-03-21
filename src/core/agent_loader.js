@@ -97,20 +97,16 @@ export function buildAgentArgs({
   prompt,
   model,
   allowAll = false,
-  autopilot = false,
   noAskUser = false,
-  silent = false,
-  maxContinues = undefined,
-} = {}) {
+  silent = false
+}) {
   const args = [];
 
   if (allowAll) args.push("--allow-all");
   if (noAskUser) args.push("--no-ask-user");
-  if (autopilot) {
-    args.push("--autopilot");
-    if (maxContinues != null) args.push("--max-autopilot-continues", String(maxContinues));
-  }
   if (silent) args.push("--silent");
+  // --autopilot intentionally never passed — single-prompt mode only
+
 
   if (agentSlug && agentFileExists(agentSlug)) {
     args.push("--agent", agentSlug);

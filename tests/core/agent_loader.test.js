@@ -6,7 +6,7 @@ describe("buildAgentArgs", () => {
   it("keeps existing leadership behavior by default", () => {
     // Leadership calls: no autopilot, no allow-all by default — single-prompt mode
     const args = buildAgentArgs({
-      agentSlug: "prometheus",
+      agentSlug: "moses",
       prompt: "scan the repo",
       model: "GPT-5.3-Codex"
     });
@@ -14,19 +14,17 @@ describe("buildAgentArgs", () => {
     assert.ok(!args.includes("--autopilot"), "autopilot must be off by default");
     assert.ok(!args.includes("--max-autopilot-continues"), "max-autopilot-continues must be absent by default");
     assert.ok(args.includes("--agent"));
-    assert.ok(args.includes("prometheus"));
+    assert.ok(args.includes("moses"));
   });
 
   it("supports a single-request agent call without autopilot", () => {
     const args = buildAgentArgs({
-      agentSlug: "prometheus",
+      agentSlug: "moses",
       prompt: "read the repo and produce one plan",
       model: "GPT-5.3-Codex",
       allowAll: true,
-      autopilot: false,
       noAskUser: true,
-      silent: true,
-      maxContinues: 40
+      silent: true
     });
 
     assert.ok(args.includes("--allow-all"));
