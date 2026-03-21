@@ -261,8 +261,6 @@ export async function collectCycleOutcomes(config) {
   const legacyDispatches = Array.isArray(mosesState?.dispatchLog) ? mosesState.dispatchLog : [];
   const dispatches = [...allActivityEntries, ...legacyDispatches].slice(-20);
 
-  // ── Wave analysis ─────────────────────────────────────────────────────────
-
   // ── Decision quality from recent postmortems ──────────────────────────────
   let decisionQuality = { score: null, labelCounts: {}, total: 0 };
   try {
