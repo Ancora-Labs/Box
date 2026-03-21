@@ -28,7 +28,6 @@ import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
 import { readJson, writeJson } from "./fs_utils.js";
-import { getRoleRegistry } from "./role_registry.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
