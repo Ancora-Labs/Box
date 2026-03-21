@@ -300,36 +300,40 @@ describe("AC5/AC15: Sensitive field denylist — positive coverage", () => {
 
 describe("AC5 negative path: secret fields never reach emitted payload", () => {
   it("buildEvent redacts 'token' field from payload — token value is not in result", () => {
+    // Use a clearly fake value that cannot be mistaken for a real secret by scanners
+    const fakeTokenValue = "FAKE_TOKEN_VALUE_FOR_TESTING";
     const evt = buildEvent(
       EVENTS.BILLING_USAGE_RECORDED,
       EVENT_DOMAIN.BILLING,
       "neg-corr-001",
-      { source: "claude", token: "sk-secret-value-should-not-appear" }
+      { source: "claude", token: fakeTokenValue }
     );
     assert.equal(evt.payload.token, REDACTED, "token must be redacted");
-    assert.notEqual(evt.payload.token, "sk-secret-value-should-not-appear");
+    assert.notEqual(evt.payload.token, fakeTokenValue);
   });
 
   it("buildEvent redacts 'apikey' field — secret value is not in result", () => {
+    const fakeApikeyValue = "FAKE_API_KEY_FOR_TESTING";
     const evt = buildEvent(
       EVENTS.POLICY_MODEL_SELECTED,
       EVENT_DOMAIN.POLICY,
       "neg-corr-002",
-      { model: "claude-opus", apikey: "real-api-key-123" }
+      { model: "claude-opus", apikey: fakeApikeyValue }
     );
     assert.equal(evt.payload.apikey, REDACTED);
-    assert.notEqual(evt.payload.apikey, "real-api-key-123");
+    assert.notEqual(evt.payload.apikey, fakeApikeyValue);
   });
 
   it("buildEvent redacts 'github_token' — secret value is not in result", () => {
+    const fakeGithubToken = "FAKE_GITHUB_TOKEN_FOR_TESTING";
     const evt = buildEvent(
       EVENTS.GOVERNANCE_EVOLUTION_TASK_STARTED,
       EVENT_DOMAIN.GOVERNANCE,
       "neg-corr-003",
-      { taskId: "T-999", github_token: "ghp_supersecret" }
+      { taskId: "T-999", github_token: fakeGithubToken }
     );
     assert.equal(evt.payload.github_token, REDACTED);
-    assert.notEqual(evt.payload.github_token, "ghp_supersecret");
+    assert.notEqual(evt.payload.github_token, fakeGithubToken);
   });
 
   it("emitEvent with sensitive payload does not throw (degraded behavior is explicit)", () => {
