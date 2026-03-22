@@ -18,12 +18,14 @@ import fs from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { appendProgress } from "./state_tracker.js";
+import { appendProgress, appendLineageEntry } from "./state_tracker.js";
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
+import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
+import { buildTaskFingerprint, buildLineageId, LINEAGE_ENTRY_STATUS } from "./lineage_graph.js";
 
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
@@ -436,6 +438,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     );
     await appendProgress(config, `[WORKER:${roleName}] ${label}`);
     const errorMsg = truncate(stderr || stdout || "unknown error", 300);
+
+    // Persist structured escalation for worker errors/timeouts (non-critical write)
+    appendEscalation(config, {
+      role: roleName,
+      task: instruction.task,
+      blockingReasonClass: BLOCKING_REASON_CLASS.WORKER_ERROR,
+      attempts: Number(instruction.reworkAttempt || 0),
+      nextAction: NEXT_ACTION.RETRY,
+      summary: label + ": " + errorMsg
+    }).catch(() => { /* non-fatal */ });
+
     updatedHistory.push({
       from: roleName,
       content: `ERROR: ${errorMsg}`,
@@ -461,6 +474,18 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   const parsed = parseWorkerResponse(stdout, stderr);
 
+  // If access was reported as blocked, persist a structured escalation (non-critical)
+  if (parsed.status === "blocked" && /BOX_ACCESS=[^\n]*blocked/i.test(stdout)) {
+    appendEscalation(config, {
+      role: roleName,
+      task: instruction.task,
+      blockingReasonClass: BLOCKING_REASON_CLASS.ACCESS_BLOCKED,
+      attempts: Number(instruction.reworkAttempt || 0),
+      nextAction: NEXT_ACTION.RETRY,
+      summary: "Worker reported BOX_ACCESS blocked"
+    }).catch(() => { /* non-fatal */ });
+  }
+
   // Policy gate: protected path changes require reviewer approval,
   // so workers cannot auto-finish these changes as fully done.
   try {
@@ -484,6 +509,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
       parsed.status = "blocked";
       parsed.summary = `Role path policy violation for ${roleName}: ${violationSummary}\n${parsed.summary}`;
+
+      // Persist structured escalation for policy violations (non-critical)
+      appendEscalation(config, {
+        role: roleName,
+        task: instruction.task,
+        blockingReasonClass: BLOCKING_REASON_CLASS.POLICY_VIOLATION,
+        attempts: Number(instruction.reworkAttempt || 0),
+        nextAction: NEXT_ACTION.ESCALATE_TO_HUMAN,
+        summary: `Role path policy violation: ${violationSummary}`,
+        prUrl: parsed.prUrl
+      }).catch(() => { /* non-fatal */ });
     }
   } catch {
     // Non-fatal: if policy cannot be read, keep existing worker result.
@@ -544,6 +580,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       // Max rework attempts exhausted — block the task instead of looping
       parsed.status = "blocked";
       parsed.summary = `[VERIFICATION GATE] Escalated after ${currentAttempt} failed attempt(s). ${reworkDecision.escalationReason}\n${parsed.summary}`;
+
+      // Persist structured escalation payload (non-critical write)
+      appendEscalation(config, {
+        role: roleName,
+        task: instruction.task,
+        blockingReasonClass: BLOCKING_REASON_CLASS.MAX_REWORK_EXHAUSTED,
+        attempts: currentAttempt,
+        nextAction: NEXT_ACTION.ESCALATE_TO_HUMAN,
+        summary: reworkDecision.escalationReason || validationResult.gaps.slice(0, 3).join("; "),
+        prUrl: parsed.prUrl
+      }).catch(() => { /* non-fatal */ });
     } else if (reworkDecision.shouldRework) {
       // Push the failed attempt into history so the worker sees context on rework
       updatedHistory.push({
@@ -573,6 +620,46 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   await appendProgress(config,
     `[WORKER:${roleName}] Completed status=${parsed.status}${parsed.prUrl ? ` PR=${parsed.prUrl}` : ""}`
   );
+
+  // ── Optional lineage graph recording (non-blocking; rollback via config.runtime.lineageGraphEnabled=false) ──
+  // Only records when instruction.taskId is provided. Safe to skip — lineage is observability,
+  // not execution state. On any failure, warn and continue.
+  if (config?.runtime?.lineageGraphEnabled !== false && instruction.taskId) {
+    try {
+      const fp = buildTaskFingerprint(instruction.taskKind || "general", instruction.task || "");
+      const attempt = Number(instruction.reworkAttempt || 0) + 1;
+      const taskId = Number(instruction.taskId);
+      const parentId = instruction.parentLineageId || null;
+      const rootId = Number(instruction.lineageRootId || taskId);
+      const depth = Number(instruction.lineageDepth || instruction.reworkAttempt || 0);
+      const splitAncestry = Array.isArray(instruction.splitAncestry) ? instruction.splitAncestry : [];
+
+      // Map worker result status to lineage entry status
+      const statusMap = { done: LINEAGE_ENTRY_STATUS.PASSED, blocked: LINEAGE_ENTRY_STATUS.BLOCKED, error: LINEAGE_ENTRY_STATUS.FAILED };
+      const entryStatus = statusMap[parsed.status] || LINEAGE_ENTRY_STATUS.FAILED;
+
+      const lineageEntry = {
+        id: buildLineageId(fp, taskId, attempt),
+        taskId,
+        semanticKey: String(instruction.semanticKey || `${instruction.taskKind || "general"}::${fp.slice(0, 16)}`),
+        fingerprint: fp,
+        parentId,
+        rootId,
+        depth,
+        status: entryStatus,
+        timestamp: new Date().toISOString(),
+        failureReason: (entryStatus === LINEAGE_ENTRY_STATUS.FAILED || entryStatus === LINEAGE_ENTRY_STATUS.BLOCKED)
+          ? truncate(parsed.summary || "unknown failure", 200)
+          : null,
+        splitAncestry
+      };
+
+      await appendLineageEntry(config, lineageEntry);
+    } catch (lineageErr) {
+      // Lineage recording failures are non-fatal — log but never block execution
+      await appendProgress(config, `[LINEAGE] recording failed (non-fatal): ${String(lineageErr?.message || lineageErr)}`).catch(() => {});
+    }
+  }
 
   // Add worker's response to history
   updatedHistory.push({

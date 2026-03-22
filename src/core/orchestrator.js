@@ -27,7 +27,162 @@ import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
-import { readJson, writeJson } from "./fs_utils.js";
+import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REASON } from "./fs_utils.js";
+import { updatePipelineProgress, readPipelineProgress } from "./pipeline_progress.js";
+import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js";
+import { computeCycleSLOs, persistSloMetrics } from "./slo_checker.js";
+import { computeCycleAnalytics, persistCycleAnalytics, CYCLE_PHASE } from "./cycle_analytics.js";
+import {
+  addSchemaVersion,
+  migrateData,
+  recordMigrationTelemetry,
+  STATE_FILE_TYPE,
+  MIGRATION_REASON
+} from "./schema_registry.js";
+
+/**
+ * Orchestrator health status enum.
+ * Written to state/orchestrator_health.json whenever status changes.
+ */
+export const ORCHESTRATOR_STATUS = Object.freeze({
+  OPERATIONAL: "operational",
+  DEGRADED: "degraded"
+});
+
+/** Write orchestrator health record to state/orchestrator_health.json. Exported for downstream use. */
+export async function writeOrchestratorHealth(stateDir, status, reason, details = null) {
+  await writeJson(path.join(stateDir, "orchestrator_health.json"), {
+    orchestratorStatus: status,
+    reason,
+    details: details || null,
+    recordedAt: new Date().toISOString()
+  });
+}
+
+/**
+ * Safe wrapper for updatePipelineProgress.
+ *
+ * Pipeline progress is observability state — a write failure must NEVER block
+ * orchestration. Errors are logged explicitly (never silently dropped) so
+ * the failure is observable via the progress log.
+ *
+ * Risk: medium — touches orchestrator transitions directly.
+ */
+async function safeUpdatePipelineProgress(config, stepId, detail, extra) {
+  try {
+    await updatePipelineProgress(config, stepId, detail, extra);
+  } catch (err) {
+    warn(`[orchestrator] pipeline progress update failed (step=${stepId}): ${String(err?.message || err)}`);
+  }
+}
+
+/**
+ * Audit the three critical checkpoint state files using readJsonSafe.
+ *
+ * Critical vs non-critical classification:
+ *   CRITICAL  (handled here): worker_sessions.json, jesus_directive.json, prometheus_analysis.json
+ *   NON-CRITICAL (handled by readJson with fallback + box:readError event): all other reads.
+ *
+ * A missing file (ENOENT) is expected on first run and is NOT an error.
+ * An invalid file (corrupt JSON) is always an error — sets orchestratorStatus=degraded.
+ *
+ * Returns: { sessions, jesusDirective, prometheusAnalysis, degraded: boolean }
+ */
+async function auditCriticalStateFiles(config, stateDir) {
+  const criticalReads = await Promise.all([
+    readJsonSafe(path.join(stateDir, "worker_sessions.json")),
+    readJsonSafe(path.join(stateDir, "jesus_directive.json")),
+    readJsonSafe(path.join(stateDir, "prometheus_analysis.json"))
+  ]);
+  const [sessionsResult, jesusDirectiveResult, prometheusAnalysisResult] = criticalReads;
+
+  let sessions = {};
+  let jesusDirective = null;
+  let prometheusAnalysis = null;
+  const degradedReasons = [];
+
+  for (const [label, result, defaultFallback, fileType] of [
+    ["worker_sessions.json",    sessionsResult,          {}, STATE_FILE_TYPE.WORKER_SESSIONS],
+    ["jesus_directive.json",    jesusDirectiveResult,    null, null],
+    ["prometheus_analysis.json", prometheusAnalysisResult, null, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS]
+  ]) {
+    if (result.ok) {
+      // Successfully parsed — run schema migration if this file type is versioned
+      if (fileType && result.data !== null) {
+        const migrated = migrateData(result.data, fileType);
+        if (!migrated.ok) {
+          // Unknown future version or structural mismatch — fail closed, log telemetry
+          await recordMigrationTelemetry(stateDir, {
+            fileType,
+            filePath: path.join(stateDir, label),
+            fromVersion: migrated.fromVersion,
+            toVersion: migrated.toVersion,
+            success: false,
+            reason: migrated.reason
+          });
+          if (migrated.reason === MIGRATION_REASON.UNKNOWN_FUTURE_VERSION) {
+            const detail = `${label}: unknown future schemaVersion (${migrated.fromVersion}) — fail-closed`;
+            degradedReasons.push(detail);
+            await appendProgress(config,
+              `[STARTUP] WARNING: ${label} has unknown future schemaVersion (${migrated.fromVersion}) — treating as degraded to avoid data corruption`
+            );
+            await appendAlert(config, {
+              severity: ALERT_SEVERITY.CRITICAL,
+              source: "orchestrator",
+              title: `Unknown future schemaVersion in ${label}`,
+              message: `reason=${migrated.reason} fromVersion=${migrated.fromVersion}`
+            });
+          }
+          // Use default fallback for this file (do not use unmigratable data)
+          if (label === "worker_sessions.json") sessions = defaultFallback;
+          if (label === "prometheus_analysis.json") prometheusAnalysis = defaultFallback;
+          continue;
+        }
+        // Record telemetry only for actual migrations performed (not ALREADY_CURRENT)
+        if (migrated.reason === MIGRATION_REASON.OK) {
+          await recordMigrationTelemetry(stateDir, {
+            fileType,
+            filePath: path.join(stateDir, label),
+            fromVersion: migrated.fromVersion,
+            toVersion: migrated.toVersion,
+            success: true,
+            reason: migrated.reason
+          });
+        }
+        if (label === "worker_sessions.json") sessions = migrated.data;
+        if (label === "prometheus_analysis.json") prometheusAnalysis = migrated.data;
+        continue;
+      }
+    } else if (result.reason === READ_JSON_REASON.MISSING) {
+      // Expected on first run — use fallback silently
+    } else {
+      // Invalid JSON in a critical state file — record degraded reason and emit telemetry
+      const detail = `${label}: ${result.error?.message || "parse error"}`;
+      degradedReasons.push(detail);
+      await appendProgress(config,
+        `[STARTUP] CRITICAL: corrupt state file ${label} (reason=invalid) — entering degraded mode`
+      );
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "orchestrator",
+        title: `Corrupt critical state file: ${label}`,
+        message: `reason=invalid error=${result.error?.message || "parse error"}`
+      });
+    }
+    if (label === "worker_sessions.json") sessions = result.ok ? result.data : defaultFallback;
+    if (label === "jesus_directive.json") jesusDirective = result.ok ? result.data : defaultFallback;
+    if (label === "prometheus_analysis.json") prometheusAnalysis = result.ok ? result.data : defaultFallback;
+  }
+
+  if (degradedReasons.length > 0) {
+    await writeOrchestratorHealth(stateDir, ORCHESTRATOR_STATUS.DEGRADED, "corrupt_state_files", degradedReasons);
+    await appendProgress(config, `[STARTUP] orchestratorStatus=degraded reasons: ${degradedReasons.join("; ")}`);
+  } else {
+    await writeOrchestratorHealth(stateDir, ORCHESTRATOR_STATUS.OPERATIONAL, null);
+  }
+
+  return { sessions, jesusDirective, prometheusAnalysis, degraded: degradedReasons.length > 0 };
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,10 +219,20 @@ export async function runDaemon(config) {
     process.exit(0);
   });
 
-  // ── Checkpoint-based startup: resume from where we left off ──
-  const sessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
-  const jesusDirective = await readJson(path.join(stateDir, "jesus_directive.json"), null);
-  const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
+  // ── Checkpoint-based startup: clean up leftover .tmp files, then audit ──
+  {
+    const cleanupResult = await cleanupStaleTempFiles(stateDir);
+    if (cleanupResult.removed.length > 0) {
+      await appendProgress(liveConfig, `[STARTUP] Cleaned up ${cleanupResult.removed.length} stale temp file(s): ${cleanupResult.removed.join(", ")}`);
+    }
+    if (!cleanupResult.ok) {
+      warn(`[orchestrator] stale-temp cleanup failed (non-fatal): ${String(cleanupResult.error?.message || cleanupResult.error)}`);
+    }
+  }
+
+  // ── Checkpoint-based startup: audit critical state files, then resume ──
+  const { sessions, jesusDirective, prometheusAnalysis } =
+    await auditCriticalStateFiles(liveConfig, stateDir);
 
   // Reset zombie workers (stale > 2× timeout)
   const workerTimeoutMs = Number(liveConfig.runtime?.workerTimeoutMinutes || 30) * 60 * 1000;
@@ -94,7 +259,7 @@ export async function runDaemon(config) {
     }
   }
   if (zombieReset) {
-    await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+    await writeJson(path.join(stateDir, "worker_sessions.json"), addSchemaVersion(sessions, STATE_FILE_TYPE.WORKER_SESSIONS));
   }
 
   const activeWorkers = Object.entries(sessions)
@@ -164,7 +329,7 @@ async function recoverStaleWorkerSessions(config, stateDir, sessions) {
 
   if (recoveredRoles.length === 0) return false;
 
-  await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+  await writeJson(path.join(stateDir, "worker_sessions.json"), addSchemaVersion(sessions, STATE_FILE_TYPE.WORKER_SESSIONS));
 
   for (const role of recoveredRoles) {
     const workerStatePath = path.join(stateDir, roleToWorkerStateFile(role));
@@ -356,10 +521,25 @@ async function countCompletedPlans(config, plans) {
 async function runSingleCycle(config) {
   const stateDir = config.paths?.stateDir || "state";
 
+  // Clean up any leftover .tmp files from a previous crash before reading state.
+  const cleanupResult = await cleanupStaleTempFiles(stateDir);
+  if (cleanupResult.removed.length > 0) {
+    await appendProgress(config, `[CYCLE] Cleaned up ${cleanupResult.removed.length} stale temp file(s): ${cleanupResult.removed.join(", ")}`);
+  }
+  if (!cleanupResult.ok) {
+    warn(`[orchestrator] stale-temp cleanup failed (non-fatal): ${String(cleanupResult.error?.message || cleanupResult.error)}`);
+  }
+
+  // Audit critical state files at cycle start — writes orchestrator_health.json.
+  // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
+  await auditCriticalStateFiles(config, stateDir);
+
   // Step 1: Jesus analyzes state and decides what to do (1 request)
   await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");
+  await safeUpdatePipelineProgress(config, "jesus_awakening", "Jesus starting system state analysis");
   let jesusDecision;
   try {
+    await safeUpdatePipelineProgress(config, "jesus_reading", "Jesus reading system state");
     jesusDecision = await runJesusCycle(config);
   } catch (err) {
     await appendProgress(config, `[CYCLE] Jesus failed: ${String(err?.message || err)}`);
@@ -372,10 +552,16 @@ async function runSingleCycle(config) {
     return;
   }
 
+  await safeUpdatePipelineProgress(config, "jesus_decided", "Jesus decision ready", {
+    jesusDecision: typeof jesusDecision === "object" ? String(jesusDecision.thinking || "").slice(0, 200) : ""
+  });
+
   // Step 2: Prometheus plans (single-prompt, no autopilot)
   await appendProgress(config, "[CYCLE] ── Step 2: Prometheus scanning & planning ──");
+  await safeUpdatePipelineProgress(config, "prometheus_starting", "Prometheus starting repository scan");
   let prometheusAnalysis;
   try {
+    await safeUpdatePipelineProgress(config, "prometheus_reading_repo", "Prometheus reading repository");
     prometheusAnalysis = await runPrometheusAnalysis(config, {
       prompt: jesusDecision.briefForPrometheus || jesusDecision.briefForMoses || jesusDecision.thinking || "Full repository analysis",
       requestedBy: "Jesus"
@@ -388,11 +574,17 @@ async function runSingleCycle(config) {
 
   if (!prometheusAnalysis || !Array.isArray(prometheusAnalysis.plans) || prometheusAnalysis.plans.length === 0) {
     await appendProgress(config, "[CYCLE] Prometheus produced no plans — cycle complete");
+    await safeUpdatePipelineProgress(config, "cycle_complete", "Prometheus produced no plans — nothing to dispatch");
     return;
   }
 
+  await safeUpdatePipelineProgress(config, "prometheus_done", `Prometheus complete — ${prometheusAnalysis.plans.length} plan(s)`, {
+    planCount: prometheusAnalysis.plans.length
+  });
+
   // Step 3: Athena validates the plan (1 request)
   await appendProgress(config, "[CYCLE] ── Step 3: Athena reviewing plan ──");
+  await safeUpdatePipelineProgress(config, "athena_reviewing", "Athena reviewing Prometheus plan");
   let planReview;
   try {
     planReview = await runAthenaPlanReview(config, prometheusAnalysis);
@@ -437,10 +629,17 @@ async function runSingleCycle(config) {
     return;
   }
 
+  await safeUpdatePipelineProgress(config, "athena_approved", "Athena approved the plan");
+
   // Step 4: Dispatch workers sequentially (1 request per worker)
   const plans = prometheusAnalysis.plans;
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
+  await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${plans.length} worker(s)`, {
+    workersTotal: plans.length,
+    workersDone: 0
+  });
 
+  let workersDone = 0;
   for (const plan of plans) {
     // Check for stop request between each worker
     const stopReq = await readStopRequest(config);
@@ -448,6 +647,12 @@ async function runSingleCycle(config) {
       await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
       return;
     }
+
+    await safeUpdatePipelineProgress(config, "workers_running", `Running worker: ${plan.role}`, {
+      workersTotal: plans.length,
+      workersDone,
+      currentWorker: plan.role
+    });
 
     let workerResult;
     try {
@@ -467,11 +672,91 @@ async function runSingleCycle(config) {
       await appendProgress(config, `[CYCLE] Athena postmortem failed for ${plan.role}: ${String(err?.message || err)}`);
     }
 
+    workersDone += 1;
     // Wait for worker to fully finish (PR created, etc.)
     await waitForWorkersToFinish(config);
   }
 
+  await safeUpdatePipelineProgress(config, "workers_finishing", "All workers finishing up", {
+    workersTotal: plans.length,
+    workersDone: plans.length
+  });
+
   await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
+  await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${plans.length} worker(s) processed`, {
+    workersTotal: plans.length,
+    workersDone: plans.length
+  });
+
+  // ── SLO check: compute and persist cycle-level SLO metrics ─────────────────
+  // cycle_id = pipeline_progress.startedAt (the canonical cycle identifier).
+  // All latency inputs are read from pipeline_progress.json.stageTimestamps.
+  // This runs after cycle_complete so all stage timestamps are present.
+  try {
+    const progress = await readPipelineProgress(config);
+    const cycleRecord = computeCycleSLOs(
+      config,
+      progress.stageTimestamps || {},
+      progress.startedAt || null,
+      progress.completedAt || new Date().toISOString()
+    );
+    await persistSloMetrics(config, cycleRecord);
+
+    if (cycleRecord.sloBreaches.length > 0) {
+      const breachSummary = cycleRecord.sloBreaches
+        .map(b => `${b.metric}=${b.actual}ms threshold=${b.threshold}ms severity=${b.severity}`)
+        .join("; ");
+      await appendProgress(config, `[SLO] Cycle SLO breaches detected: ${breachSummary}`);
+
+      for (const breach of cycleRecord.sloBreaches) {
+        await appendAlert(config, {
+          severity: breach.severity === "critical" ? ALERT_SEVERITY.CRITICAL : ALERT_SEVERITY.HIGH,
+          source: "slo_checker",
+          title: `SLO breach: ${breach.metric}`,
+          message: `actual=${breach.actual}ms threshold=${breach.threshold}ms cycleId=${cycleRecord.cycleId || "unknown"} reason=${breach.reason}`
+        });
+      }
+
+      // Write degraded health when SLO breaches are detected (AC3/AC14 — must call writeOrchestratorHealth, not just appendAlert)
+      if (config?.slo?.degradedOnBreach !== false) {
+        await writeOrchestratorHealth(stateDir, ORCHESTRATOR_STATUS.DEGRADED, "slo_breach",
+          cycleRecord.sloBreaches.map(b => `${b.metric}: actual=${b.actual}ms threshold=${b.threshold}ms severity=${b.severity}`)
+        );
+      }
+    } else {
+      await appendProgress(config, `[SLO] Cycle SLO check passed — all metrics within thresholds (cycleId=${cycleRecord.cycleId || "unknown"})`);
+    }
+  } catch (err) {
+    // SLO check is advisory — never block orchestration
+    warn(`[orchestrator] SLO check failed (non-fatal): ${String(err?.message || err)}`);
+    await appendProgress(config, `[SLO] SLO check failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Cycle analytics: compute and persist KPIs, confidence, and causal links ─
+  // Advisory — never blocks orchestration. Runs after SLO so sloRecord is available.
+  // Risk note (Athena AC19): per-cycle file I/O on hot path, wrapped in try/catch.
+  try {
+    const progressForAnalytics = await readPipelineProgress(config);
+    // Re-read the SLO record that was just persisted to get the computed values.
+    // Import here to avoid a circular reference — slo_checker has no dep on cycle_analytics.
+    const { readSloMetrics } = await import("./slo_checker.js");
+    const sloState = await readSloMetrics(config);
+    const sloRecord = sloState?.lastCycle ?? null;
+
+    const analyticsRecord = computeCycleAnalytics(config, {
+      sloRecord,
+      pipelineProgress: progressForAnalytics,
+      workerResults: null,   // worker result details not aggregated at this call site
+      planCount: Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
+      phase: CYCLE_PHASE.COMPLETED,
+    });
+    await persistCycleAnalytics(config, analyticsRecord);
+    await appendProgress(config, `[ANALYTICS] Cycle analytics written — confidence=${analyticsRecord.confidence.level} sloStatus=${analyticsRecord.kpis.sloStatus} phase=${analyticsRecord.phase}`);
+  } catch (err) {
+    // Analytics are advisory — never block orchestration
+    warn(`[orchestrator] Cycle analytics failed (non-fatal): ${String(err?.message || err)}`);
+    await appendProgress(config, `[ANALYTICS] Cycle analytics failed (non-fatal): ${String(err?.message || err)}`);
+  }
 }
 
 // ── Main loop: Jesus → Prometheus → Athena → Worker → Athena → repeat ──────
@@ -483,11 +768,15 @@ async function mainLoop(config) {
   // Phase 1: wait for any active workers from previous session
   await waitForWorkersToFinish(config);
 
+  // Mark system idle before entering the main loop.
+  await safeUpdatePipelineProgress(config, "idle", "System idle — awaiting next cycle");
+
   // Phase 2: main cycle loop
   while (true) {
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
       await appendProgress(config, `[BOX] Stop request detected, shutting down (reason=${stopReq.reason || "unknown"})`);
+      await safeUpdatePipelineProgress(config, "idle", "System stopped");
       await clearStopRequest(config);
       await clearDaemonPid(config);
       break;
@@ -523,6 +812,29 @@ async function mainLoop(config) {
     // Check if there's remaining work from a previous Prometheus plan
     const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
     const totalPlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0;
+
+    // Read and prioritise escalation queue before starting any new planning cycle.
+    // Alerts leadership when blocked tasks require attention; does not gate planning.
+    try {
+      const escalationEntries = await loadEscalationQueue(config);
+      const prioritisedEscalations = sortEscalationQueue(escalationEntries);
+      if (prioritisedEscalations.length > 0) {
+        const top = prioritisedEscalations[0];
+        await appendProgress(config,
+          `[LOOP] Escalation queue: ${prioritisedEscalations.length} unresolved — top: role=${top.role} class=${top.blockingReasonClass} attempts=${top.attempts}`
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: `Escalation queue: ${prioritisedEscalations.length} unresolved task(s)`,
+          message: prioritisedEscalations.slice(0, 3)
+            .map(e => `[${e.blockingReasonClass}] ${e.role}: ${e.taskSnippet}`)
+            .join(" | ")
+        });
+      }
+    } catch (err) {
+      warn(`[orchestrator] escalation queue read error (non-fatal): ${String(err?.message || err)}`);
+    }
 
     if (totalPlans > 0) {
       const { completed, pending } = await countCompletedPlans(config, prometheusAnalysis.plans);
@@ -563,6 +875,7 @@ async function mainLoop(config) {
       await runSingleCycle(config);
     }
 
+    await safeUpdatePipelineProgress(config, "idle", "Cycle complete — waiting before next iteration");
     await sleep(RE_EVAL_SLEEP_MS);
   }
 }

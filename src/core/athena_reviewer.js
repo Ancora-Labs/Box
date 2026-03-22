@@ -20,6 +20,181 @@ import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js"
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
+import {
+  addSchemaVersion,
+  extractPostmortemEntries,
+  migrateData,
+  recordMigrationTelemetry,
+  STATE_FILE_TYPE,
+  MIGRATION_REASON
+} from "./schema_registry.js";
+
+// ── Canonical postmortem schema ──────────────────────────────────────────────
+
+/**
+ * Canonical values for Athena's postmortem `recommendation` field.
+ * New schema (written by runAthenaPostmortem since BOX v1).
+ *
+ * @enum {string}
+ */
+export const POSTMORTEM_RECOMMENDATION = Object.freeze({
+  PROCEED: "proceed",   // task succeeded — count toward completedTasks
+  REWORK:  "rework",    // task needs another attempt
+  ESCALATE: "escalate"  // task needs human intervention
+});
+
+/**
+ * Decision quality labels for postmortem entries.
+ * Assigned deterministically from the task outcome via LABEL_OUTCOME_MAP.
+ *
+ * @enum {string}
+ */
+export const DECISION_QUALITY_LABEL = Object.freeze({
+  CORRECT:         "correct",          // outcome==merged — plan executed and merged as expected
+  DELAYED_CORRECT: "delayed-correct",  // outcome==reopen — completed after extra iteration
+  INCORRECT:       "incorrect",        // outcome==rollback — plan executed but result was rolled back
+  INCONCLUSIVE:    "inconclusive"      // outcome==timeout or unknown — result indeterminate
+});
+
+/**
+ * Reason codes returned by computeDecisionQualityLabel.
+ * Distinguishes missing input from invalid input — no silent fallback allowed.
+ *
+ * @enum {string}
+ */
+export const DECISION_QUALITY_REASON = Object.freeze({
+  OK:            "OK",
+  /** outcome field was absent from the worker result */
+  MISSING_INPUT: "MISSING_INPUT",
+  /** outcome field was present but not a known value in LABEL_OUTCOME_MAP */
+  INVALID_INPUT: "INVALID_INPUT"
+});
+
+/**
+ * Explicit label-to-outcome mapping table.
+ * Workers and tests must use this table; do not infer labels from ad-hoc string matching.
+ *
+ * outcome       → decisionQualityLabel
+ * ─────────────────────────────────────
+ * merged        → correct
+ * reopen        → delayed-correct
+ * rollback      → incorrect
+ * timeout       → inconclusive
+ *
+ * All other values → INVALID_INPUT (label=inconclusive, degraded status)
+ */
+export const LABEL_OUTCOME_MAP = Object.freeze({
+  merged:   DECISION_QUALITY_LABEL.CORRECT,
+  reopen:   DECISION_QUALITY_LABEL.DELAYED_CORRECT,
+  rollback: DECISION_QUALITY_LABEL.INCORRECT,
+  timeout:  DECISION_QUALITY_LABEL.INCONCLUSIVE
+});
+
+/** All valid outcome keys as a Set for O(1) lookup. */
+const VALID_OUTCOMES = new Set(Object.keys(LABEL_OUTCOME_MAP));
+
+/**
+ * Compute the decision quality label for a postmortem outcome.
+ *
+ * Distinguishes:
+ *   - Missing input  (outcome is null/undefined) → inconclusive, reason=MISSING_INPUT
+ *   - Invalid input  (outcome present but unknown) → inconclusive + degraded status, reason=INVALID_INPUT
+ *   - Valid input    → mapped label, reason=OK
+ *
+ * Never returns a silent fallback — callers must check `reason` before trusting `label`.
+ *
+ * @param {string|null|undefined} outcome
+ * @returns {{ label: string, reason: string, status: "ok"|"degraded" }}
+ */
+export function computeDecisionQualityLabel(outcome) {
+  if (outcome === null || outcome === undefined || outcome === "") {
+    return {
+      label: DECISION_QUALITY_LABEL.INCONCLUSIVE,
+      reason: DECISION_QUALITY_REASON.MISSING_INPUT,
+      status: "degraded"
+    };
+  }
+  const key = String(outcome).toLowerCase().trim();
+  if (!VALID_OUTCOMES.has(key)) {
+    return {
+      label: DECISION_QUALITY_LABEL.INCONCLUSIVE,
+      reason: DECISION_QUALITY_REASON.INVALID_INPUT,
+      status: "degraded"
+    };
+  }
+  return {
+    label: LABEL_OUTCOME_MAP[key],
+    reason: DECISION_QUALITY_REASON.OK,
+    status: "ok"
+  };
+}
+
+/**
+ * Normalize the decisionQualityLabel field on a postmortem entry.
+ * For legacy entries that pre-date T-012, the field will be absent — default to inconclusive.
+ * For entries written after T-012, the field must be a valid DECISION_QUALITY_LABEL value.
+ *
+ * @param {object} pm - postmortem record
+ * @returns {string} - a DECISION_QUALITY_LABEL value
+ */
+export function normalizeDecisionQualityLabel(pm) {
+  if (!pm || typeof pm !== "object") return DECISION_QUALITY_LABEL.INCONCLUSIVE;
+  const existing = pm.decisionQualityLabel;
+  if (!existing) return DECISION_QUALITY_LABEL.INCONCLUSIVE;
+  const validLabels = new Set(Object.values(DECISION_QUALITY_LABEL));
+  return validLabels.has(existing) ? existing : DECISION_QUALITY_LABEL.INCONCLUSIVE;
+}
+
+/**
+ * Reason codes returned by normalizePostmortemVerdict.
+ * Callers must check this field before trusting `pass`.
+ *
+ * @enum {string}
+ */
+export const POSTMORTEM_PARSE_REASON = Object.freeze({
+  OK: "OK",
+  /** Neither `recommendation` nor legacy `verdict` field is present. */
+  MISSING_VERDICT: "MISSING_VERDICT",
+  /** `recommendation` is present but not a known POSTMORTEM_RECOMMENDATION value. */
+  INVALID_RECOMMENDATION: "INVALID_RECOMMENDATION"
+});
+
+/** All valid recommendation strings as a Set for O(1) lookup. */
+const VALID_RECOMMENDATIONS = new Set(Object.values(POSTMORTEM_RECOMMENDATION));
+
+/**
+ * Normalize a postmortem record's pass/fail status.
+ *
+ * Strategy: normalize on read (no silent fallback for critical state).
+ *   - New schema  (has `recommendation`): pass iff recommendation === "proceed"
+ *   - Legacy schema (has `verdict`, no `recommendation`): pass iff verdict === "pass"
+ *   - Unknown (neither field): degrade — pass=false, reason=MISSING_VERDICT
+ *
+ * @param {object} pm - postmortem record from athena_postmortems.json
+ * @returns {{ pass: boolean, schema: "new"|"legacy"|"unknown", reason: string }}
+ */
+export function normalizePostmortemVerdict(pm) {
+  if (!pm || typeof pm !== "object") {
+    return { pass: false, schema: "unknown", reason: POSTMORTEM_PARSE_REASON.MISSING_VERDICT };
+  }
+
+  // New schema: recommendation field takes precedence
+  if ("recommendation" in pm) {
+    const rec = pm.recommendation;
+    if (!VALID_RECOMMENDATIONS.has(rec)) {
+      return { pass: false, schema: "new", reason: POSTMORTEM_PARSE_REASON.INVALID_RECOMMENDATION };
+    }
+    return { pass: rec === POSTMORTEM_RECOMMENDATION.PROCEED, schema: "new", reason: POSTMORTEM_PARSE_REASON.OK };
+  }
+
+  // Legacy schema fallback: verdict field (backward compatibility)
+  if ("verdict" in pm) {
+    return { pass: pm.verdict === "pass", schema: "legacy", reason: POSTMORTEM_PARSE_REASON.OK };
+  }
+
+  // Neither field present — degrade explicitly, never silent
+  return { pass: false, schema: "unknown", reason: POSTMORTEM_PARSE_REASON.MISSING_VERDICT };
+}
 
 // ── AI call (single-prompt, 1 request) ──────────────────────────────────────
 
@@ -188,6 +363,16 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   const workerSummary = workerResult?.summary || workerResult?.raw?.slice(0, 2000) || "no summary";
   const filesChanged = workerResult?.filesChanged || workerResult?.filesTouched || "unknown";
 
+  // Derive task outcome for decision quality labeling.
+  // Explicit outcome values (merged, reopen, rollback, timeout) map deterministically.
+  // If workerResult.outcome is absent, infer a best-effort value from status/PR fields.
+  const rawOutcome = workerResult?.outcome
+    || (workerStatus === "done" && workerPr !== "none" ? "merged" : null)
+    || (workerStatus === "timeout" ? "timeout" : null)
+    || (workerStatus === "rollback" ? "rollback" : null)
+    || null;
+  const dql = computeDecisionQualityLabel(rawOutcome);
+
   // Evolution executor passes local verification results and pre-review context
   const verificationOutput = workerResult?.verificationOutput || null;
   const verificationPassed = workerResult?.verificationPassed;
@@ -200,11 +385,46 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   const planVerification = originalPlan?.verification || "no verification defined";
   const planContext = String(originalPlan?.context || "").slice(0, 2000);
 
-  // Load previous postmortems for learning
-  const pastPostmortems = await readJson(path.join(stateDir, "athena_postmortems.json"), []);
-  const recentLessons = Array.isArray(pastPostmortems)
-    ? pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ")
-    : "";
+  // Load previous postmortems for learning — migrate v0→v1 on read
+  const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
+  const rawPostmortems = await readJson(postmortemsFilePath, null);
+  let pastPostmortems;
+  if (rawPostmortems !== null) {
+    const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+    if (!migrated.ok) {
+      // Unknown future version or corrupt — fail closed, log telemetry, degrade gracefully
+      await recordMigrationTelemetry(stateDir, {
+        fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
+        filePath: postmortemsFilePath,
+        fromVersion: migrated.fromVersion,
+        toVersion: migrated.toVersion,
+        success: false,
+        reason: migrated.reason
+      });
+      if (migrated.reason === MIGRATION_REASON.UNKNOWN_FUTURE_VERSION) {
+        await appendProgress(config,
+          `[ATHENA] WARNING: athena_postmortems.json has unknown future schemaVersion (${migrated.fromVersion}) — ignoring history to avoid data corruption`
+        );
+      }
+      pastPostmortems = [];
+    } else {
+      if (migrated.reason === MIGRATION_REASON.OK) {
+        // Record telemetry only for actual migrations (not ALREADY_CURRENT)
+        await recordMigrationTelemetry(stateDir, {
+          fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
+          filePath: postmortemsFilePath,
+          fromVersion: migrated.fromVersion,
+          toVersion: migrated.toVersion,
+          success: true,
+          reason: migrated.reason
+        });
+      }
+      pastPostmortems = extractPostmortemEntries(migrated.data);
+    }
+  } else {
+    pastPostmortems = [];
+  }
+  const recentLessons = pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ");
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 
@@ -272,6 +492,9 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
       taskCompleted: workerStatus === "done",
       recommendation: "proceed",
       lessonLearned: "",
+      decisionQualityLabel: dql.label,
+      decisionQualityLabelReason: dql.reason,
+      decisionQualityStatus: dql.status,
       reviewedAt: new Date().toISOString()
     };
   }
@@ -291,6 +514,9 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
     followUpNeeded: d.followUpNeeded === true,
     followUpTask: d.followUpTask || "",
     recommendation: d.recommendation || "proceed",
+    decisionQualityLabel: dql.label,
+    decisionQualityLabelReason: dql.reason,
+    decisionQualityStatus: dql.status,
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
@@ -299,13 +525,13 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
   const history = Array.isArray(pastPostmortems) ? pastPostmortems : [];
   history.push(postmortem);
   if (history.length > 50) history.splice(0, history.length - 50);
-  await writeJson(path.join(stateDir, "athena_postmortems.json"), history);
+  await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
 
   // Also write latest for dashboard visibility
   await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
 
   await appendProgress(config,
-    `[ATHENA] Postmortem: ${workerName} — score=${postmortem.qualityScore}/10 deviation=${postmortem.deviation} recommendation=${postmortem.recommendation}`
+    `[ATHENA] Postmortem: ${workerName} — score=${postmortem.qualityScore}/10 deviation=${postmortem.deviation} recommendation=${postmortem.recommendation} decisionQualityLabel=${postmortem.decisionQualityLabel}`
   );
   chatLog(stateDir, athenaName,
     `Postmortem: ${workerName} score=${postmortem.qualityScore}/10 → ${postmortem.recommendation}`
