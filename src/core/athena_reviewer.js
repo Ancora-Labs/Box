@@ -28,6 +28,241 @@ import {
   STATE_FILE_TYPE,
   MIGRATION_REASON
 } from "./schema_registry.js";
+import {
+  validateLeadershipContract,
+  LEADERSHIP_CONTRACT_TYPE,
+  TRUST_BOUNDARY_ERROR,
+} from "./trust_boundary.js";
+
+// ── Rubric calibration ───────────────────────────────────────────────────────
+
+/**
+ * Taxonomy of rationale classes used in Athena plan review and calibration.
+ *
+ * Positive classes signal plan quality indicators.
+ * Negative classes signal plan deficiency indicators.
+ *
+ * These values are used in calibration fixtures (expectedRationaleClasses) and in
+ * the heuristic scoring function (scoreCalibrationPlan). New values must be added
+ * here before being referenced in fixtures or tests.
+ *
+ * @enum {string}
+ */
+export const RATIONALE_CLASS = Object.freeze({
+  // ── Positive (plan quality indicators) ────────────────────────────────────
+  /** Goal expressed in measurable, observable terms */
+  MEASURABLE_GOAL:          "MEASURABLE_GOAL",
+  /** Success criterion is explicit and unambiguous */
+  CLEAR_SUCCESS_CRITERION:  "CLEAR_SUCCESS_CRITERION",
+  /** Verification uses a concrete command, test, or check */
+  CONCRETE_VERIFICATION:    "CONCRETE_VERIFICATION",
+  /** Files, modules, or boundaries are explicitly named */
+  SCOPE_DEFINED:            "SCOPE_DEFINED",
+  /** Wave/dependency ordering is correct and consistent */
+  DEPENDENCY_CORRECT:       "DEPENDENCY_CORRECT",
+  // ── Negative (plan deficiency indicators) ─────────────────────────────────
+  /** Goal uses vague language (e.g. "improve", "refactor" without specifics) */
+  VAGUE_GOAL:               "VAGUE_GOAL",
+  /** No verification command, test, or check is provided */
+  NO_VERIFICATION:          "NO_VERIFICATION",
+  /** No files, modules, or boundaries are specified */
+  MISSING_SCOPE:            "MISSING_SCOPE",
+  /** Required fields are absent or incomplete */
+  SPEC_INCOMPLETE:          "SPEC_INCOMPLETE",
+  /** Wave ordering creates circular or contradictory dependencies */
+  CIRCULAR_DEPENDENCY:      "CIRCULAR_DEPENDENCY"
+});
+
+/** Set of all valid RATIONALE_CLASS values for O(1) lookup. */
+export const VALID_RATIONALE_CLASSES = new Set(Object.values(RATIONALE_CLASS));
+
+/**
+ * Score categories used in calibration deviation calculation.
+ * Maps a numeric heuristic score [0–10] to a verdict category.
+ *
+ * Formula: score ≥ 7 → "approved" | score ≤ 3 → "rejected" | else → "ambiguous"
+ * Range: [0.0, 1.0], unit: fraction (0.0 = no drift, 1.0 = complete drift)
+ *
+ * @enum {string}
+ */
+export const CALIBRATION_VERDICT = Object.freeze({
+  APPROVED:  "approved",
+  AMBIGUOUS: "ambiguous",
+  REJECTED:  "rejected"
+});
+
+/**
+ * Derive the verdict category from a numeric heuristic score.
+ * Score thresholds: ≥7 → approved, ≤3 → rejected, 4–6 → ambiguous.
+ *
+ * @param {number} score - integer 0–10
+ * @returns {string} - a CALIBRATION_VERDICT value
+ */
+export function verdictFromScore(score) {
+  if (score >= 7) return CALIBRATION_VERDICT.APPROVED;
+  if (score <= 3) return CALIBRATION_VERDICT.REJECTED;
+  return CALIBRATION_VERDICT.AMBIGUOUS;
+}
+
+/** Words in a task description that signal vague/non-measurable goals. */
+const VAGUE_TASK_PATTERNS = [
+  /\bimprove\b/i,
+  /\brefactor\b(?!\s+\w+\s+to\b)/i,
+  /\bclean\s+up\b/i,
+  /\benhance\b/i,
+  /\boptimize\b(?!\s+[\w.]+\s+from\b)/i,
+  /\bfix\s+(the\s+)?codebase\b/i
+];
+
+/**
+ * Apply heuristic scoring to a single calibration fixture.
+ *
+ * Scoring rubric (deterministic, no AI):
+ *   +2  task field is present, non-empty, and contains no vague patterns
+ *   +2  verification field is present, non-empty, and is a concrete command
+ *   +2  files array is non-empty (scope defined)
+ *   +2  context field describes measurable success criterion (≥20 chars with criterion words)
+ *   +1  priority and wave are both defined integers
+ *   +1  task mentions a specific file path or function name
+ *
+ * Total: 0–10. Category: ≥7 → approved, ≤3 → rejected, 4–6 → ambiguous.
+ *
+ * Returns the assigned rationale classes alongside the numeric score.
+ *
+ * @param {object} fixture - parsed calibration fixture (schemaVersion 1)
+ * @returns {{ score: number, scoreCategory: string, rationaleClasses: string[] }}
+ */
+export function scoreCalibrationPlan(fixture) {
+  if (!fixture || typeof fixture !== "object") {
+    return { score: 0, scoreCategory: CALIBRATION_VERDICT.REJECTED, rationaleClasses: [RATIONALE_CLASS.SPEC_INCOMPLETE] };
+  }
+  const plan = fixture.plan || {};
+  const classes = [];
+  let score = 0;
+
+  // ── Task quality ──────────────────────────────────────────────────────────
+  const task = typeof plan.task === "string" ? plan.task.trim() : "";
+  if (task.length > 0) {
+    const isVague = VAGUE_TASK_PATTERNS.some(p => p.test(task)) && task.length < 80;
+    if (isVague) {
+      classes.push(RATIONALE_CLASS.VAGUE_GOAL);
+    } else {
+      classes.push(RATIONALE_CLASS.MEASURABLE_GOAL);
+      score += 2;
+    }
+  } else {
+    classes.push(RATIONALE_CLASS.VAGUE_GOAL);
+    classes.push(RATIONALE_CLASS.SPEC_INCOMPLETE);
+  }
+
+  // ── Verification ─────────────────────────────────────────────────────────
+  const verification = typeof plan.verification === "string" ? plan.verification.trim() : "";
+  if (verification.length > 0) {
+    classes.push(RATIONALE_CLASS.CONCRETE_VERIFICATION);
+    score += 2;
+  } else {
+    classes.push(RATIONALE_CLASS.NO_VERIFICATION);
+  }
+
+  // ── Scope (files) ────────────────────────────────────────────────────────
+  const files = Array.isArray(plan.files) ? plan.files.filter(f => typeof f === "string" && f.trim().length > 0) : [];
+  if (files.length > 0) {
+    classes.push(RATIONALE_CLASS.SCOPE_DEFINED);
+    score += 2;
+  } else {
+    classes.push(RATIONALE_CLASS.MISSING_SCOPE);
+  }
+
+  // ── Context / success criterion ───────────────────────────────────────────
+  const context = typeof plan.context === "string" ? plan.context.trim() : "";
+  const CRITERION_WORDS = /\b(success\s+crit|criterion|criteria|pass|should|must|expect|measur|result|output|retryCount|field|return)\b/i;
+  if (context.length >= 20 && CRITERION_WORDS.test(context)) {
+    classes.push(RATIONALE_CLASS.CLEAR_SUCCESS_CRITERION);
+    score += 2;
+  } else if (context.length > 0) {
+    // Partial context present but not a clear criterion — no SPEC_INCOMPLETE unless task also vague
+    score += 0;
+  } else if (!classes.includes(RATIONALE_CLASS.SPEC_INCOMPLETE)) {
+    classes.push(RATIONALE_CLASS.SPEC_INCOMPLETE);
+  }
+
+  // ── Priority + wave ───────────────────────────────────────────────────────
+  if (Number.isInteger(plan.priority) && Number.isInteger(plan.wave)) {
+    classes.push(RATIONALE_CLASS.DEPENDENCY_CORRECT);
+    score += 1;
+  }
+
+  // ── Specific file path or function reference in task ──────────────────────
+  if (/\b(src\/|tests\/|\.js\b|\.ts\b|\(\)|function\s|class\s)/.test(task)) {
+    score += 1;
+  }
+
+  return {
+    score: Math.min(10, Math.max(0, score)),
+    scoreCategory: verdictFromScore(score),
+    rationaleClasses: classes
+  };
+}
+
+/**
+ * Compute the deviation score across a set of calibration fixture results.
+ *
+ * Formula:
+ *   deviationScore = number_of_mismatches / total_fixtures
+ *
+ * Range: [0.0, 1.0]
+ * Unit:  fraction (0.0 = no drift, 1.0 = every fixture produced wrong verdict)
+ *
+ * A mismatch is when the actualCategory (derived from heuristic score) does not
+ * equal fixture.expectedVerdict.
+ *
+ * @param {{ fixture: object, actualCategory: string }[]} results
+ * @returns {{ deviationScore: number, total: number, mismatches: number, details: object[] }}
+ */
+export function computeCalibrationDeviation(results) {
+  if (!Array.isArray(results) || results.length === 0) {
+    return { deviationScore: 0.0, total: 0, mismatches: 0, details: [] };
+  }
+  const details = results.map(r => {
+    const expected = r.fixture?.expectedVerdict ?? "unknown";
+    const actual = r.actualCategory ?? "unknown";
+    return {
+      fixtureId: r.fixture?.fixtureId ?? "unknown",
+      expected,
+      actual,
+      match: expected === actual
+    };
+  });
+  const mismatches = details.filter(d => !d.match).length;
+  const deviationScore = mismatches / results.length;
+  return {
+    deviationScore: Math.round(deviationScore * 10000) / 10000,
+    total: results.length,
+    mismatches,
+    details
+  };
+}
+
+/**
+ * Run all fixtures through the heuristic scorer and compute deviation.
+ * Pure function — no I/O, fully offline.
+ *
+ * @param {object[]} fixtures - array of parsed calibration fixture objects
+ * @returns {{ deviationScore: number, total: number, mismatches: number, details: object[], results: object[] }}
+ */
+export function runCalibration(fixtures) {
+  if (!Array.isArray(fixtures) || fixtures.length === 0) {
+    return { deviationScore: 0.0, total: 0, mismatches: 0, details: [], results: [] };
+  }
+  const results = fixtures.map(fixture => {
+    const scored = scoreCalibrationPlan(fixture);
+    return { fixture, ...scored };
+  });
+  const deviation = computeCalibrationDeviation(
+    results.map(r => ({ fixture: r.fixture, actualCategory: r.scoreCategory }))
+  );
+  return { ...deviation, results };
+}
 
 // ── Canonical postmortem schema ──────────────────────────────────────────────
 
@@ -196,6 +431,196 @@ export function normalizePostmortemVerdict(pm) {
   return { pass: false, schema: "unknown", reason: POSTMORTEM_PARSE_REASON.MISSING_VERDICT };
 }
 
+// ── Pre-mortem Schema ────────────────────────────────────────────────────────
+
+/**
+ * Risk threshold for pre-mortem requirement.
+ * Only HIGH-risk interventions require a pre-mortem before dispatch.
+ * Athena hardening note (T-026): task scope mentioned "medium/high" but Athena
+ * flagged dispatch pipeline gating as high blast-radius — use "high" only.
+ *
+ * @enum {string}
+ */
+export const PREMORTEM_RISK_LEVEL = Object.freeze({
+  HIGH: "high"
+});
+
+/**
+ * Status codes returned by validatePremortem.
+ *
+ * @enum {string}
+ */
+export const PREMORTEM_STATUS = Object.freeze({
+  /** All required fields present and valid. */
+  PASS:       "pass",
+  /** Pre-mortem object present but one or more fields are missing or invalid. */
+  INCOMPLETE: "incomplete",
+  /** Pre-mortem object absent, null, or riskLevel is not "high". */
+  BLOCKED:    "blocked"
+});
+
+/**
+ * Reason codes returned by validatePremortem.
+ * Distinguishes missing input from invalid input — no silent fallback.
+ *
+ * @enum {string}
+ */
+export const PREMORTEM_VALIDATION_REASON = Object.freeze({
+  OK:               "OK",
+  /** Pre-mortem object is null/undefined/not-an-object. */
+  MISSING_FIELD:    "MISSING_FIELD",
+  /** Pre-mortem present but one or more fields fail validation. */
+  INVALID_FIELD:    "INVALID_FIELD",
+  /** riskLevel field present but not "high". */
+  WRONG_RISK_LEVEL: "WRONG_RISK_LEVEL"
+});
+
+/**
+ * Canonical list of required pre-mortem fields.
+ * All fields must be present and valid for status=PASS.
+ *
+ * Field        Type       Constraint
+ * ─────────────────────────────────────────────────────────────────────
+ * scenario        string     min 20 chars  — narrative of what could go wrong
+ * failurePaths    string[]   min 1 item    — discrete failure modes enumerated
+ * mitigations     string[]   min 1 item    — per-failure mitigation strategies
+ * detectionSignals string[]  min 1 item    — observable signals of failure onset
+ * guardrails      string[]   min 1 item    — checks/gates preventing cascading failure
+ * rollbackPlan    string     min 10 chars  — safe rollback procedure
+ * riskLevel       "high"                   — must be PREMORTEM_RISK_LEVEL.HIGH
+ */
+export const PREMORTEM_REQUIRED_FIELDS = Object.freeze([
+  "scenario",
+  "failurePaths",
+  "mitigations",
+  "detectionSignals",
+  "guardrails",
+  "rollbackPlan",
+  "riskLevel"
+]);
+
+/** Minimum string lengths for pre-mortem string fields. */
+const PREMORTEM_MIN_STRLEN = Object.freeze({
+  scenario:    20,
+  rollbackPlan: 10
+});
+
+/** Minimum array lengths for pre-mortem array fields. */
+const PREMORTEM_MIN_ARRLEN = Object.freeze({
+  failurePaths:     1,
+  mitigations:      1,
+  detectionSignals: 1,
+  guardrails:       1
+});
+
+/**
+ * Validate a pre-mortem object against the canonical schema.
+ *
+ * Distinguishes:
+ *   - Missing input  (null/undefined/not-object) → BLOCKED,    reason=MISSING_FIELD
+ *   - Wrong riskLevel (not "high")               → BLOCKED,    reason=WRONG_RISK_LEVEL
+ *   - Invalid/incomplete fields                  → INCOMPLETE, reason=INVALID_FIELD
+ *   - All fields present and valid               → PASS,       reason=OK
+ *
+ * Never returns a silent fallback — callers must check `status` before trusting the result.
+ *
+ * @param {unknown} input
+ * @returns {{ status: string, reason: string, errors: string[] }}
+ */
+export function validatePremortem(input) {
+  if (!input || typeof input !== "object") {
+    return {
+      status: PREMORTEM_STATUS.BLOCKED,
+      reason: PREMORTEM_VALIDATION_REASON.MISSING_FIELD,
+      errors: ["pre-mortem must be a non-null object"]
+    };
+  }
+
+  const pm = input;
+
+  // riskLevel must be "high" — only high-risk plans require pre-mortems
+  if (!("riskLevel" in pm)) {
+    return {
+      status: PREMORTEM_STATUS.BLOCKED,
+      reason: PREMORTEM_VALIDATION_REASON.MISSING_FIELD,
+      errors: ["riskLevel is required"]
+    };
+  }
+  if (pm.riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) {
+    return {
+      status: PREMORTEM_STATUS.BLOCKED,
+      reason: PREMORTEM_VALIDATION_REASON.WRONG_RISK_LEVEL,
+      errors: [`riskLevel must be "${PREMORTEM_RISK_LEVEL.HIGH}", got "${pm.riskLevel}"`]
+    };
+  }
+
+  const errors = [];
+
+  // Validate string fields with minimum length
+  for (const [field, minLen] of Object.entries(PREMORTEM_MIN_STRLEN)) {
+    if (!(field in pm)) {
+      errors.push(`${field} is required`);
+    } else if (typeof pm[field] !== "string" || pm[field].trim().length < minLen) {
+      errors.push(`${field} must be a string with at least ${minLen} characters`);
+    }
+  }
+
+  // Validate array fields with minimum length
+  for (const [field, minLen] of Object.entries(PREMORTEM_MIN_ARRLEN)) {
+    if (!(field in pm)) {
+      errors.push(`${field} is required`);
+    } else if (!Array.isArray(pm[field]) || pm[field].length < minLen) {
+      errors.push(`${field} must be an array with at least ${minLen} item(s)`);
+    }
+  }
+
+  if (errors.length > 0) {
+    return {
+      status: PREMORTEM_STATUS.INCOMPLETE,
+      reason: PREMORTEM_VALIDATION_REASON.INVALID_FIELD,
+      errors
+    };
+  }
+
+  return {
+    status: PREMORTEM_STATUS.PASS,
+    reason: PREMORTEM_VALIDATION_REASON.OK,
+    errors: []
+  };
+}
+
+/**
+ * Check all high-risk plans for valid pre-mortems.
+ * Returns an array of human-readable violation strings.
+ * An empty array means all high-risk plans have valid pre-mortems.
+ *
+ * A plan is considered high-risk when plan.riskLevel === "high".
+ * High-risk plans MUST include a `premortem` section that passes validatePremortem.
+ *
+ * @param {Array<object>} plans
+ * @returns {string[]} violations
+ */
+export function checkPlanPremortemGate(plans) {
+  const violations = [];
+  if (!Array.isArray(plans)) return violations;
+
+  for (let i = 0; i < plans.length; i++) {
+    const plan = plans[i];
+    if (!plan || typeof plan !== "object") continue;
+    if (plan.riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) continue;
+
+    const validation = validatePremortem(plan.premortem);
+    if (validation.status !== PREMORTEM_STATUS.PASS) {
+      const label = plan.task || plan.role || `index ${i}`;
+      violations.push(
+        `plan[${i}] "${label}": high-risk intervention requires a valid pre-mortem — ${validation.errors.join("; ")}`
+      );
+    }
+  }
+
+  return violations;
+}
+
 // ── AI call (single-prompt, 1 request) ──────────────────────────────────────
 
 async function callCopilotAgent(command, agentSlug, contextPrompt, config, model) {
@@ -234,8 +659,32 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   }
 
   const plans = Array.isArray(prometheusAnalysis.plans) ? prometheusAnalysis.plans : [];
+
+  // ── Deterministic pre-mortem gate (runs before AI, always enforced) ────────
+  // High-risk plans (riskLevel="high") must include a valid pre-mortem section.
+  // This gate is never bypassed by athenaFailOpen — it is a structural requirement.
+  const preMortemViolations = checkPlanPremortemGate(plans);
+  if (preMortemViolations.length > 0) {
+    const message = `${preMortemViolations.length} high-risk plan(s) missing valid pre-mortem`;
+    await appendProgress(config, `[ATHENA] Pre-mortem gate FAILED — ${message} — blocking dispatch`);
+    chatLog(stateDir, athenaName, `Pre-mortem gate failed: ${message}`);
+    await appendAlert(config, {
+      severity: ALERT_SEVERITY.CRITICAL,
+      source: "athena_reviewer",
+      title: "High-risk plan missing pre-mortem — dispatch blocked",
+      message: `code=MISSING_PREMORTEM violations=${JSON.stringify(preMortemViolations)}`
+    });
+    return {
+      approved: false,
+      reason: { code: "MISSING_PREMORTEM", message },
+      corrections: preMortemViolations,
+      preMortemViolations
+    };
+  }
+
   const plansSummary = plans.map((p, i) => {
-    return `  ${i + 1}. role=${p.role} task="${p.task}" priority=${p.priority} wave=${p.wave}\n     verification="${p.verification || "NONE"}"`;
+    const preMortemTag = p.riskLevel === "high" ? " [HIGH-RISK:premortem=present]" : "";
+    return `  ${i + 1}. role=${p.role} task="${p.task}" priority=${p.priority} wave=${p.wave} riskLevel=${p.riskLevel || "low"}${preMortemTag}\n     verification="${p.verification || "NONE"}"`;
   }).join("\n");
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
@@ -251,6 +700,7 @@ For EACH plan item, check:
 3. Is the verification method concrete? (a test, a command, a check — not "verify it works")
 4. Are file paths and scope specified?
 5. Are dependencies between plans correct?
+6. For HIGH-RISK plans (riskLevel=high): does the pre-mortem cover failure paths, mitigations, and guardrails?
 
 ## PROMETHEUS PLAN TO REVIEW
 
@@ -282,6 +732,7 @@ Respond with your assessment, then:
       "successCriteriaClear": true/false,
       "verificationConcrete": true/false,
       "scopeDefined": true/false,
+      "preMortemComplete": true/false,
       "issues": ["list of problems if any"],
       "suggestion": "how to fix if rejected"
     }
@@ -316,6 +767,31 @@ Respond with your assessment, then:
   }
 
   logAgentThinking(stateDir, athenaName, aiResult.thinking);
+
+  // ── Trust boundary validation ────────────────────────────────────────────
+  const tbMode = config?.runtime?.trustBoundaryMode === "warn" ? "warn" : "enforce";
+  const trustCheck = validateLeadershipContract(
+    LEADERSHIP_CONTRACT_TYPE.REVIEWER, aiResult.parsed, { mode: tbMode }
+  );
+  if (!trustCheck.ok && tbMode === "enforce") {
+    const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
+    const reason = {
+      code: "TRUST_BOUNDARY_VIOLATION",
+      message: `Reviewer output failed contract validation — class=${TRUST_BOUNDARY_ERROR} reasonCode=${trustCheck.reasonCode}: ${tbErrors}`
+    };
+    await appendProgress(config, `[ATHENA][TRUST_BOUNDARY] Reviewer output blocked — ${reason.message}`);
+    await appendAlert(config, {
+      severity: ALERT_SEVERITY.CRITICAL,
+      source: "athena_reviewer",
+      title: "Reviewer output failed trust-boundary validation — plan blocked",
+      message: `code=${reason.code} errors=${tbErrors}`
+    });
+    return { approved: false, reason, corrections: [] };
+  }
+  if (trustCheck.errors.length > 0 && tbMode === "warn") {
+    const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
+    await appendProgress(config, `[ATHENA][TRUST_BOUNDARY][WARN] Contract violations (warn mode, not blocking): ${tbErrors}`);
+  }
 
   const d = aiResult.parsed;
   const approved = d.approved !== false;

@@ -11,11 +11,28 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { writeJson, spawnAsync } from "./fs_utils.js";
-import { appendAlert, appendProgress } from "./state_tracker.js";
+import { appendAlert, appendProgress, appendInterventionOptimizerEntry } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
+import { PREMORTEM_RISK_LEVEL } from "./athena_reviewer.js";
+import {
+  runInterventionOptimizer,
+  buildInterventionsFromPlan,
+  buildBudgetFromConfig,
+  OPTIMIZER_STATUS,
+} from "./intervention_optimizer.js";
+import {
+  resolveDependencyGraph,
+  persistGraphDiagnostics,
+  GRAPH_STATUS,
+} from "./dependency_graph_resolver.js";
+import {
+  validateLeadershipContract,
+  LEADERSHIP_CONTRACT_TYPE,
+  TRUST_BOUNDARY_ERROR,
+} from "./trust_boundary.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -46,6 +63,35 @@ export function normalizeRepoPath(filePath) {
     .replace(/^\//, "")
     .trim()
     .toLowerCase();
+}
+
+/**
+ * Risk threshold for pre-mortem requirement.
+ * Only plans with riskLevel matching this value require a pre-mortem section.
+ * Aligned with PREMORTEM_RISK_LEVEL.HIGH from athena_reviewer.js.
+ */
+export const PREMORTEM_RISK_THRESHOLD = PREMORTEM_RISK_LEVEL.HIGH;
+
+/**
+ * Build an empty pre-mortem scaffold for a high-risk plan.
+ * This scaffold is intended to be filled by the Prometheus AI prompt.
+ * Use as a reference structure when constructing plan prompts.
+ *
+ * @param {object} plan - Prometheus plan object
+ * @returns {object} pre-mortem scaffold
+ */
+export function buildPremortemScaffold(plan) {
+  return {
+    riskLevel: PREMORTEM_RISK_LEVEL.HIGH,
+    scenario: "",
+    failurePaths: [],
+    mitigations: [],
+    detectionSignals: [],
+    guardrails: [],
+    rollbackPlan: (plan && typeof plan === "object" && typeof plan.rollbackPlan === "string")
+      ? plan.rollbackPlan
+      : ""
+  };
 }
 
 async function collectScanTargets(repoRoot) {
@@ -474,14 +520,27 @@ Write a substantial senior-level narrative first. Then output structured JSON:
       "task": "<short task description>",
       "context": "<detailed 500-2000 word implementation checklist>",
       "verification": "<how to verify>",
+      "riskLevel": "low | medium | high",
       "dependencies": [],
-      "downstream": "<what this enables>"
+      "downstream": "<what this enables>",
+      "_premortem_note": "REQUIRED for riskLevel=high: include premortem object below",
+      "premortem": {
+        "_note": "Include ONLY when riskLevel=high. Omit for low/medium risk plans.",
+        "riskLevel": "high",
+        "scenario": "<min 20 chars — what could go wrong in this intervention>",
+        "failurePaths": ["<failure mode 1>", "<failure mode 2>"],
+        "mitigations": ["<mitigation for failure mode 1>", "<mitigation for failure mode 2>"],
+        "detectionSignals": ["<observable signal that failure is occurring>"],
+        "guardrails": ["<check or gate that prevents cascading failure>"],
+        "rollbackPlan": "<min 10 chars — how to safely undo this change>"
+      }
     }
   ]
 }
 ===END===
 
-CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.`;
+CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.
+CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem object. Omitting it will block Athena plan review.`;
 
     chatLog(stateDir, prometheusName, `Calling AI for deep repository analysis (single-prompt), attempt ${attempt}/${maxAttempts}...`);
     const aiResult = await callCopilotAgent(command, "prometheus", contextPrompt, config, prometheusModel);
@@ -548,6 +607,36 @@ CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.`;
     }
 
     await appendProgress(config, `[PROMETHEUS] Read coverage OK: ${coverage.matchedCount}/${coverage.totalTargets} (${(coverage.coverage * 100).toFixed(1)}%)`);
+
+    // ── Trust boundary validation (must pass before accepting result) ────────
+    const tbMode = config?.runtime?.trustBoundaryMode === "warn" ? "warn" : "enforce";
+    const trustCheck = validateLeadershipContract(
+      LEADERSHIP_CONTRACT_TYPE.PLANNER, aiResult.parsed, { mode: tbMode }
+    );
+    if (!trustCheck.ok && tbMode === "enforce") {
+      const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
+      await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY] Attempt ${attempt}/${maxAttempts} failed contract validation — class=${TRUST_BOUNDARY_ERROR} errors=${tbErrors}`);
+      try {
+        await appendAlert(config, {
+          severity: "critical",
+          source: "prometheus",
+          title: "Planner output failed trust-boundary validation",
+          message: `class=${TRUST_BOUNDARY_ERROR} reasonCode=${trustCheck.reasonCode} errors=${tbErrors}`
+        });
+      } catch { /* non-fatal */ }
+      if (attempt >= maxAttempts) {
+        await appendProgress(config, `[PROMETHEUS] Analysis failed — trust-boundary gate not satisfied after ${maxAttempts} attempts`);
+        chatLog(stateDir, prometheusName, `Trust-boundary gate failed: ${tbErrors}`);
+        return null;
+      }
+      rejectionHint = `## PREVIOUS ATTEMPT REJECTED — TRUST BOUNDARY VIOLATION\n- class: ${TRUST_BOUNDARY_ERROR}\n- Errors: ${tbErrors}\n- Fix: ensure all required fields are present and valid in the JSON output.`;
+      continue;
+    }
+    if (trustCheck.errors.length > 0 && tbMode === "warn") {
+      const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
+      await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY][WARN] Contract violations (warn mode, not blocking): ${tbErrors}`);
+    }
+
     accepted = { aiResult, coverage };
     break;
   }
@@ -616,6 +705,116 @@ CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.`;
   const planCount = Array.isArray(analysis.plans) ? analysis.plans.length : 0;
   await appendProgress(config, `[PROMETHEUS] Analysis complete — ${planCount} work items | health=${analysis.projectHealth}`);
   chatLog(stateDir, prometheusName, `Analysis ready: ${planCount} plans | health=${analysis.projectHealth}`);
+
+  // ── Budget-aware intervention optimizer (non-blocking) ────────────────────
+  // Converts prometheus plans to Interventions and runs the optimizer.
+  // Failures here NEVER propagate to the caller — orchestration must continue.
+  if (config?.interventionOptimizer?.enabled !== false && Array.isArray(analysis.plans) && analysis.plans.length > 0) {
+    try {
+      const interventions = buildInterventionsFromPlan(analysis.plans, config);
+      const budget = buildBudgetFromConfig(analysis.requestBudget, config);
+      const optimizerResult = runInterventionOptimizer(interventions, budget);
+
+      // Persist selection rationale (non-blocking)
+      await appendInterventionOptimizerEntry(config, {
+        ...optimizerResult,
+        correlationId: `prometheus-${Date.now()}`,
+        prometheusAnalyzedAt: analysis.analyzedAt,
+      }).catch((err) => {
+        // Persist failure is non-fatal; log it for observability
+        appendProgress(config, `[PROMETHEUS][WARN] Optimizer log persist failed: ${String(err?.message || err)}`).catch(() => {});
+      });
+
+      const selectedCount = Array.isArray(optimizerResult.selected) ? optimizerResult.selected.length : 0;
+      const rejectedCount = Array.isArray(optimizerResult.rejected) ? optimizerResult.rejected.length : 0;
+      await appendProgress(config,
+        `[PROMETHEUS] Intervention optimizer: status=${optimizerResult.status} selected=${selectedCount} rejected=${rejectedCount} budgetUsed=${optimizerResult.totalBudgetUsed}/${optimizerResult.totalBudgetLimit} (${optimizerResult.budgetUnit ?? "workerSpawns"})`
+      ).catch(() => {});
+
+      if (optimizerResult.status === OPTIMIZER_STATUS.BUDGET_EXCEEDED) {
+        await appendProgress(config,
+          `[PROMETHEUS][WARN] Budget pressure: ${rejectedCount} intervention(s) blocked — reasonCode=${optimizerResult.reasonCode}`
+        ).catch(() => {});
+      }
+
+      // Attach optimizer result to analysis for downstream consumers
+      analysis.interventionOptimizer = {
+        status:           optimizerResult.status,
+        reasonCode:       optimizerResult.reasonCode,
+        selectedCount,
+        rejectedCount,
+        totalBudgetUsed:  optimizerResult.totalBudgetUsed,
+        totalBudgetLimit: optimizerResult.totalBudgetLimit,
+        budgetUnit:       optimizerResult.budgetUnit,
+      };
+    } catch (err) {
+      // Optimizer error must never fail the analysis pipeline
+      analysis.interventionOptimizer = {
+        status:       "error",
+        reasonCode:   "OPTIMIZER_INTERNAL_ERROR",
+        errorMessage: String(err?.message || err),
+      };
+      await appendProgress(config, `[PROMETHEUS][WARN] Intervention optimizer error (non-fatal): ${String(err?.message || err)}`).catch(() => {});
+    }
+  }
+
+  // ── Dependency graph resolver (non-blocking) ─────────────────────────────
+  // Converts prometheus plans to GraphTask descriptors, resolves cross-task
+  // dependencies, detects conflicts, and assigns parallel execution waves.
+  // Failures here NEVER propagate to the caller — orchestration must continue.
+  // Risk level: HIGH — touches scheduling core. See dependency_graph_resolver.js.
+  if (Array.isArray(analysis.plans) && analysis.plans.length > 0) {
+    try {
+      const graphTasks = analysis.plans.map((plan, i) => ({
+        id: String(plan.task || `plan-${i}`),
+        dependsOn: Array.isArray(plan.dependencies) ? plan.dependencies.map(String) : [],
+        // filesInScope is not part of the Prometheus plan schema; use empty array.
+        // Downstream callers that have richer task data should call resolveDependencyGraph
+        // directly with populated filesInScope arrays.
+        filesInScope: [],
+      }));
+
+      const graphResult = resolveDependencyGraph(graphTasks);
+
+      await persistGraphDiagnostics(stateDir, graphResult, {
+        correlationId: `prometheus-${Date.now()}`,
+        prometheusAnalyzedAt: analysis.analyzedAt,
+      }).catch((err) => {
+        appendProgress(config, `[PROMETHEUS][WARN] Dependency graph diagnostics persist failed: ${String(err?.message || err)}`).catch(() => {});
+      });
+
+      await appendProgress(config,
+        `[PROMETHEUS] Dependency graph: status=${graphResult.status} waves=${graphResult.waves.length} parallel=${graphResult.parallelTasks} serialized=${graphResult.serializedTasks} conflicts=${graphResult.conflictPairs.length}`
+      ).catch(() => {});
+
+      if (graphResult.status === GRAPH_STATUS.CYCLE_DETECTED) {
+        await appendProgress(config,
+          `[PROMETHEUS][WARN] Dependency graph cycle detected — scheduler will fall back to sequential dispatch: ${graphResult.errorMessage}`
+        ).catch(() => {});
+      }
+
+      // Attach resolver result to analysis for downstream consumers
+      analysis.dependencyGraph = {
+        status:          graphResult.status,
+        reasonCode:      graphResult.reasonCode,
+        waveCount:       graphResult.waves.length,
+        parallelTasks:   graphResult.parallelTasks,
+        serializedTasks: graphResult.serializedTasks,
+        conflictCount:   graphResult.conflictPairs.length,
+        cycleCount:      graphResult.cycles.length,
+        waves:           graphResult.waves,
+        errorMessage:    graphResult.errorMessage ?? null,
+      };
+    } catch (err) {
+      // Resolver error must never fail the analysis pipeline
+      analysis.dependencyGraph = {
+        status:       GRAPH_STATUS.DEGRADED,
+        reasonCode:   "RESOLVER_INTERNAL_ERROR",
+        errorMessage: String(err?.message || err),
+      };
+      await appendProgress(config, `[PROMETHEUS][WARN] Dependency graph resolver error (non-fatal): ${String(err?.message || err)}`).catch(() => {});
+    }
+  }
 
   return analysis;
 }

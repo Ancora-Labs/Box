@@ -4,6 +4,7 @@ import { ensureParent, readJson, writeJson } from "./fs_utils.js";
 import { emitEvent } from "./logger.js";
 import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 import { validateLineageEntry, buildFailureClusters, detectLoop, LINEAGE_ERROR_CODE, LINEAGE_THRESHOLDS } from "./lineage_graph.js";
+import { OPTIMIZER_LOG_SCHEMA_VERSION } from "./intervention_optimizer.js";
 
 // ── Alert severity enum — deterministic constants for all alert records ───────
 export const ALERT_SEVERITY = {
@@ -246,6 +247,46 @@ export async function loadAlerts(config) {
   });
 }
 
+/**
+ * Persist a failure classification result to state/failure_classifications.json.
+ *
+ * AC #2: evidence and confidence are persisted alongside every classification.
+ * AC #10: write errors set ok=false with an explicit reason; never silently dropped.
+ *
+ * Storage key: state/failure_classifications.json
+ * Schema: { schemaVersion: 1, updatedAt: ISO, entries: ClassificationResult[] }
+ * Entries are trimmed to the last 500 to prevent unbounded growth.
+ *
+ * @param {object} config
+ * @param {object} classification — ClassificationResult from classifyFailure
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+export async function appendFailureClassification(config, classification) {
+  const classFile = path.join(config.paths?.stateDir || "state", "failure_classifications.json");
+  try {
+    const state = await readJson(classFile, {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      entries: []
+    });
+
+    const entries = Array.isArray(state.entries) ? state.entries : [];
+    entries.push({ ...classification, savedAt: new Date().toISOString() });
+
+    if (entries.length > 500) {
+      state.entries = entries.slice(-500);
+    } else {
+      state.entries = entries;
+    }
+
+    state.updatedAt = new Date().toISOString();
+    await writeJson(classFile, state);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}
+
 export async function appendAlert(config, alert) {
   const alertsFile = path.join(config.paths.stateDir, "alerts.json");
   const state = await readJson(alertsFile, {
@@ -412,3 +453,143 @@ export async function getFailureClusterReport(config) {
 
   return { ok: true, clusters, code: null, message: `${clusters.length} clusters written` };
 }
+
+// ── Intervention optimizer log ────────────────────────────────────────────────
+
+/**
+ * Load the intervention optimizer log from state/intervention_optimizer_log.json.
+ *
+ * @param {object} config — box config object with paths.stateDir
+ * @returns {Promise<object>} — { schemaVersion, updatedAt, entries: [] }
+ */
+export async function loadInterventionOptimizerLog(config) {
+  const logFile = path.join(config.paths.stateDir, "intervention_optimizer_log.json");
+  return readJson(logFile, {
+    schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
+    updatedAt:     new Date().toISOString(),
+    entries:       [],
+  });
+}
+
+/**
+ * Append one optimizer result entry to state/intervention_optimizer_log.json.
+ *
+ * Emits PLANNING_INTERVENTION_OPTIMIZED event (non-blocking; never throws).
+ * Trims to the last 100 entries to cap file growth.
+ *
+ * @param {object} config — box config object with paths.stateDir
+ * @param {object} entry  — optimizer result from runInterventionOptimizer
+ * @returns {Promise<void>}
+ */
+// ── Monthly Postmortem Persistence ────────────────────────────────────────────
+
+/**
+ * Persist a monthly postmortem to state/monthly_postmortem_{monthKey}.json.
+ *
+ * Validates all required schema fields before writing.
+ * Distinguishes missing input (postmortem is null) from invalid input
+ * (postmortem present but fails schema validation) with explicit reason codes.
+ *
+ * Never silently drops data — write errors return ok=false with an explicit reason.
+ *
+ * @param {object} config
+ * @param {object} postmortem — output of generateMonthlyPostmortem().postmortem
+ * @returns {Promise<{ ok: boolean, filePath?: string, reason?: string }>}
+ */
+export async function persistMonthlyPostmortem(config, postmortem) {
+  if (postmortem === null || postmortem === undefined) {
+    return { ok: false, reason: "MISSING_INPUT: postmortem is null or undefined" };
+  }
+  if (typeof postmortem !== "object" || Array.isArray(postmortem)) {
+    return { ok: false, reason: "INVALID_INPUT: postmortem must be a non-array object" };
+  }
+
+  const REQUIRED = [
+    "schemaVersion", "monthKey", "generatedAt", "status",
+    "cycleCount", "experimentOutcomes", "compoundingEffects",
+    "decisionQualityTrend", "seedQuestion"
+  ];
+
+  for (const field of REQUIRED) {
+    if (!(field in postmortem)) {
+      return { ok: false, reason: `INVALID_INPUT: missing required field "${field}"` };
+    }
+  }
+
+  const monthKey = String(postmortem.monthKey || "");
+  if (!/^\d{4}-\d{2}$/.test(monthKey)) {
+    return { ok: false, reason: `INVALID_INPUT: monthKey must be "YYYY-MM", got "${monthKey}"` };
+  }
+
+  const stateDir  = config?.paths?.stateDir || "state";
+  const filePath  = path.join(stateDir, `monthly_postmortem_${monthKey}.json`);
+
+  try {
+    await ensureParent(filePath);
+    await writeJson(filePath, postmortem);
+    return { ok: true, filePath };
+  } catch (err) {
+    return { ok: false, reason: `WRITE_FAILED: ${String(err?.message || err)}` };
+  }
+}
+
+export async function appendInterventionOptimizerEntry(config, entry) {
+  const logFile = path.join(config.paths.stateDir, "intervention_optimizer_log.json");
+  const state = await readJson(logFile, {
+    schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
+    updatedAt:     new Date().toISOString(),
+    entries:       [],
+  });
+
+  const correlationId = String(entry?.correlationId || `optimizer-${Date.now()}`);
+  const record = { ...entry, savedAt: new Date().toISOString() };
+  const entries = Array.isArray(state.entries) ? state.entries : [];
+  entries.push(record);
+
+  state.entries   = entries.length > 100 ? entries.slice(-100) : entries;
+  state.updatedAt = new Date().toISOString();
+  await writeJson(logFile, state);
+
+  // Emit typed planning event (non-blocking; never throws)
+  emitEvent(EVENTS.PLANNING_INTERVENTION_OPTIMIZED, EVENT_DOMAIN.PLANNING, correlationId, {
+    status:           String(entry?.status ?? "unknown"),
+    reasonCode:       String(entry?.reasonCode ?? "unknown"),
+    selectedCount:    Number(Array.isArray(entry?.selected) ? entry.selected.length : 0),
+    rejectedCount:    Number(Array.isArray(entry?.rejected) ? entry.rejected.length : 0),
+    totalBudgetUsed:  Number(entry?.totalBudgetUsed ?? 0),
+    totalBudgetLimit: Number(entry?.totalBudgetLimit ?? 0),
+    budgetUnit:       String(entry?.budgetUnit ?? "workerSpawns"),
+  });
+}
+
+// ── Compounding effects persistence (re-exports from compounding_effects_analyzer) ──
+
+/**
+ * Persist a compounding-effects AnalyzerResult to state/.
+ * Delegates to compounding_effects_analyzer.persistCompoundingEffectsResult.
+ *
+ * @param {object} config — box config with config.paths.stateDir
+ * @param {object} result — AnalyzerResult from analyzeCompoundingEffects()
+ * @returns {Promise<{ ok: boolean, filePath?: string, reason?: string }>}
+ */
+export { persistCompoundingEffectsResult } from "./compounding_effects_analyzer.js";
+
+/**
+ * Persist a monthly compounding-effects report to state/.
+ * Delegates to compounding_effects_analyzer.persistMonthlyCompoundingReport.
+ *
+ * @param {object} config  — box config with config.paths.stateDir
+ * @param {object} report  — MonthlyCompoundingReport
+ * @returns {Promise<{ ok: boolean, filePath?: string, reason?: string }>}
+ */
+export { persistMonthlyCompoundingReport } from "./compounding_effects_analyzer.js";
+
+/**
+ * Generate and persist a monthly compounding-effects report from the rolling log.
+ * Delegates to compounding_effects_analyzer.generateAndPersistMonthlyReport.
+ *
+ * @param {object} config   — box config with config.paths.stateDir
+ * @param {string} monthKey — "YYYY-MM"
+ * @returns {Promise<{ ok: boolean, filePath?: string, report?: object, reason?: string }>}
+ */
+export { generateAndPersistMonthlyReport } from "./compounding_effects_analyzer.js";

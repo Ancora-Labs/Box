@@ -1,4 +1,14 @@
 import { readJson } from "./fs_utils.js";
+import { runShadowEvaluation } from "./shadow_policy_evaluator.js";
+import {
+  validateGovernanceContract,
+  GovernanceContractError
+} from "./governance_contract.js";
+import {
+  assignCohort,
+  COHORT,
+  isGovernanceCanaryBreachActive
+} from "./governance_canary.js";
 
 export async function loadPolicy(config) {
   return readJson(config.paths.policyFile, {
@@ -8,6 +18,38 @@ export async function loadPolicy(config) {
     rolePolicies: {}
   });
 }
+
+/**
+ * Load policy and validate the embedded governance contract.
+ *
+ * On governance validation failure, throws GovernanceContractError with:
+ *   - message format: "[governance] <errorCode>: <detail>"
+ *   - err.errorCode : one of GOVERNANCE_ERROR_CODE values
+ *   - err.exitCode  : GOVERNANCE_STARTUP_EXIT_CODE (1)
+ *
+ * Callers at startup SHOULD catch GovernanceContractError and call process.exit(err.exitCode).
+ *
+ * Recovery path: fix policy.json governanceContract section and restart.
+ *
+ * @param {object} config
+ * @returns {Promise<object>} loaded and governance-validated policy
+ * @throws {GovernanceContractError} when governance contract is missing or invalid
+ */
+export async function loadPolicyWithGovernance(config) {
+  const policy = await loadPolicy(config);
+  const result = validateGovernanceContract(policy);
+  if (!result.ok) {
+    throw new GovernanceContractError(result.errorCode, result.message.replace(`[governance] ${result.errorCode}: `, ""));
+  }
+  return policy;
+}
+
+// Re-export governance contract utilities for callers that import from policy_engine
+export {
+  validateGovernanceContract,
+  GovernanceContractError,
+  GOVERNANCE_STARTUP_EXIT_CODE
+} from "./governance_contract.js";
 
 function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
@@ -139,5 +181,79 @@ export function getRolePathViolations(policy, roleName, filePaths) {
     deniedMatches,
     outsideAllowed,
     hasViolation: deniedMatches.length > 0 || outsideAllowed.length > 0
+  };
+}
+
+/**
+ * Gate a policy promotion through shadow evaluation.
+ *
+ * Runs runShadowEvaluation against recent cycle history before any policy change
+ * is applied to the runtime. Returns the evaluation result; callers must inspect
+ * result.blocked to decide whether to proceed.
+ *
+ * @param {object}   currentPolicy    The currently loaded policy.
+ * @param {object[]} proposedChanges  Proposed changes (see shadow_policy_evaluator.js schema).
+ * @param {object}   [options]        Forwarded to runShadowEvaluation (stateDir, threshold, owner).
+ * @returns {Promise<object>}         Shadow evaluation result (schemaVersion: 1).
+ */
+export async function evaluatePolicyPromotion(currentPolicy, proposedChanges, options = {}) {
+  return runShadowEvaluation(currentPolicy, proposedChanges, options);
+}
+
+/**
+ * Determine whether a governance rule should be applied to a given cycle.
+ *
+ * Uses the governance canary cohort selection algorithm to deterministically
+ * assign the cycle to "canary" or "control". Canary cycles have new governance
+ * rules applied; control cycles use the existing policy baseline.
+ *
+ * If a governance canary breach is active (status=rolled_back with
+ * breachAction=halt_new_assignments), new governance rules are NOT applied
+ * to ANY cycle until the breach is cleared (AC4 — rollback behavior).
+ *
+ * @param {object} config   - full runtime config
+ * @param {string} cycleId  - opaque cycle identifier (entropy source for hash-mod)
+ * @returns {Promise<{ cohort: "canary"|"control", applyNewRules: boolean, reason: string }>}
+ */
+export async function shouldApplyGovernanceRule(config, cycleId) {
+  if (!cycleId || typeof cycleId !== "string") {
+    // AC9: missing input → explicit reason code, default to control (safe)
+    return {
+      cohort:       COHORT.CONTROL,
+      applyNewRules: false,
+      reason:       "MISSING_CYCLE_ID:defaulting_to_control"
+    };
+  }
+
+  // Check if a breach is active — if so, halt new assignments (AC4)
+  let breachStatus;
+  try {
+    breachStatus = await isGovernanceCanaryBreachActive(config);
+  } catch {
+    // Non-fatal: if the check fails, default to control (safe fallback)
+    return {
+      cohort:        COHORT.CONTROL,
+      applyNewRules: false,
+      reason:        "BREACH_CHECK_FAILED:defaulting_to_control"
+    };
+  }
+
+  if (breachStatus.breachActive) {
+    return {
+      cohort:        COHORT.CONTROL,
+      applyNewRules: false,
+      reason:        `BREACH_ACTIVE:${breachStatus.reason || "halt_new_assignments"}`
+    };
+  }
+
+  const ratio  = config?.canary?.governance?.canaryRatio
+    ?? config?.canary?.defaultRatio
+    ?? 0.2;
+  const cohort = assignCohort(cycleId, ratio);
+
+  return {
+    cohort,
+    applyNewRules: cohort === COHORT.CANARY,
+    reason:        `COHORT_ASSIGNED:${cohort}:algorithm=hash-mod:ratio=${ratio}`
   };
 }

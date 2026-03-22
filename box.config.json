@@ -53,6 +53,47 @@
     "maxDescendantDepth": 3,
     "maxSplitCountPerLineage": 10,
     "semanticSimilarityThreshold": 0.92,
+    "retryStrategy": "adaptive",
+    "adaptiveRetry": {
+      "environment": {
+        "cooldownMinutes": 30,
+        "maxRetries": 3,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      },
+      "logic_defect": {
+        "maxReworkAttempts": 2,
+        "escalateAfter": 2,
+        "reworkQueue": "rework_queue",
+        "verificationStep": "verification_gate",
+        "escalationTarget": "daemon_queue"
+      },
+      "policy": {
+        "reassignBeforeAttempt": 2,
+        "splitAfterAttempt": 2,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      },
+      "verification": {
+        "maxReworkAttempts": 2,
+        "escalateAfter": 2,
+        "reworkQueue": "rework_queue",
+        "verificationStep": "verification_gate",
+        "escalationTarget": "daemon_queue"
+      },
+      "model": {
+        "cooldownMinutes": 15,
+        "maxRetries": 3,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      },
+      "external_api": {
+        "cooldownMinutes": 10,
+        "maxRetries": 3,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      }
+    },
     "contextRevisionRequiredForSameFailureRetry": true,
     "staleIssueMaxAgeHours": 24,
     "staleIssueCloseGraceHours": 2,
@@ -122,7 +163,47 @@
       "src/core/policy_engine.js"
     ],
     "knowledgeMemoryEnabled": true,
-    "experimentEngineEnabled": true
+    "experimentEngineEnabled": true,
+    "experimentEnforcement": "soft",
+    "scheduler": {
+      "maxTotalActiveExperiments": 3,
+      "highImpactScoreThreshold": 0.7,
+      "maxActiveExperimentsPerTier": {
+        "critical": 1,
+        "high": 1,
+        "medium": 2,
+        "low": 3
+      },
+      "baselineMetricsPath": "state/hypothesis_baselines.json",
+      "rationaleOutputPath": "state/scheduler_rationale.json"
+    }
+  },
+  "canary": {
+    "enabled": true,
+    "defaultRatio": 0.2,
+    "minCyclesToObserve": 2,
+    "promotion": {
+      "minTaskSuccessRate": 0.8,
+      "maxErrorRate": 0.1
+    },
+    "rollback": {
+      "triggerErrorRate": 0.25,
+      "triggerTaskSuccessRateLow": 0.5
+    },
+    "auditLogPath": "state/canary_audit.jsonl",
+    "ledgerPath": "state/canary_ledger.json",
+    "governance": {
+      "canaryRatio": 0.2,
+      "cohortSelectionAlgorithm": "hash-mod",
+      "measurementWindowCycles": 5,
+      "falseBlockRateMax": 0.02,
+      "safetyScoreMin": 0.95,
+      "falseBlockRateTrigger": 0.05,
+      "safetyScoreTriggerLow": 0.80,
+      "breachAction": "halt_new_assignments",
+      "auditLogPath": "state/governance_canary_audit.jsonl",
+      "ledgerPath": "state/governance_canary_ledger.json"
+    }
   },
   "systemGuardian": {
     "enabled": true,
@@ -281,6 +362,29 @@
         "promptFile": ".github/prompts/backend-stability.prompt.md"
       }
     }
+  },
+  "interventionOptimizer": {
+    "enabled": true,
+    "sparseDataThreshold": 3,
+    "defaultSuccessProbability": 0.8,
+    "defaultImpact": 0.7,
+    "defaultRiskCost": 0.3,
+    "defaultSampleCount": 3,
+    "budgetUnit": "workerSpawns"
+  },
+  "rollbackEngine": {
+    "enabled": true,
+    "oneCycleSlaMs": 5000,
+    "incidentLogPath": "state/rollback_incidents.jsonl",
+    "lockFilePath": "state/rollback_lock.json",
+    "baselineRefPath": "state/project_baseline.json",
+    "configFilePath": "box.config.json",
+    "policyFilePath": "policy.json"
+  },
+  "athenaCalibration": {
+    "fixturesDir": "tests/fixtures/calibration",
+    "maxDeviationScore": 0.25,
+    "stateFile": "state/athena_calibration_run.json"
   },
   "selfDev": {
     "enabled": true,

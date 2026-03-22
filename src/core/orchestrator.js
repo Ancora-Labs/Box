@@ -39,6 +39,8 @@ import {
   STATE_FILE_TYPE,
   MIGRATION_REASON
 } from "./schema_registry.js";
+import { runCatastropheDetection, GUARDRAIL_ACTION } from "./catastrophe_detector.js";
+import { executeGuardrailsForDetections, isGuardrailActive } from "./guardrail_executor.js";
 
 /**
  * Orchestrator health status enum.
@@ -534,6 +536,29 @@ async function runSingleCycle(config) {
   // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
   await auditCriticalStateFiles(config, stateDir);
 
+  // Guardrail gate: if SKIP_CYCLE is active, skip planning to avoid acting on stale state.
+  // Gated by systemGuardian.enabled (rollback: set to false to retain detection without enforcement).
+  if (config.systemGuardian?.enabled !== false) {
+    try {
+      const skipActive = await isGuardrailActive(config, GUARDRAIL_ACTION.SKIP_CYCLE);
+      if (skipActive) {
+        await appendProgress(config,
+          "[CYCLE] SKIP_CYCLE guardrail active — skipping this planning cycle (stale state detected)"
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: "Planning cycle skipped by SKIP_CYCLE guardrail",
+          message: "SKIP_CYCLE guardrail is active — catastrophe scenario may still be present. Revert guardrail to resume."
+        });
+        return;
+      }
+    } catch (err) {
+      // Non-fatal: guardrail check failure must not block the cycle
+      warn(`[orchestrator] SKIP_CYCLE guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
   // Step 1: Jesus analyzes state and decides what to do (1 request)
   await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");
   await safeUpdatePipelineProgress(config, "jesus_awakening", "Jesus starting system state analysis");
@@ -634,6 +659,28 @@ async function runSingleCycle(config) {
   // Step 4: Dispatch workers sequentially (1 request per worker)
   const plans = prometheusAnalysis.plans;
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
+
+  // Guardrail gate: if PAUSE_WORKERS is active, skip all worker dispatch.
+  if (config.systemGuardian?.enabled !== false) {
+    try {
+      const pauseActive = await isGuardrailActive(config, GUARDRAIL_ACTION.PAUSE_WORKERS);
+      if (pauseActive) {
+        await appendProgress(config,
+          "[CYCLE] PAUSE_WORKERS guardrail active — skipping worker dispatch (catastrophe scenario active)"
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: "Worker dispatch paused by PAUSE_WORKERS guardrail",
+          message: "PAUSE_WORKERS guardrail is active — all worker dispatch suspended. Revert guardrail to resume."
+        });
+        return;
+      }
+    } catch (err) {
+      warn(`[orchestrator] PAUSE_WORKERS guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
   await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${plans.length} worker(s)`, {
     workersTotal: plans.length,
     workersDone: 0
@@ -757,6 +804,72 @@ async function runSingleCycle(config) {
     warn(`[orchestrator] Cycle analytics failed (non-fatal): ${String(err?.message || err)}`);
     await appendProgress(config, `[ANALYTICS] Cycle analytics failed (non-fatal): ${String(err?.message || err)}`);
   }
+
+  // ── Catastrophe detection: scan for systemic failure patterns each cycle ──
+  // Advisory — never blocks orchestration. Failure sets explicit status=degraded.
+  // Risk level: HIGH — reads orchestration state directly.
+  try {
+    // Build cycle data from available in-cycle metrics
+    const now = Date.now();
+    const jesusDirectivePath    = path.join(stateDir, "jesus_directive.json");
+    const prometheusAnalysisPath = path.join(stateDir, "prometheus_analysis.json");
+
+    const jesusDirectiveRaw     = await readJson(jesusDirectivePath, null);
+    const prometheusAnalysisRaw = await readJson(prometheusAnalysisPath, null);
+
+    const jesusDirectiveAgeMs = jesusDirectiveRaw?.decidedAt
+      ? now - new Date(jesusDirectiveRaw.decidedAt).getTime()
+      : 0;
+    const prometheusAnalysisAgeMs = prometheusAnalysisRaw?.analyzedAt
+      ? now - new Date(prometheusAnalysisRaw.analyzedAt).getTime()
+      : 0;
+
+    // Read SLO state to determine if this cycle had a breach
+    const { readSloMetrics } = await import("./slo_checker.js");
+    const sloState = await readSloMetrics(config);
+    const hadSloBreachThisCycle = Array.isArray(sloState?.lastCycle?.sloBreaches)
+      && sloState.lastCycle.sloBreaches.length > 0;
+
+    const cycleData = {
+      retryCount:              0,                          // no per-cycle retry counter yet; 0 is safe
+      totalTasks:              Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0,
+      blockedTasks:            0,                          // blocking is tracked per-worker, not aggregated here
+      jesusDirectiveAgeMs:     Math.max(0, jesusDirectiveAgeMs),
+      prometheusAnalysisAgeMs: Math.max(0, prometheusAnalysisAgeMs),
+      parseFailureCount:       0,                          // accumulated in persistent state across calls
+      hadBudgetBreach:         false,                      // budget controller doesn't surface per-cycle breach yet
+      hadSloBreach:            hadSloBreachThisCycle,
+    };
+
+    const catastropheResult = await runCatastropheDetection(config, cycleData);
+    if (catastropheResult.detections.length > 0) {
+      await appendProgress(config,
+        `[CATASTROPHE] ${catastropheResult.detections.length} scenario(s) detected: ${catastropheResult.detections.map(d => d.scenarioId).join(", ")}`
+      );
+    } else {
+      await appendProgress(config, "[CATASTROPHE] No catastrophe patterns detected this cycle");
+    }
+    if (!catastropheResult.ok) {
+      warn(`[orchestrator] Catastrophe detection degraded: ${catastropheResult.reason || "unknown"}`);
+    }
+
+    // Execute guardrail actions for all active detections.
+    // Gated by systemGuardian.enabled — set false to retain detection without enforcement (rollback path).
+    if (catastropheResult.ok && catastropheResult.detections.length > 0
+        && config.systemGuardian?.enabled !== false) {
+      const guardResult = await executeGuardrailsForDetections(config, catastropheResult.detections);
+      await appendProgress(config,
+        `[GUARDRAIL] ${guardResult.results.length} action(s) applied — status=${guardResult.status} withinSla=${guardResult.withinSla} latencyMs=${guardResult.latencyMs}`
+      );
+      if (!guardResult.ok) {
+        warn(`[orchestrator] Guardrail execution returned partial/failed status: ${guardResult.reason || "see results"}`);
+      }
+    }
+  } catch (err) {
+    // Advisory — never blocks orchestration
+    warn(`[orchestrator] Catastrophe detection error (non-fatal): ${String(err?.message || err)}`);
+    await appendProgress(config, `[CATASTROPHE] Detection error (non-fatal): ${String(err?.message || err)}`);
+  }
 }
 
 // ── Main loop: Jesus → Prometheus → Athena → Worker → Athena → repeat ──────
@@ -865,6 +978,29 @@ async function mainLoop(config) {
         await runSelfImprovementCycle(config);
       } catch (err) {
         warn(`[orchestrator] self-improvement error: ${String(err?.message || err)}`);
+      }
+
+      // ── Governance canary: process running policy-rule canary experiments ──
+      // Advisory — never blocks orchestration. Processes each running governance
+      // canary experiment: assign cycle to cohort, record metrics, evaluate advancement.
+      // On breach: status=rolled_back, breachAction=halt_new_assignments (AC4).
+      try {
+        const { processGovernanceCycle } = await import("./governance_canary.js");
+        const cycleId = `governance-${Date.now()}`;
+        const govResults = await processGovernanceCycle(config, cycleId, {});
+        if (govResults.length > 0) {
+          const summary = govResults.map(r => `${r.canaryId}:cohort=${r.cohort}:action=${r.action}`).join(", ");
+          await appendProgress(config, `[GOVERNANCE_CANARY] Processed ${govResults.length} experiment(s): ${summary}`);
+          const breaches = govResults.filter(r => r.action === "rollback");
+          if (breaches.length > 0) {
+            await appendProgress(config,
+              `[GOVERNANCE_CANARY] BREACH detected — ${breaches.length} experiment(s) rolled back: ${breaches.map(b => `${b.canaryId}:${b.reason}`).join(", ")}`
+            );
+          }
+        }
+      } catch (err) {
+        // Advisory — never blocks orchestration
+        warn(`[orchestrator] governance canary processing error (non-fatal): ${String(err?.message || err)}`);
       }
 
       // Start a new Prometheus cycle to find new work
