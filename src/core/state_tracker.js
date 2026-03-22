@@ -427,3 +427,35 @@ export async function appendInterventionOptimizerEntry(config, entry) {
     budgetUnit:       String(entry?.budgetUnit ?? "workerSpawns"),
   });
 }
+
+// ── Compounding effects persistence (re-exports from compounding_effects_analyzer) ──
+
+/**
+ * Persist a compounding-effects AnalyzerResult to state/.
+ * Delegates to compounding_effects_analyzer.persistCompoundingEffectsResult.
+ *
+ * @param {object} config — box config with config.paths.stateDir
+ * @param {object} result — AnalyzerResult from analyzeCompoundingEffects()
+ * @returns {Promise<{ ok: boolean, filePath?: string, reason?: string }>}
+ */
+export { persistCompoundingEffectsResult } from "./compounding_effects_analyzer.js";
+
+/**
+ * Persist a monthly compounding-effects report to state/.
+ * Delegates to compounding_effects_analyzer.persistMonthlyCompoundingReport.
+ *
+ * @param {object} config  — box config with config.paths.stateDir
+ * @param {object} report  — MonthlyCompoundingReport
+ * @returns {Promise<{ ok: boolean, filePath?: string, reason?: string }>}
+ */
+export { persistMonthlyCompoundingReport } from "./compounding_effects_analyzer.js";
+
+/**
+ * Generate and persist a monthly compounding-effects report from the rolling log.
+ * Delegates to compounding_effects_analyzer.generateAndPersistMonthlyReport.
+ *
+ * @param {object} config   — box config with config.paths.stateDir
+ * @param {string} monthKey — "YYYY-MM"
+ * @returns {Promise<{ ok: boolean, filePath?: string, report?: object, reason?: string }>}
+ */
+export { generateAndPersistMonthlyReport } from "./compounding_effects_analyzer.js";

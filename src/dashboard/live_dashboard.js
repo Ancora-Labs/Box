@@ -4373,6 +4373,37 @@ async function serve(req, res) {
     return;
   }
 
+  if (url.pathname === "/api/compounding-effects") {
+    // Returns the latest compounding-effects analysis result and monthly report.
+    // Source: state/compounding_effects_latest.json (per-run)
+    //         state/compounding_effects_monthly_{YYYY-MM}.json (monthly top-N)
+    try {
+      const { readJson: readJsonSafe } = await import("../core/fs_utils.js");
+      const now       = new Date();
+      const monthKey  = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      const latestPath  = path.join(STATE_DIR, "compounding_effects_latest.json");
+      const monthlyPath = path.join(STATE_DIR, `compounding_effects_monthly_${monthKey}.json`);
+
+      const [latest, monthly] = await Promise.all([
+        readJsonSafe(latestPath, null),
+        readJsonSafe(monthlyPath, null),
+      ]);
+
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok:          true,
+        latest:      latest ?? null,
+        monthly:     monthly ?? null,
+        monthKey,
+        generatedAt: new Date().toISOString(),
+      }));
+    } catch (err) {
+      res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: String(err?.message || err) }));
+    }
+    return;
+  }
+
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(renderHtml());
 }
