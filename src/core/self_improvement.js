@@ -31,6 +31,8 @@ import {
   recordApprovalEvidence,
   GOVERNANCE_CONTRACT_VERSION
 } from "./governance_contract.js";
+import { isGuardrailActive } from "./guardrail_executor.js";
+import { GUARDRAIL_ACTION } from "./catastrophe_detector.js";
 
 // ── Decision Quality Weights ──────────────────────────────────────────────────
 
@@ -1429,6 +1431,25 @@ export async function runSelfImprovementCycle(config) {
   if (!siConfig.enabled) return null;
 
   const stateDir = config.paths?.stateDir || "state";
+
+  // Guardrail gate: halt self-improvement if FREEZE_SELF_IMPROVEMENT guardrail is active.
+  // This is set automatically when a catastrophe scenario (e.g. RUNAWAY_RETRIES,
+  // MASS_BLOCKED_TASKS) is detected. Gated by systemGuardian.enabled for rollback safety.
+  if (config.systemGuardian?.enabled !== false) {
+    try {
+      const frozen = await isGuardrailActive(config, GUARDRAIL_ACTION.FREEZE_SELF_IMPROVEMENT);
+      if (frozen) {
+        warn("[self-improvement] FREEZE_SELF_IMPROVEMENT guardrail active — skipping cycle");
+        await appendProgress(config,
+          "[SELF-IMPROVEMENT] Skipped: FREEZE_SELF_IMPROVEMENT guardrail is active (catastrophe scenario detected). Revert guardrail to resume."
+        );
+        return null;
+      }
+    } catch (err) {
+      // Non-fatal: guardrail check failure must not block; continue with improvement
+      warn(`[self-improvement] FREEZE_SELF_IMPROVEMENT guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
 
   await appendProgress(config, "[SELF-IMPROVEMENT] Starting post-cycle analysis...");
 
