@@ -39,7 +39,8 @@ import {
   STATE_FILE_TYPE,
   MIGRATION_REASON
 } from "./schema_registry.js";
-import { runCatastropheDetection } from "./catastrophe_detector.js";
+import { runCatastropheDetection, GUARDRAIL_ACTION } from "./catastrophe_detector.js";
+import { executeGuardrailsForDetections, isGuardrailActive } from "./guardrail_executor.js";
 
 /**
  * Orchestrator health status enum.
@@ -535,6 +536,29 @@ async function runSingleCycle(config) {
   // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
   await auditCriticalStateFiles(config, stateDir);
 
+  // Guardrail gate: if SKIP_CYCLE is active, skip planning to avoid acting on stale state.
+  // Gated by systemGuardian.enabled (rollback: set to false to retain detection without enforcement).
+  if (config.systemGuardian?.enabled !== false) {
+    try {
+      const skipActive = await isGuardrailActive(config, GUARDRAIL_ACTION.SKIP_CYCLE);
+      if (skipActive) {
+        await appendProgress(config,
+          "[CYCLE] SKIP_CYCLE guardrail active — skipping this planning cycle (stale state detected)"
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: "Planning cycle skipped by SKIP_CYCLE guardrail",
+          message: "SKIP_CYCLE guardrail is active — catastrophe scenario may still be present. Revert guardrail to resume."
+        });
+        return;
+      }
+    } catch (err) {
+      // Non-fatal: guardrail check failure must not block the cycle
+      warn(`[orchestrator] SKIP_CYCLE guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
   // Step 1: Jesus analyzes state and decides what to do (1 request)
   await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");
   await safeUpdatePipelineProgress(config, "jesus_awakening", "Jesus starting system state analysis");
@@ -635,6 +659,28 @@ async function runSingleCycle(config) {
   // Step 4: Dispatch workers sequentially (1 request per worker)
   const plans = prometheusAnalysis.plans;
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
+
+  // Guardrail gate: if PAUSE_WORKERS is active, skip all worker dispatch.
+  if (config.systemGuardian?.enabled !== false) {
+    try {
+      const pauseActive = await isGuardrailActive(config, GUARDRAIL_ACTION.PAUSE_WORKERS);
+      if (pauseActive) {
+        await appendProgress(config,
+          "[CYCLE] PAUSE_WORKERS guardrail active — skipping worker dispatch (catastrophe scenario active)"
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: "Worker dispatch paused by PAUSE_WORKERS guardrail",
+          message: "PAUSE_WORKERS guardrail is active — all worker dispatch suspended. Revert guardrail to resume."
+        });
+        return;
+      }
+    } catch (err) {
+      warn(`[orchestrator] PAUSE_WORKERS guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
   await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${plans.length} worker(s)`, {
     workersTotal: plans.length,
     workersDone: 0
@@ -805,6 +851,19 @@ async function runSingleCycle(config) {
     }
     if (!catastropheResult.ok) {
       warn(`[orchestrator] Catastrophe detection degraded: ${catastropheResult.reason || "unknown"}`);
+    }
+
+    // Execute guardrail actions for all active detections.
+    // Gated by systemGuardian.enabled — set false to retain detection without enforcement (rollback path).
+    if (catastropheResult.ok && catastropheResult.detections.length > 0
+        && config.systemGuardian?.enabled !== false) {
+      const guardResult = await executeGuardrailsForDetections(config, catastropheResult.detections);
+      await appendProgress(config,
+        `[GUARDRAIL] ${guardResult.results.length} action(s) applied — status=${guardResult.status} withinSla=${guardResult.withinSla} latencyMs=${guardResult.latencyMs}`
+      );
+      if (!guardResult.ok) {
+        warn(`[orchestrator] Guardrail execution returned partial/failed status: ${guardResult.reason || "see results"}`);
+      }
     }
   } catch (err) {
     // Advisory — never blocks orchestration
