@@ -6,8 +6,7 @@ import { readJson, writeJson, writeJsonAtomic } from "./fs_utils.js";
 // ── State files that must be cleared on shutdown (full reset) ────────────────
 const SHUTDOWN_CLEAR_FILES = [
   "jesus_directive.json",
-  "trump_analysis.json",
-  "trump_dossier.md",
+  "prometheus_analysis.json",
   "moses_coordination.json",
   "worker_sessions.json",
   "jesus_escalation.json",
@@ -15,7 +14,8 @@ const SHUTDOWN_CLEAR_FILES = [
   "daemon.stop.json",
   "daemon.reload.json",
   "leadership_live.txt",
-  "leadership_thinking.txt"
+  "leadership_thinking.txt",
+  "si_live.log"
 ];
 
 // Worker state files pattern

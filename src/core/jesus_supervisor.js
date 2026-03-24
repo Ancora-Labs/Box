@@ -15,7 +15,7 @@
  */
 
 import path from "node:path";
-import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
+import { readJson, readJsonSafe, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
@@ -564,6 +564,20 @@ ${workersList}`;
     d.callPrometheus = true;
     d.prometheusReason = (d.prometheusReason || "") + " [OVERRIDE: no recent Prometheus analysis — forced callPrometheus=true]";
     await appendProgress(config, `[JESUS] callPrometheus overridden to true — Prometheus analysis is ${prometheusAgeHours === Infinity ? "missing" : prometheusAgeHours.toFixed(1) + "h old"}`);
+  }
+
+  // ── Safety net: force replanning if Athena rejected the previous plan ──────
+  // If the last plan was rejected and we're about to skip replanning, that's wrong.
+  // Athena rejection = mandatory replan, regardless of Prometheus freshness.
+  if (!d.callPrometheus) {
+    try {
+      const athenaRejection = await readJsonSafe(path.join(stateDir, "athena_plan_rejection.json"));
+      if (athenaRejection && typeof athenaRejection === "object") {
+        d.callPrometheus = true;
+        d.prometheusReason = (d.prometheusReason || "") + " [OVERRIDE: Athena rejected previous plan — forced callPrometheus=true for replan]";
+        await appendProgress(config, `[JESUS] callPrometheus overridden to true — Athena rejection detected, mandatory replan`);
+      }
+    } catch { /* non-fatal: if athena_plan_rejection doesn't exist or is malformed, continue */ }
   }
 
   chatLog(stateDir, jesusName,

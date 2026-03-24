@@ -46,9 +46,8 @@ const CRITICAL_PREFIXES = [
 const CAUTION_FILES = [
   "src/core/task_queue.js",
   "src/core/self_improvement.js",
-  "src/core/moses_coordinator.js",
   "src/core/jesus_supervisor.js",
-  "src/core/trump.js",
+  "src/core/prometheus.js",
   "box.config.json",
   "package.json",
 ];

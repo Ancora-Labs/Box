@@ -141,17 +141,20 @@ export function validatePlanAgainstPolicies(plan, policies) {
 }
 
 /**
- * Check if unresolved carry-forward lessons should block plan acceptance (Packet 10).
+ * Check if unresolved carry-forward lessons should block plan acceptance (Packet 10/16).
  * Plans are blocked when the same lesson has gone unresolved for more than maxCycles.
+ *
+ * Enhanced (Packet 16): Also validates that mandatory carry-forward items appear
+ * explicitly in the current plan set. Plans missing mandatory items are blocked.
  *
  * @param {object[]} postmortems — postmortem entries with followUpNeeded/followUpTask
  * @param {object[]} currentPlans — current plan set to check against
- * @param {{ maxUnresolvedCycles?: number }} opts
- * @returns {{ shouldBlock: boolean, reason: string, unresolvedLessons: string[] }}
+ * @param {{ maxUnresolvedCycles?: number, mandatoryCarryForward?: string[] }} opts
+ * @returns {{ shouldBlock: boolean, reason: string, unresolvedLessons: string[], missingMandatory: string[] }}
  */
 export function checkCarryForwardGate(postmortems, currentPlans, opts = {}) {
   const maxCycles = opts.maxUnresolvedCycles || 3;
-  if (!Array.isArray(postmortems)) return { shouldBlock: false, reason: "", unresolvedLessons: [] };
+  if (!Array.isArray(postmortems)) return { shouldBlock: false, reason: "", unresolvedLessons: [], missingMandatory: [] };
 
   // Count how many times each lesson appears unresolved
   const lessonCounts = new Map();
@@ -175,14 +178,32 @@ export function checkCarryForwardGate(postmortems, currentPlans, opts = {}) {
     }
   }
 
-  if (unresolvedLessons.length > 0) {
-    return {
-      shouldBlock: true,
-      reason: `${unresolvedLessons.length} lesson(s) unresolved for >${maxCycles} cycles and not addressed in current plan`,
-      unresolvedLessons,
-    };
+  // Packet 16: Validate mandatory carry-forward items
+  const mandatory = Array.isArray(opts.mandatoryCarryForward) ? opts.mandatoryCarryForward : [];
+  const missingMandatory = [];
+  for (const item of mandatory) {
+    const normalizedItem = normalizeKey(item);
+    const found = planTexts.some(pt => pt.includes(normalizedItem.slice(0, 40)) || normalizedItem.includes(pt.slice(0, 40)));
+    if (!found) {
+      missingMandatory.push(item.slice(0, 100));
+    }
   }
-  return { shouldBlock: false, reason: "", unresolvedLessons: [] };
+
+  const shouldBlock = unresolvedLessons.length > 0 || missingMandatory.length > 0;
+  const reasons = [];
+  if (unresolvedLessons.length > 0) {
+    reasons.push(`${unresolvedLessons.length} lesson(s) unresolved for >${maxCycles} cycles and not addressed in current plan`);
+  }
+  if (missingMandatory.length > 0) {
+    reasons.push(`${missingMandatory.length} mandatory carry-forward item(s) missing from plan`);
+  }
+
+  return {
+    shouldBlock,
+    reason: reasons.join("; "),
+    unresolvedLessons,
+    missingMandatory,
+  };
 }
 
 function normalizeKey(text) {
@@ -196,3 +217,77 @@ function normalizeKey(text) {
 
 /** Exported for testing. */
 export { COMPILABLE_PATTERNS };
+
+/**
+ * Hard-gate: auto-compile unresolved recurrences into enforceable policies (Packet 15).
+ *
+ * When the same lesson recurs more than `maxRecurrences` times without resolution,
+ * this function forcibly compiles it into a policy assertion that blocks future plans
+ * matching the same pattern.
+ *
+ * @param {object[]} postmortems — full postmortem history
+ * @param {string[]} existingPolicyIds — already-active policy IDs
+ * @param {{ maxRecurrences?: number }} opts
+ * @returns {{ newPolicies: CompiledPolicy[], escalations: string[] }}
+ */
+export function hardGateRecurrenceToPolicies(postmortems, existingPolicyIds = [], opts = {}) {
+  const maxRecurrences = opts.maxRecurrences || 3;
+  if (!Array.isArray(postmortems)) return { newPolicies: [], escalations: [] };
+
+  const existing = new Set(existingPolicyIds);
+  const lessonCounts = new Map();
+
+  // Count lesson occurrences
+  for (const pm of postmortems) {
+    if (!pm.followUpNeeded) continue;
+    const lesson = String(pm.lessonLearned || "").trim();
+    if (lesson.length < 10) continue;
+    lessonCounts.set(lesson, (lessonCounts.get(lesson) || 0) + 1);
+  }
+
+  const newPolicies = [];
+  const escalations = [];
+
+  for (const [lesson, count] of lessonCounts) {
+    if (count < maxRecurrences) continue;
+
+    // Try to compile into a known pattern
+    let compiled = false;
+    for (const template of COMPILABLE_PATTERNS) {
+      if (template.pattern.test(lesson) && !existing.has(template.id)) {
+        existing.add(template.id);
+        newPolicies.push({
+          id: template.id,
+          assertion: template.assertion,
+          severity: "critical", // Force critical for recurring issues
+          sourceLesson: lesson.slice(0, 200),
+          detectedAt: new Date().toISOString(),
+          _hardGated: true,
+          _recurrenceCount: count,
+        });
+        compiled = true;
+        break;
+      }
+    }
+
+    // If no known pattern matches, escalate as a custom rule
+    if (!compiled) {
+      const customId = `custom-recurrence-${normalizeKey(lesson).slice(0, 30).replace(/\s/g, "-")}`;
+      if (!existing.has(customId)) {
+        existing.add(customId);
+        newPolicies.push({
+          id: customId,
+          assertion: `Recurring unresolved: ${lesson.slice(0, 100)}`,
+          severity: "warning",
+          sourceLesson: lesson.slice(0, 200),
+          detectedAt: new Date().toISOString(),
+          _hardGated: true,
+          _recurrenceCount: count,
+        });
+        escalations.push(`Lesson recurring ${count}x without resolution: ${lesson.slice(0, 80)}`);
+      }
+    }
+  }
+
+  return { newPolicies, escalations };
+}

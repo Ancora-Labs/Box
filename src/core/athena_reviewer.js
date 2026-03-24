@@ -20,6 +20,8 @@ import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js"
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
+import { rankLessonsByRelevance } from "./lesson_halflife.js";
+import { detectRecurrences } from "./recurrence_detector.js";
 import {
   addSchemaVersion,
   extractPostmortemEntries,
@@ -261,7 +263,107 @@ export function runCalibration(fixtures) {
   const deviation = computeCalibrationDeviation(
     results.map(r => ({ fixture: r.fixture, actualCategory: r.scoreCategory }))
   );
-  return { ...deviation, results };
+
+  // Capacity dimension: track which rationale classes are consistently missed
+  const missedClasses = new Map();
+  for (const r of results) {
+    const expected = r.fixture?.expectedRationaleClasses || [];
+    const matched = r.matchedClasses || [];
+    const matchedSet = new Set(matched);
+    for (const cls of expected) {
+      if (!matchedSet.has(cls)) {
+        missedClasses.set(cls, (missedClasses.get(cls) || 0) + 1);
+      }
+    }
+  }
+  const capacityGaps = [...missedClasses.entries()]
+    .filter(([, count]) => count >= 2)
+    .map(([cls, count]) => ({ rationaleClass: cls, missedCount: count }))
+    .sort((a, b) => b.missedCount - a.missedCount);
+
+  return { ...deviation, results, capacityGaps };
+}
+
+/**
+ * Task class taxonomy for class-segmented calibration.
+ * @enum {string}
+ */
+export const TASK_CLASS = Object.freeze({
+  IMPLEMENTATION: "implementation",
+  TEST: "test",
+  REFACTOR: "refactor",
+  BUGFIX: "bugfix",
+  GOVERNANCE: "governance",
+  DOCUMENTATION: "documentation",
+  INFRASTRUCTURE: "infrastructure",
+  UNKNOWN: "unknown",
+});
+
+/**
+ * Infer task class from a plan fixture.
+ *
+ * @param {object} fixture
+ * @returns {string} one of TASK_CLASS values
+ */
+export function inferTaskClass(fixture) {
+  const task = String(fixture?.plan?.task || "").toLowerCase();
+  const role = String(fixture?.plan?.role || "").toLowerCase();
+  if (/\btests?\b|\.test\.|spec\b/.test(task) || role === "test" || role === "qa") return TASK_CLASS.TEST;
+  if (/\bbug\b|fix\b|patch\b|hotfix/.test(task) || role === "bugfix") return TASK_CLASS.BUGFIX;
+  if (/\brefactor\b|cleanup|restructur/.test(task)) return TASK_CLASS.REFACTOR;
+  if (/\bdoc\b|readme|documentation/.test(task) || role === "documentation") return TASK_CLASS.DOCUMENTATION;
+  if (/\bgovern|policy|compliance|audit/.test(task) || role === "governance") return TASK_CLASS.GOVERNANCE;
+  if (/\binfra|docker|ci|deploy|pipeline/.test(task) || role === "devops" || role === "infrastructure") return TASK_CLASS.INFRASTRUCTURE;
+  if (/\bimplement|add|create|build|introduce/.test(task) || role === "implementation" || role === "backend" || role === "frontend") return TASK_CLASS.IMPLEMENTATION;
+  return TASK_CLASS.UNKNOWN;
+}
+
+/**
+ * Run calibration segmented by task class.
+ * Returns per-class deviation scores and FP/FN rates.
+ *
+ * @param {object[]} fixtures
+ * @returns {{ overall: object, byClass: Record<string, { deviationScore: number, total: number, mismatches: number, falsePositiveRate: number, falseNegativeRate: number }> }}
+ */
+export function computeCalibrationByTaskClass(fixtures) {
+  const overall = runCalibration(fixtures);
+  const byClass = {};
+
+  // Group fixtures by task class
+  const groups = new Map();
+  for (const fixture of (fixtures || [])) {
+    const cls = inferTaskClass(fixture);
+    if (!groups.has(cls)) groups.set(cls, []);
+    groups.get(cls).push(fixture);
+  }
+
+  for (const [cls, classFixtures] of groups) {
+    const results = classFixtures.map(fixture => {
+      const scored = scoreCalibrationPlan(fixture);
+      return { fixture, ...scored };
+    });
+    const deviation = computeCalibrationDeviation(
+      results.map(r => ({ fixture: r.fixture, actualCategory: r.scoreCategory }))
+    );
+
+    // FP = scored as rejected but expected approved; FN = scored as approved but expected rejected
+    let fp = 0, fn = 0;
+    for (const r of results) {
+      const expected = r.fixture?.expectedVerdict;
+      if (r.scoreCategory === CALIBRATION_VERDICT.REJECTED && expected === "approved") fp++;
+      if (r.scoreCategory === CALIBRATION_VERDICT.APPROVED && expected === "rejected") fn++;
+    }
+
+    byClass[cls] = {
+      deviationScore: deviation.deviationScore,
+      total: deviation.total,
+      mismatches: deviation.mismatches,
+      falsePositiveRate: results.length > 0 ? Math.round((fp / results.length) * 10000) / 10000 : 0,
+      falseNegativeRate: results.length > 0 ? Math.round((fn / results.length) * 10000) / 10000 : 0,
+    };
+  }
+
+  return { overall, byClass };
 }
 
 // ── Canonical postmortem schema ──────────────────────────────────────────────
@@ -641,6 +743,218 @@ async function callCopilotAgent(command, agentSlug, contextPrompt, config, model
   return parseAgentOutput(stdout || stderr);
 }
 
+function pickReviewerPayload(raw) {
+  const candidates = [
+    raw,
+    raw?.decision,
+    raw?.review,
+    raw?.reviewer,
+    raw?.result,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    if (
+      typeof candidate.approved === "boolean"
+      || Array.isArray(candidate.corrections)
+      || Array.isArray(candidate.planReviews)
+      || typeof candidate.summary === "string"
+      || typeof candidate.reason === "string"
+    ) {
+      return candidate;
+    }
+  }
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function collectReviewerCorrections(payload, planReviews) {
+  if (Array.isArray(payload?.corrections)) {
+    return payload.corrections.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+
+  const fromReviews = [];
+  for (const review of planReviews) {
+    if (Array.isArray(review?.issues) && review.issues.length > 0) {
+      const prefix = Number.isInteger(review.planIndex) ? `plan[${review.planIndex}]` : "plan";
+      fromReviews.push(`${prefix}: ${review.issues.map((item) => String(item || "").trim()).filter(Boolean).join("; ")}`);
+    }
+  }
+  return fromReviews.filter(Boolean);
+}
+
+function inferApprovalFromReviewerPayload(payload, normalizedPlanReviews, corrections) {
+  if (typeof payload?.approved === "boolean") return payload.approved;
+
+  const status = String(payload?.status || payload?.verdict || "").trim().toLowerCase();
+  if (["approved", "approve", "pass", "passed", "accept", "accepted"].includes(status)) return true;
+  if (["rejected", "reject", "fail", "failed", "blocked"].includes(status)) return false;
+
+  if (corrections.length > 0) return false;
+
+  const hasNegativeReview = normalizedPlanReviews.some((review) =>
+    review.measurable === false
+    || review.successCriteriaClear === false
+    || review.verificationConcrete === false
+    || review.scopeDefined === false
+    || review.preMortemComplete === false
+    || (Array.isArray(review.issues) && review.issues.length > 0)
+  );
+  if (hasNegativeReview) return false;
+
+  const text = `${payload?.summary || ""} ${payload?.reason || ""} ${payload?.assessment || ""}`.toLowerCase();
+  if (/\b(approve|approved|passes|pass|acceptable|looks good|ready)\b/.test(text)) return true;
+  if (/\b(reject|rejected|fail|failed|block|blocked|insufficient|missing)\b/.test(text)) return false;
+
+  return false;
+}
+
+function buildFallbackPlanReview(plan, index) {
+  const files = Array.isArray(plan?.target_files)
+    ? plan.target_files
+    : Array.isArray(plan?.targetFiles)
+      ? plan.targetFiles
+      : [];
+  const acceptanceCriteria = Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria : [];
+  const premortemCheck = plan?.riskLevel === PREMORTEM_RISK_LEVEL.HIGH
+    ? validatePremortem(plan?.premortem)
+    : { status: PREMORTEM_STATUS.PASS, errors: [] };
+
+  return {
+    planIndex: index,
+    role: String(plan?.role || "unknown"),
+    measurable: String(plan?.task || "").trim().length >= 10,
+    successCriteriaClear: acceptanceCriteria.length > 0,
+    verificationConcrete: String(plan?.verification || "").trim().length >= 5,
+    scopeDefined: files.length > 0 || String(plan?.scope || "").trim().length > 0,
+    preMortemComplete: premortemCheck.status === PREMORTEM_STATUS.PASS,
+    issues: [],
+    suggestion: ""
+  };
+}
+
+function normalizePlanReviewEntry(entry, plan, index) {
+  const fallback = buildFallbackPlanReview(plan, index);
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return fallback;
+  }
+
+  return {
+    planIndex: Number.isInteger(entry.planIndex) ? entry.planIndex : fallback.planIndex,
+    role: String(entry.role || fallback.role),
+    measurable: typeof entry.measurable === "boolean" ? entry.measurable : fallback.measurable,
+    successCriteriaClear: typeof entry.successCriteriaClear === "boolean" ? entry.successCriteriaClear : fallback.successCriteriaClear,
+    verificationConcrete: typeof entry.verificationConcrete === "boolean" ? entry.verificationConcrete : fallback.verificationConcrete,
+    scopeDefined: typeof entry.scopeDefined === "boolean" ? entry.scopeDefined : fallback.scopeDefined,
+    preMortemComplete: typeof entry.preMortemComplete === "boolean" ? entry.preMortemComplete : fallback.preMortemComplete,
+    issues: Array.isArray(entry.issues) ? entry.issues.map((item) => String(item || "").trim()).filter(Boolean) : [],
+    suggestion: String(entry.suggestion || ""),
+  };
+}
+
+export function normalizeAthenaReviewPayload(raw, plans = []) {
+  const payload = pickReviewerPayload(raw);
+  const synthesizedFields = [];
+
+  let normalizedPlanReviews = [];
+  if (Array.isArray(payload.planReviews)) {
+    normalizedPlanReviews = payload.planReviews.map((entry, index) => normalizePlanReviewEntry(entry, plans[index], index));
+  } else if (Array.isArray(payload.plan_reviews)) {
+    normalizedPlanReviews = payload.plan_reviews.map((entry, index) => normalizePlanReviewEntry(entry, plans[index], index));
+    synthesizedFields.push("planReviews");
+  } else {
+    normalizedPlanReviews = plans.map((plan, index) => buildFallbackPlanReview(plan, index));
+    synthesizedFields.push("planReviews");
+  }
+
+  const corrections = collectReviewerCorrections(payload, normalizedPlanReviews);
+  if (!Array.isArray(payload.corrections)) synthesizedFields.push("corrections");
+
+  const approved = inferApprovalFromReviewerPayload(payload, normalizedPlanReviews, corrections);
+  if (typeof payload.approved !== "boolean") synthesizedFields.push("approved");
+
+  // ── Extract patchedPlans if Athena provided in-place repairs ─────────────
+  const patchedPlans = Array.isArray(payload.patchedPlans) ? payload.patchedPlans : null;
+  const appliedFixes = Array.isArray(payload.appliedFixes)
+    ? payload.appliedFixes.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const unresolvedIssues = Array.isArray(payload.unresolvedIssues)
+    ? payload.unresolvedIssues.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+
+  return {
+    payload: {
+      approved,
+      overallScore: Number.isFinite(Number(payload.overallScore)) ? Number(payload.overallScore) : 0,
+      summary: String(payload.summary || payload.reason || payload.assessment || ""),
+      planReviews: normalizedPlanReviews,
+      corrections,
+      missingMetrics: Array.isArray(payload.missingMetrics) ? payload.missingMetrics.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      lessonsFromPast: String(payload.lessonsFromPast || ""),
+      patchedPlans,
+      appliedFixes,
+      unresolvedIssues,
+    },
+    synthesizedFields: [...new Set(synthesizedFields)],
+  };
+}
+
+function truncatePromptText(value, maxLength = 180) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
+function summarizePremortemForPrompt(plan) {
+  if (plan?.riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) return "none";
+  const validation = validatePremortem(plan?.premortem);
+  const pm = plan?.premortem && typeof plan.premortem === "object" ? plan.premortem : {};
+  return JSON.stringify({
+    status: validation.status,
+    scenario: truncatePromptText(pm.scenario || "", 80),
+    failurePaths: Array.isArray(pm.failurePaths) ? pm.failurePaths.length : 0,
+    mitigations: Array.isArray(pm.mitigations) ? pm.mitigations.length : 0,
+    detectionSignals: Array.isArray(pm.detectionSignals) ? pm.detectionSignals.length : 0,
+    guardrails: Array.isArray(pm.guardrails) ? pm.guardrails.length : 0,
+  });
+}
+
+// ── Plan Quality Scoring (deterministic pre-gate) ────────────────────────────
+
+/**
+ * Score a single plan item's structural quality (0-100).
+ * Used as a fast pre-gate before the AI plan review call.
+ *
+ * @param {object} plan
+ * @returns {{ score: number, issues: string[] }}
+ */
+export function scorePlanQuality(plan) {
+  let score = 100;
+  const issues = [];
+
+  if (!plan || typeof plan !== "object") return { score: 0, issues: ["plan is not an object"] };
+
+  if (!plan.task || String(plan.task).trim().length < 10) {
+    score -= 30; issues.push("task description too short or missing");
+  }
+  if (!plan.role || String(plan.role).trim().length < 2) {
+    score -= 20; issues.push("role not specified");
+  }
+  if (!plan.verification || String(plan.verification).trim().length < 5) {
+    score -= 20; issues.push("verification method missing or too vague");
+  }
+  if (plan.wave === undefined || plan.wave === null) {
+    score -= 10; issues.push("wave not assigned");
+  }
+  const vague = /\b(improve|refactor|update|fix stuff|make better)\b/i;
+  if (vague.test(String(plan.task || ""))) {
+    score -= 15; issues.push("task uses vague language");
+  }
+
+  return { score: Math.max(0, score), issues };
+}
+
+/** Minimum quality score for a plan to pass the deterministic pre-gate. */
+export const PLAN_QUALITY_MIN_SCORE = 40;
+
 // ── Plan Review (pre-work gate) ─────────────────────────────────────────────
 
 export async function runAthenaPlanReview(config, prometheusAnalysis) {
@@ -659,6 +973,25 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   }
 
   const plans = Array.isArray(prometheusAnalysis.plans) ? prometheusAnalysis.plans : [];
+
+  // ── Deterministic plan quality pre-gate ────────────────────────────────────
+  const qualityFailures = [];
+  for (let i = 0; i < plans.length; i++) {
+    const { score, issues } = scorePlanQuality(plans[i]);
+    if (score < PLAN_QUALITY_MIN_SCORE) {
+      qualityFailures.push(`plan[${i}] "${plans[i]?.task || plans[i]?.role || "?"}": score=${score} — ${issues.join("; ")}`);
+    }
+  }
+  if (qualityFailures.length > 0) {
+    const message = `${qualityFailures.length} plan(s) below quality threshold (${PLAN_QUALITY_MIN_SCORE})`;
+    await appendProgress(config, `[ATHENA] Plan quality pre-gate FAILED — ${message}`);
+    chatLog(stateDir, athenaName, `Plan quality pre-gate failed: ${message}`);
+    return {
+      approved: false,
+      reason: { code: "LOW_PLAN_QUALITY", message },
+      corrections: qualityFailures
+    };
+  }
 
   // ── Deterministic pre-mortem gate (runs before AI, always enforced) ────────
   // High-risk plans (riskLevel="high") must include a valid pre-mortem section.
@@ -684,23 +1017,53 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
 
   const plansSummary = plans.map((p, i) => {
     const preMortemTag = p.riskLevel === "high" ? " [HIGH-RISK:premortem=present]" : "";
-    return `  ${i + 1}. role=${p.role} task="${p.task}" priority=${p.priority} wave=${p.wave} riskLevel=${p.riskLevel || "low"}${preMortemTag}\n     verification="${p.verification || "NONE"}"`;
+    const targetFiles = Array.isArray(p.target_files)
+      ? p.target_files
+      : Array.isArray(p.targetFiles)
+        ? p.targetFiles
+        : [];
+    const ac = Array.isArray(p.acceptance_criteria) ? p.acceptance_criteria : [];
+    const deps = Array.isArray(p.dependencies) ? p.dependencies : [];
+      const targetFilesPreview = JSON.stringify(targetFiles.slice(0, 5));
+      const acceptancePreview = JSON.stringify(ac.slice(0, 3).map((item) => truncatePromptText(item, 100)));
+    return `  ${i + 1}. role=${p.role} task="${p.task}" priority=${p.priority} wave=${p.wave} riskLevel=${p.riskLevel || "low"}${preMortemTag}
+       scope="${truncatePromptText(p.scope || "", 100)}"
+       target_files=${targetFilesPreview}${targetFiles.length > 5 ? ` (+${targetFiles.length - 5} more)` : ""}
+     dependencies=${JSON.stringify(deps)}
+       before_state="${truncatePromptText(p.before_state || p.beforeState || "", 120)}"
+       after_state="${truncatePromptText(p.after_state || p.afterState || "", 120)}"
+       acceptance_criteria=${acceptancePreview}${ac.length > 3 ? ` (+${ac.length - 3} more)` : ""}
+       premortem=${summarizePremortemForPrompt(p)}
+       verification="${truncatePromptText(p.verification || "NONE", 120)}"`;
   }).join("\n");
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 
-## YOUR MISSION — PLAN QUALITY REVIEW
+## YOUR MISSION — PLAN QUALITY REVIEW & IN-PLACE REPAIR
 
-You are Athena — BOX Quality Gate & Postmortem Reviewer.
-Prometheus has produced a plan. Your job is to validate it BEFORE any worker starts.
+You are Athena — BOX Quality Gate & Plan Editor.
+Prometheus has produced a plan. Your job is to validate it AND FIX any issues you find — all in this single response.
 
-For EACH plan item, check:
+**CRITICAL WORKFLOW:**
+1. Review each plan item against the quality criteria below.
+2. If you find fixable issues (dependency conflicts, missing numeric thresholds, vague acceptance criteria, wave conflicts, missing fields), FIX THEM DIRECTLY and return the corrected plans in "patchedPlans".
+3. Set "approved": true if you were able to fix all issues. Only set "approved": false if there are UNFIXABLE structural problems (e.g., the entire plan is fundamentally wrong, or the task is impossible).
+4. List what you fixed in "appliedFixes" and anything you could NOT fix in "unresolvedIssues".
+
+**Quality criteria for each plan item:**
 1. Is the goal measurable? (not vague like "improve" or "refactor")
 2. Is there a clear success criterion? (what does "done" look like?)
 3. Is the verification method concrete? (a test, a command, a check — not "verify it works")
 4. Are file paths and scope specified?
-5. Are dependencies between plans correct?
-6. For HIGH-RISK plans (riskLevel=high): does the pre-mortem cover failure paths, mitigations, and guardrails?
+5. Are dependencies between plans correct? (two plans modifying the same file must NOT be in the same wave — add a dependency to serialize them)
+6. Do acceptance_criteria contain measurable numeric thresholds where applicable?
+7. For HIGH-RISK plans (riskLevel=high): does the pre-mortem cover failure paths, mitigations, and guardrails?
+
+**COMMON FIXES you should apply directly:**
+- Two plans touching the same file in the same wave → add dependency from the later plan to the earlier one, increment its wave number
+- Vague acceptance criteria → rewrite with numeric threshold (e.g., "fallback rate < 5%")
+- Missing verification → add a concrete test command
+- Missing scope → fill from target_files
 
 ## PROMETHEUS PLAN TO REVIEW
 
@@ -724,6 +1087,24 @@ Respond with your assessment, then:
   "approved": true/false,
   "overallScore": 1-10,
   "summary": "Brief assessment of plan quality",
+  "appliedFixes": ["list of fixes you applied to the plans"],
+  "unresolvedIssues": ["list of issues you could NOT fix — only if approved=false"],
+  "patchedPlans": [
+    {
+      "role": "worker name",
+      "task": "exact task description (fixed if needed)",
+      "priority": 1,
+      "wave": 1,
+      "dependencies": [],
+      "target_files": ["file paths"],
+      "scope": "scope description",
+      "before_state": "current state",
+      "after_state": "desired state",
+      "acceptance_criteria": ["measurable criteria with numeric thresholds"],
+      "verification": "concrete test command",
+      "riskLevel": "low"
+    }
+  ],
   "planReviews": [
     {
       "planIndex": 0,
@@ -733,15 +1114,17 @@ Respond with your assessment, then:
       "verificationConcrete": true/false,
       "scopeDefined": true/false,
       "preMortemComplete": true/false,
-      "issues": ["list of problems if any"],
-      "suggestion": "how to fix if rejected"
+      "issues": ["list of problems found (before fix)"],
+      "suggestion": "what was fixed or why it could not be fixed"
     }
   ],
-  "corrections": ["list of mandatory corrections before execution"],
+  "corrections": ["only if approved=false: list of mandatory corrections that need external intervention"],
   "missingMetrics": ["metrics that should be tracked but aren't"],
   "lessonsFromPast": "any relevant observations from past postmortems"
 }
-===END===`;
+===END===
+
+IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Even if no changes were needed, return the original plans as-is in patchedPlans. This ensures the orchestrator always has a validated plan set.`;
 
   const aiResult = await callCopilotAgent(command, "athena", contextPrompt, config, athenaModel);
 
@@ -770,8 +1153,15 @@ Respond with your assessment, then:
 
   // ── Trust boundary validation ────────────────────────────────────────────
   const tbMode = config?.runtime?.trustBoundaryMode === "warn" ? "warn" : "enforce";
+  const normalizedReview = normalizeAthenaReviewPayload(aiResult.parsed, plans);
+  if (normalizedReview.synthesizedFields.length > 0) {
+    await appendProgress(config,
+      `[ATHENA] Reviewer payload normalized before trust-boundary validation — synthesized=${normalizedReview.synthesizedFields.join(",")}`
+    );
+  }
+
   const trustCheck = validateLeadershipContract(
-    LEADERSHIP_CONTRACT_TYPE.REVIEWER, aiResult.parsed, { mode: tbMode }
+    LEADERSHIP_CONTRACT_TYPE.REVIEWER, normalizedReview.payload, { mode: tbMode }
   );
   if (!trustCheck.ok && tbMode === "enforce") {
     const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
@@ -793,7 +1183,7 @@ Respond with your assessment, then:
     await appendProgress(config, `[ATHENA][TRUST_BOUNDARY][WARN] Contract violations (warn mode, not blocking): ${tbErrors}`);
   }
 
-  const d = aiResult.parsed;
+  const d = normalizedReview.payload;
   const approved = d.approved !== false;
   const corrections = Array.isArray(d.corrections) ? d.corrections : [];
 
@@ -804,6 +1194,9 @@ Respond with your assessment, then:
     planReviews: Array.isArray(d.planReviews) ? d.planReviews : [],
     corrections,
     missingMetrics: Array.isArray(d.missingMetrics) ? d.missingMetrics : [],
+    patchedPlans: Array.isArray(d.patchedPlans) ? d.patchedPlans : null,
+    appliedFixes: Array.isArray(d.appliedFixes) ? d.appliedFixes : [],
+    unresolvedIssues: Array.isArray(d.unresolvedIssues) ? d.unresolvedIssues : [],
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
@@ -811,14 +1204,106 @@ Respond with your assessment, then:
   await writeJson(path.join(stateDir, "athena_plan_review.json"), result);
 
   if (approved) {
-    await appendProgress(config, `[ATHENA] Plan APPROVED (score=${result.overallScore}/10) — ${result.summary}`);
-    chatLog(stateDir, athenaName, `Plan approved: score=${result.overallScore}/10`);
+    const fixCount = result.appliedFixes.length;
+    const fixMsg = fixCount > 0 ? ` (${fixCount} fix(es) applied in-place)` : "";
+    await appendProgress(config, `[ATHENA] Plan APPROVED (score=${result.overallScore}/10)${fixMsg} — ${result.summary}`);
+    chatLog(stateDir, athenaName, `Plan approved: score=${result.overallScore}/10${fixMsg}`);
   } else {
     await appendProgress(config, `[ATHENA] Plan REJECTED — corrections needed: ${corrections.join("; ")}`);
     chatLog(stateDir, athenaName, `Plan rejected: ${corrections.join("; ")}`);
   }
 
   return result;
+}
+
+// ── Deterministic postmortem fast-path ───────────────────────────────────────
+
+/**
+ * Check if the current worker result is materially identical to the last postmortem.
+ * If so, the AI postmortem call can be skipped (review-on-delta mode).
+ *
+ * @param {object} workerResult
+ * @param {object[]} pastPostmortems
+ * @returns {boolean} true if result is a duplicate of the last postmortem
+ */
+function isDuplicateResult(workerResult, pastPostmortems) {
+  if (!Array.isArray(pastPostmortems) || pastPostmortems.length === 0) return false;
+  const last = pastPostmortems[pastPostmortems.length - 1];
+  if (!last) return false;
+  const workerName = workerResult?.roleName || workerResult?.role || "";
+  if (last.workerName !== workerName) return false;
+  const currentSummary = String(workerResult?.summary || "").slice(0, 200);
+  const lastOutcome = String(last.actualOutcome || "").slice(0, 200);
+  return currentSummary.length > 20 && currentSummary === lastOutcome;
+}
+
+/**
+ * Classify a postmortem's defect channel: "product" vs "infra".
+ * Infra defects are environment/tooling issues (glob, CI, Docker, etc.)
+ * that do not reflect actual code quality problems.
+ *
+ * @param {object} opts
+ * @param {string} [opts.deviation] — "none" | "minor" | "major"
+ * @param {string} [opts.lessonLearned]
+ * @param {string} [opts.actualOutcome]
+ * @param {string} [opts.primaryClass] — failure_classifier class if available
+ * @returns {{ channel: "product"|"infra", tag: string|null }}
+ */
+export function classifyDefectChannel(opts = {}) {
+  const lesson = String(opts.lessonLearned || "").toLowerCase();
+  const outcome = String(opts.actualOutcome || "").toLowerCase();
+  const combined = `${lesson} ${outcome}`;
+
+  const infraPatterns = [
+    /glob/i, /false.?fail/i, /ci\b.*\bpipeline/i, /docker/i,
+    /timeout/i, /enoent/i, /permission denied/i, /rate.?limit/i,
+    /network/i, /dns/i, /certificate/i
+  ];
+  for (const p of infraPatterns) {
+    if (p.test(combined)) {
+      const tag = p.source.includes("glob") || p.source.includes("false") ? "infra_false_fail" : "infra_env";
+      return { channel: "infra", tag };
+    }
+  }
+
+  if (opts.primaryClass === "environment" || opts.primaryClass === "external_api") {
+    return { channel: "infra", tag: "infra_env" };
+  }
+
+  return { channel: "product", tag: null };
+}
+
+/**
+ * Build a deterministic postmortem record for clean worker passes.
+ * Avoids an AI premium-request call when all verification evidence is green.
+ *
+ * @param {object} workerResult  — worker execution result
+ * @param {object} originalPlan  — original plan dispatched to worker
+ * @param {object} dql           — decision quality label from computeDecisionQualityLabel
+ * @returns {object} postmortem record matching the AI postmortem schema
+ */
+function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
+  const workerName = workerResult?.roleName || workerResult?.role || "unknown";
+  return {
+    workerName,
+    taskCompleted: true,
+    expectedOutcome: originalPlan?.task || "task completion",
+    actualOutcome: `Worker completed successfully. BUILD=pass; TESTS=pass.`,
+    deviation: "none",
+    successCriteriaMet: true,
+    lessonLearned: "Clean pass — no issues detected by verification gate.",
+    qualityScore: 8,
+    followUpNeeded: false,
+    followUpTask: "",
+    recommendation: "proceed",
+    defectChannel: "product",
+    defectChannelTag: null,
+    decisionQualityLabel: dql.label,
+    decisionQualityLabelReason: dql.reason,
+    decisionQualityStatus: dql.status,
+    reviewedAt: new Date().toISOString(),
+    model: "deterministic"
+  };
 }
 
 // ── Postmortem (post-work review) ────────────────────────────────────────────
@@ -856,6 +1341,36 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   const preReviewIssues = Array.isArray(workerResult?.preReviewIssues)
     ? workerResult.preReviewIssues
     : [];
+
+  // ── Deterministic fast-path: skip AI call for clean passes ──────────────
+  const forceAi = config?.athena?.forceAiPostmortem === true;
+  const isCleanPass = workerStatus === "done"
+    && verificationPassed === true
+    && workerResult?.verificationEvidence?.build === "pass"
+    && workerResult?.verificationEvidence?.tests === "pass";
+
+  if (isCleanPass && !forceAi) {
+    const postmortem = computeDeterministicPostmortem(workerResult, originalPlan, dql);
+    await appendProgress(config,
+      `[ATHENA] Deterministic postmortem (fast-path): ${workerName} — score=${postmortem.qualityScore}/10 deviation=none recommendation=proceed model=deterministic`
+    );
+    chatLog(stateDir, athenaName, `Deterministic postmortem: ${workerName} — clean pass, AI call skipped`);
+
+    // Persist to history
+    const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
+    const rawPostmortems = await readJson(postmortemsFilePath, null);
+    let history = [];
+    if (rawPostmortems !== null) {
+      const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+      history = migrated.ok ? extractPostmortemEntries(migrated.data) : [];
+    }
+    history.push(postmortem);
+    if (history.length > 50) history.splice(0, history.length - 50);
+    await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
+    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
+
+    return postmortem;
+  }
 
   const planTask = originalPlan?.task || "unknown task";
   const planVerification = originalPlan?.verification || "no verification defined";
@@ -900,7 +1415,38 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   } else {
     pastPostmortems = [];
   }
-  const recentLessons = pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ");
+
+  // Rank past lessons by time-decayed relevance (lesson_halflife integration)
+  const rankedLessons = rankLessonsByRelevance(pastPostmortems, { limit: 5 });
+  const recentLessons = rankedLessons.length > 0
+    ? rankedLessons.map(l => `${l.lesson} (relevance=${l.weight.toFixed(2)})`).join("\n  - ")
+    : pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ");
+
+  // Detect recurring defect patterns and include them in postmortem context
+  const recurrenceMatches = detectRecurrences(pastPostmortems);
+  const recurrenceContext = recurrenceMatches.length > 0
+    ? `\n\nRECURRING PATTERNS (${recurrenceMatches.length}):\n${recurrenceMatches.map(r => `- ${r.pattern} (count=${r.count}, severity=${r.severity})`).join("\n")}`
+    : "";
+
+  // ── Review-on-delta: skip AI call if result is identical to last postmortem ──
+  if (isDuplicateResult(workerResult, pastPostmortems)) {
+    const lastPm = pastPostmortems[pastPostmortems.length - 1];
+    const dupPm = {
+      ...lastPm,
+      reviewedAt: new Date().toISOString(),
+      model: "duplicate-skip",
+      decisionQualityLabel: dql.label,
+      decisionQualityLabelReason: dql.reason,
+      decisionQualityStatus: dql.status,
+    };
+    await appendProgress(config, `[ATHENA] Duplicate result detected for ${workerName} — reusing last postmortem (review-on-delta)`);
+    chatLog(stateDir, athenaName, `Duplicate result: ${workerName} — AI call skipped`);
+    pastPostmortems.push(dupPm);
+    if (pastPostmortems.length > 50) pastPostmortems.splice(0, pastPostmortems.length - 50);
+    await writeJson(postmortemsFilePath, addSchemaVersion(pastPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
+    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), dupPm);
+    return dupPm;
+  }
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 
@@ -929,8 +1475,9 @@ ${verificationOutput ? verificationOutput : ""}
 ${preReviewAssessment ? `Assessment given to worker: ${preReviewAssessment}` : "(no pre-review data)"}
 ${preReviewIssues.length > 0 ? `Issues flagged pre-execution:\n${preReviewIssues.map(i => `  - ${i}`).join("\n")}` : ""}
 
-## RECENT LESSONS LEARNED
+## RECENT LESSONS LEARNED (ranked by relevance)
 ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
+${recurrenceContext}
 
 ## EVALUATE
 
@@ -996,6 +1543,15 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
+
+  // Classify defect channel
+  const dc = classifyDefectChannel({
+    deviation: postmortem.deviation,
+    lessonLearned: postmortem.lessonLearned,
+    actualOutcome: postmortem.actualOutcome
+  });
+  postmortem.defectChannel = dc.channel;
+  postmortem.defectChannelTag = dc.tag;
 
   // Append to postmortem history (keep last 50)
   const history = Array.isArray(pastPostmortems) ? pastPostmortems : [];

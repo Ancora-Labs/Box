@@ -217,3 +217,69 @@ export function enforceModelPolicy(requestedModel, taskHints = {}, fallbackModel
     routingReasonCode: name ? ROUTING_REASON.ALLOWED : ROUTING_REASON.EMPTY_MODEL
   };
 }
+
+/**
+ * Token ROI telemetry entry (Packet 14).
+ * Records model choice, token spend, and quality outcome per task for
+ * uncertainty-aware routing optimization.
+ *
+ * @typedef {object} TokenROIEntry
+ * @property {string} taskId
+ * @property {string} model
+ * @property {string} tier — T1/T2/T3
+ * @property {number} estimatedTokens — estimated prompt tokens
+ * @property {string} outcome — done/partial/blocked/error
+ * @property {number} qualityScore — 0-1 quality assessment
+ * @property {string} recordedAt — ISO timestamp
+ */
+
+/**
+ * Compute token ROI for a completed task.
+ *
+ * @param {{ model: string, tier: string, estimatedTokens: number, outcome: string, qualityScore?: number }} entry
+ * @returns {{ roi: number, efficiency: string }}
+ */
+export function computeTokenROI(entry) {
+  const tokens = entry.estimatedTokens || 1;
+  const quality = entry.qualityScore ?? (entry.outcome === "done" ? 1.0 : entry.outcome === "partial" ? 0.5 : 0);
+  const roi = Math.round((quality / (tokens / 1000)) * 100) / 100;
+
+  let efficiency = "normal";
+  if (roi > 1.0) efficiency = "high";
+  else if (roi < 0.2) efficiency = "low";
+
+  return { roi, efficiency };
+}
+
+/**
+ * Route model selection with uncertainty awareness (Packet 14).
+ * Combines complexity tier classification with historical ROI data.
+ *
+ * @param {{ estimatedLines?: number, estimatedDurationMinutes?: number, complexity?: string }} taskHints
+ * @param {{ defaultModel?: string, strongModel?: string, efficientModel?: string }} modelOptions
+ * @param {{ recentROI?: number }} history — historical ROI for this task type
+ * @returns {{ model: string, tier: string, reason: string, uncertainty: string }}
+ */
+export function routeModelWithUncertainty(taskHints = {}, modelOptions = {}, history = {}) {
+  const base = routeModelByComplexity(taskHints, modelOptions);
+  const recentROI = Number(history.recentROI || 0);
+
+  // If historical ROI for this tier is low, consider downgrading
+  let uncertainty = "low";
+  if (recentROI > 0 && recentROI < 0.3) {
+    uncertainty = "high";
+    // For high-uncertainty tasks with low historical ROI, use the default model
+    if (base.tier === COMPLEXITY_TIER.T3 && recentROI < 0.2) {
+      return {
+        model: modelOptions.defaultModel || "Claude Sonnet 4.6",
+        tier: base.tier,
+        reason: `${base.reason} — downgraded due to low historical ROI (${recentROI})`,
+        uncertainty,
+      };
+    }
+  } else if (recentROI >= 0.3 && recentROI < 0.7) {
+    uncertainty = "medium";
+  }
+
+  return { ...base, uncertainty };
+}

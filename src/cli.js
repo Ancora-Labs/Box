@@ -4,6 +4,7 @@ import path from "node:path";
 import { loadConfig } from "./config.js";
 import { runOnce, runDaemon, runRebase } from "./core/orchestrator.js";
 import { runDoctor } from "./core/doctor.js";
+import { readSiControl, writeSiControl, isSelfImprovementActive, readSiLiveLog, siLogAsync } from "./core/si_control.js";
 import {
   readDaemonPid,
   readStopRequest,
@@ -291,6 +292,68 @@ async function main() {
     console.log("");
     console.log("BOX fully shutdown. All AI state cleared.");
     console.log("Next 'box on' or 'box start' will run a fresh Jesus cycle.");
+    return;
+  }
+
+  // ── si: Self-Improvement toggle ───────────────────────────────────────────
+  if (command === "si") {
+    const subCmd = process.argv[3] || "status";
+    const reason = process.argv.indexOf("--reason") !== -1
+      ? process.argv[process.argv.indexOf("--reason") + 1] || "manual"
+      : "manual";
+
+    if (subCmd === "on") {
+      const record = await writeSiControl(config, { enabled: true, reason, updatedBy: "cli" });
+      await siLogAsync(config, "TOGGLE", "Self-Improvement ENABLED via CLI (reason: " + reason + ")");
+      console.log("[box si] Self-Improvement ENABLED");
+      console.log("  reason:    " + record.reason);
+      console.log("  updatedAt: " + record.updatedAt);
+      console.log("  updatedBy: " + record.updatedBy);
+      console.log("");
+      console.log("Takes effect on next orchestrator loop iteration.");
+      return;
+    }
+
+    if (subCmd === "off") {
+      const record = await writeSiControl(config, { enabled: false, reason, updatedBy: "cli" });
+      await siLogAsync(config, "TOGGLE", "Self-Improvement DISABLED via CLI (reason: " + reason + ")");
+      console.log("[box si] Self-Improvement DISABLED");
+      console.log("  reason:    " + record.reason);
+      console.log("  updatedAt: " + record.updatedAt);
+      console.log("  updatedBy: " + record.updatedBy);
+      console.log("");
+      console.log("System continues running without SI. Re-enable: node src/cli.js si on");
+      return;
+    }
+
+    if (subCmd === "log" || subCmd === "logs") {
+      const maxLines = Number(process.argv[4]) || 50;
+      const lines = await readSiLiveLog(config, maxLines);
+      if (lines.length === 0) {
+        console.log("[box si] No SI log entries yet.");
+      } else {
+        console.log("[box si] Last " + lines.length + " SI log entries:");
+        console.log("─".repeat(80));
+        for (const line of lines) console.log(line);
+        console.log("─".repeat(80));
+      }
+      return;
+    }
+
+    // Default: status
+    const gate = await isSelfImprovementActive(config);
+    const control = await readSiControl(config);
+    console.log("[box si] Self-Improvement Status");
+    console.log("─".repeat(40));
+    console.log("  active:         " + gate.active);
+    console.log("  status:         " + gate.status);
+    console.log("  reason:         " + gate.reason);
+    console.log("  config.enabled: " + (config.selfImprovement?.enabled !== false));
+    console.log("  manual.enabled: " + control.enabled);
+    if (control.updatedAt) {
+      console.log("  manual.updated: " + control.updatedAt + " by " + control.updatedBy);
+      console.log("  manual.reason:  " + control.reason);
+    }
     return;
   }
 

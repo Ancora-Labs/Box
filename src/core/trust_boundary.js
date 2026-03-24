@@ -24,7 +24,7 @@
  * ── Critical contract fields per provider type (AC3 / Athena missing item #3) ─
  *   planner   (Prometheus): plans, analysis, projectHealth, executionStrategy, requestBudget
  *   reviewer  (Athena):     approved, corrections, planReviews
- *   supervisor(Jesus):      decision, wakeMoses, callTrump, briefForMoses, systemHealth
+ *   supervisor(Jesus):      decision, wakeMoses, callPrometheus, briefForPrometheus, systemHealth
  *
  * ── Error format (AC4) ───────────────────────────────────────────────────────
  *   Each error entry includes: { field, reasonCode, message, payloadPath, sourceFile }
@@ -138,7 +138,7 @@ export const TRUST_BOUNDARY_REASON = Object.freeze({
  *
  * planner   — Prometheus analysis output (plans, projectHealth, executionStrategy, ...)
  * reviewer  — Athena plan-review output (approved, corrections, planReviews)
- * supervisor — Jesus directive output (decision, wakeMoses, callTrump, briefForMoses, ...)
+ * supervisor — Jesus directive output (decision, wakeMoses, callPrometheus, briefForPrometheus, ...)
  *
  * @enum {string}
  */
@@ -163,7 +163,26 @@ function validateField(field, value, descriptor, basePath) {
   const payloadPath = `${basePath}.${field}`;
   const errors = [];
 
-  const { type, enum: enumValues, minLength, minItems } = descriptor;
+  // ── oneOf support: try each variant, pass if any matches ────────────────
+  if (Array.isArray(descriptor.oneOf)) {
+    const variantErrors = [];
+    for (const variant of descriptor.oneOf) {
+      const result = validateField(field, value, variant, basePath);
+      if (result.ok) return { ok: true, errors: [] };
+      variantErrors.push(...result.errors);
+    }
+    // None matched — report a combined error
+    const types = descriptor.oneOf.map(v => v.type).join(" | ");
+    errors.push({
+      field,
+      reasonCode: TRUST_BOUNDARY_REASON.INVALID_FIELD,
+      message: `value does not match any oneOf variant (expected: ${types}), got ${typeof value}`,
+      payloadPath
+    });
+    return { ok: false, errors };
+  }
+
+  const { type, enum: enumValues, minLength, minItems, minimum } = descriptor;
 
   if (type === "boolean") {
     if (typeof value !== "boolean") {
@@ -206,6 +225,29 @@ function validateField(field, value, descriptor, basePath) {
         field,
         reasonCode: TRUST_BOUNDARY_REASON.INVALID_FIELD,
         message: `expected finite number, got ${typeof value}`,
+        payloadPath
+      });
+    } else if (typeof minimum === "number" && value < minimum) {
+      errors.push({
+        field,
+        reasonCode: TRUST_BOUNDARY_REASON.INVALID_FIELD,
+        message: `number ${value} is less than minimum ${minimum}`,
+        payloadPath
+      });
+    }
+  } else if (type === "integer") {
+    if (typeof value !== "number" || !Number.isInteger(value)) {
+      errors.push({
+        field,
+        reasonCode: TRUST_BOUNDARY_REASON.INVALID_FIELD,
+        message: `expected integer, got ${typeof value === "number" ? "float" : typeof value}`,
+        payloadPath
+      });
+    } else if (typeof minimum === "number" && value < minimum) {
+      errors.push({
+        field,
+        reasonCode: TRUST_BOUNDARY_REASON.INVALID_FIELD,
+        message: `integer ${value} is less than minimum ${minimum}`,
         payloadPath
       });
     }

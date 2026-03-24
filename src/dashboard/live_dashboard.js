@@ -1241,8 +1241,8 @@ function derivePremiumUsageByWorker(log) {
   return { totalRequests: entries.length, byWorker };
 }
 
-function derivePremiumEstimate(trumpAnalysis, usedRequests, quota) {
-  const budget = trumpAnalysis?.requestBudget || {};
+function derivePremiumEstimate(prometheusAnalysisRef, usedRequests, quota) {
+  const budget = prometheusAnalysisRef?.requestBudget || {};
   const estimated = Number(budget.estimatedPremiumRequestsTotal || 0);
   const confidence = String(budget.confidence || "").trim();
   const byRole = Array.isArray(budget.byRole) ? budget.byRole : [];
@@ -1365,6 +1365,14 @@ async function collectDashboardData() {
   const systemStatusText = statusResult.systemStatusText;
 
   const decisionQualityTrend = await getDecisionQualityTrend(STATE_DIR);
+
+  // Self-Improvement control state and live log
+  const siControlRaw = await readJsonSafe(path.join(STATE_DIR, "self_improvement_control.json"), { enabled: true, reason: "", updatedAt: null, updatedBy: "" });
+  let siLiveLogTail = [];
+  try {
+    const siLogContent = await fs.readFile(path.join(STATE_DIR, "si_live.log"), "utf8");
+    siLiveLogTail = siLogContent.split("\n").filter(l => l.trim()).slice(-30);
+  } catch { /* file may not exist yet */ }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1523,6 +1531,14 @@ async function collectDashboardData() {
       sloUpdatedAt: sloMetrics?.updatedAt || null,
     },
     hypothesisScorecard,
+    selfImprovement: {
+      manualEnabled: siControlRaw.enabled !== false,
+      configEnabled: Boolean(boxConfig?.selfImprovement?.enabled ?? true),
+      reason: String(siControlRaw.reason || ""),
+      updatedAt: siControlRaw.updatedAt || null,
+      updatedBy: String(siControlRaw.updatedBy || ""),
+      liveLog: siLiveLogTail,
+    },
   };
 }
 
@@ -1885,8 +1901,8 @@ function renderHtml() {
     .worker-chip.green { background: rgba(124, 214, 178, 0.26); border-color: rgba(64, 177, 133, 0.38); }
     .worker-chip.yellow { background: rgba(255, 205, 118, 0.24); border-color: rgba(224, 163, 58, 0.38); }
     .worker-chip.red { background: rgba(255, 182, 167, 0.30); border-color: rgba(219, 114, 96, 0.38); }
-    .trump-tabs { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
-    .trump-tab {
+    .prometheus-tabs { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+    .prometheus-tab {
       border: 1px solid var(--line);
       border-radius: 999px;
       background: rgba(222, 237, 247, 0.82);
@@ -1897,19 +1913,19 @@ function renderHtml() {
       cursor: pointer;
       transition: transform 140ms ease, background 140ms ease;
     }
-    .trump-tab:hover { transform: translateY(-1px); background: rgba(212, 228, 241, 0.96); }
-    .trump-tab.active { border-color: rgba(212, 160, 23, 0.65); background: rgba(212, 160, 23, 0.2); }
-    .trump-plan-list { display: grid; gap: 8px; padding: 10px; }
-    .trump-plan-item {
+    .prometheus-tab:hover { transform: translateY(-1px); background: rgba(212, 228, 241, 0.96); }
+    .prometheus-tab.active { border-color: rgba(212, 160, 23, 0.65); background: rgba(212, 160, 23, 0.2); }
+    .prometheus-plan-list { display: grid; gap: 8px; padding: 10px; }
+    .prometheus-plan-item {
       border-radius: 10px;
       border: 1px solid var(--line);
       background: rgba(226, 239, 248, 0.72);
       padding: 8px 10px;
     }
-    .trump-plan-item.green { border-left: 4px solid #38b977; background: rgba(203, 241, 222, 0.7); }
-    .trump-plan-item.red { border-left: 4px solid #db6a63; background: rgba(249, 217, 214, 0.72); }
-    .trump-plan-item.neutral { border-left: 4px solid #c8a648; background: rgba(243, 232, 201, 0.62); }
-    .trump-plan-head {
+    .prometheus-plan-item.green { border-left: 4px solid #38b977; background: rgba(203, 241, 222, 0.7); }
+    .prometheus-plan-item.red { border-left: 4px solid #db6a63; background: rgba(249, 217, 214, 0.72); }
+    .prometheus-plan-item.neutral { border-left: 4px solid #c8a648; background: rgba(243, 232, 201, 0.62); }
+    .prometheus-plan-head {
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -1919,7 +1935,7 @@ function renderHtml() {
       color: var(--muted);
       margin-bottom: 5px;
     }
-    .trump-plan-task { font-size: 13px; color: var(--ink); line-height: 1.3; }
+    .prometheus-plan-task { font-size: 13px; color: var(--ink); line-height: 1.3; }
     /* ── Leadership Flow Panel ─────────────────────────────────────── */
     .lf-panel { margin-bottom: 12px; }
     .lf-row {
@@ -2333,7 +2349,7 @@ function renderHtml() {
       <article class="card"><div class="k">Alerts</div><div class="v" id="m-alerts">0</div><div class="sub" id="m-alerts-sub">no alerts</div></article>
     </section>
 
-    <!-- Leadership Pipeline: Jesus → Trump → Moses → Workers -->
+    <!-- Leadership Pipeline: Jesus → Prometheus → Athena → Workers -->
     <section class="panel lp-panel" id="lp-panel">
       <div class="lp-header">
         <h2>Leadership Pipeline</h2>
@@ -2364,12 +2380,12 @@ function renderHtml() {
           </div>
           <div class="lp-arrow-label" id="lp-arrow-jt-label">—</div>
         </div>
-        <!-- Trump -->
-        <div class="lp-node" id="lp-node-trump" data-entity="trump">
+        <!-- Prometheus -->
+        <div class="lp-node" id="lp-node-prometheus" data-entity="prometheus">
           <div class="lp-node-emoji">📊</div>
-          <div class="lp-node-name">Trump</div>
+          <div class="lp-node-name">Prometheus</div>
           <div class="lp-node-role">Deep Planner</div>
-          <div class="lp-node-status" id="lp-trump-status">—</div>
+          <div class="lp-node-status" id="lp-prometheus-status">—</div>
         </div>
         <div class="lp-arrow" id="lp-arrow-tm">
           <div style="display:flex;align-items:center;gap:2px">
@@ -2418,10 +2434,10 @@ function renderHtml() {
     </section>
 
     <section class="panel" style="margin-bottom:12px">
-      <h2>Trump Plan Board — Live + History</h2>
-      <div id="trump-plan-meta" class="muted" style="padding:0 10px 8px 10px">Awaiting Trump plan snapshots...</div>
-      <div id="trump-plan-tabs" class="trump-tabs"></div>
-      <div id="trump-plan-list" class="trump-plan-list">
+      <h2>Prometheus Plan Board — Live + History</h2>
+      <div id="prometheus-plan-meta" class="muted" style="padding:0 10px 8px 10px">Awaiting Prometheus plan snapshots...</div>
+      <div id="prometheus-plan-tabs" class="prometheus-tabs"></div>
+      <div id="prometheus-plan-list" class="prometheus-plan-list">
         <div class="muted">No plans yet</div>
       </div>
     </section>
@@ -2475,13 +2491,13 @@ function renderHtml() {
           </div>
         </article>
         <article class="chain-box" style="border-left:4px solid #d4a017;background:rgba(212,160,23,0.08)">
-          <h2 class="chain-title" style="color:#b8860b">Trump (Deep Planner)</h2>
+          <h2 class="chain-title" style="color:#b8860b">Prometheus (Deep Planner)</h2>
           <div class="chain-body">
-            <div id="trump-health">Not yet analyzed</div>
-            <div id="trump-requests" style="margin-top:4px;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Estimated Premium Requests: awaiting...</div>
+            <div id="prometheus-health">Not yet analyzed</div>
+            <div id="prometheus-requests" style="margin-top:4px;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Estimated Premium Requests: awaiting...</div>
             <details style="margin-top:6px">
               <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Full Analysis ▾</summary>
-              <div id="trump-analysis" style="margin-top:4px;font-size:11px;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;color:#2a2a0e;background:rgba(212,160,23,0.12);border-radius:6px;padding:6px;max-height:200px;overflow-y:auto">Awaiting Trump deep analysis...</div>
+              <div id="prometheus-analysis" style="margin-top:4px;font-size:11px;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;color:#2a2a0e;background:rgba(212,160,23,0.12);border-radius:6px;padding:6px;max-height:200px;overflow-y:auto">Awaiting Prometheus deep analysis...</div>
             </details>
           </div>
         </article>
@@ -2595,13 +2611,13 @@ function renderHtml() {
     let latestState = null;
     let selectedTaskId = null;
     let showAllCalls = false;
-    let selectedTrumpPlanKey = null;
-    let trumpPlanUserSelected = false;
-    let trumpPlanFingerprint = '';
+    let selectedPrometheusPlanKey = null;
+    let prometheusPlanUserSelected = false;
+    let prometheusPlanFingerprint = '';
 
     // ── Change detection state ────────────────────────────────
     var prevJesusDecidedAt = null;
-    var prevTrumpAnalyzedAt = null;
+    var prevPrometheusAnalyzedAt = null;
     var prevMosesCoordinatedAt = null;
     var prevTotalPremiumReqs = 0;
     var prevWorkerStatuses = {};
@@ -2946,9 +2962,9 @@ function renderHtml() {
 
     // ── Leadership Pipeline + Change Detection ─────────────────────────
     function detectLeadershipChanges(data) {
-      var changes = { jesusNew: false, trumpNew: false, mosesNew: false, newWorkers: [], reqFlashes: [], newMessages: [] };
+      var changes = { jesusNew: false, prometheusNew: false, mosesNew: false, newWorkers: [], reqFlashes: [], newMessages: [] };
       var jesus = (data && data.leadership && data.leadership.jesus) || {};
-      var trump = (data && data.leadership && data.leadership.trump) || {};
+      var prometheus = (data && data.leadership && data.leadership.prometheus) || {};
       var moses = (data && data.leadership && data.leadership.moses) || {};
       var wa = data && data.workerActivity ? data.workerActivity : {};
       var puBw = (data && data.premiumUsageByWorker && data.premiumUsageByWorker.byWorker) || {};
@@ -2958,10 +2974,10 @@ function renderHtml() {
         changes.jesusNew = true;
         if (prevJesusDecidedAt) {
           var newMsg = {
-            icon: '⚡', from: 'Jesus', to: jesus.callTrump ? 'Trump' : 'Moses',
-            text: jesus.callTrump
-              ? 'Activate Trump for deep analysis: ' + String(jesus.trumpReason || jesus.briefForMoses || '').slice(0, 100)
-              : 'Directive to Moses: ' + String(jesus.briefForMoses || jesus.decision || '').slice(0, 100),
+            icon: '⚡', from: 'Jesus', to: jesus.callPrometheus ? 'Prometheus' : 'Moses',
+            text: jesus.callPrometheus
+              ? 'Activate Prometheus for deep analysis: ' + String(jesus.prometheusReason || jesus.briefForPrometheus || '').slice(0, 100)
+              : 'Directive to Moses: ' + String(jesus.briefForPrometheus || jesus.decision || '').slice(0, 100),
             time: jesus.decidedAt, isNew: true
           };
           leadershipMessages.unshift(newMsg);
@@ -2970,20 +2986,20 @@ function renderHtml() {
         prevJesusDecidedAt = jesus.decidedAt;
       }
 
-      // Trump analyzed
-      if (trump.analyzedAt && trump.analyzedAt !== prevTrumpAnalyzedAt) {
-        changes.trumpNew = true;
-        if (prevTrumpAnalyzedAt) {
-          var planCount = Array.isArray(trump.plans) ? trump.plans.length : 0;
+      // Prometheus analyzed
+      if (prometheus.analyzedAt && prometheus.analyzedAt !== prevPrometheusAnalyzedAt) {
+        changes.prometheusNew = true;
+        if (prevPrometheusAnalyzedAt) {
+          var planCount = Array.isArray(prometheus.plans) ? prometheus.plans.length : 0;
           var newMsg = {
-            icon: '📊', from: 'Trump', to: 'Moses',
-            text: planCount + ' plans created, health: ' + String(trump.projectHealth || '?') + ' — ' + String(trump.analysis || '').slice(0, 80),
-            time: trump.analyzedAt, isNew: true
+            icon: '📊', from: 'Prometheus', to: 'Moses',
+            text: planCount + ' plans created, health: ' + String(prometheus.projectHealth || '?') + ' — ' + String(prometheus.analysis || '').slice(0, 80),
+            time: prometheus.analyzedAt, isNew: true
           };
           leadershipMessages.unshift(newMsg);
           changes.newMessages.push(newMsg);
         }
-        prevTrumpAnalyzedAt = trump.analyzedAt;
+        prevPrometheusAnalyzedAt = prometheus.analyzedAt;
       }
 
       // Moses coordinated
@@ -3080,7 +3096,7 @@ function renderHtml() {
 
     function renderLeadershipPipeline(data, changes) {
       var jesus = (data && data.leadership && data.leadership.jesus) || {};
-      var trump = (data && data.leadership && data.leadership.trump) || {};
+      var prometheus = (data && data.leadership && data.leadership.prometheus) || {};
       var moses = (data && data.leadership && data.leadership.moses) || {};
       var wa = data && data.workerActivity ? data.workerActivity : {};
 
@@ -3113,26 +3129,26 @@ function renderHtml() {
         if (changes.jesusNew) { jesusNode.classList.remove('flash'); void jesusNode.offsetWidth; jesusNode.classList.add('flash'); }
       }
 
-      // Jesus → Trump arrow
+      // Jesus → Prometheus arrow
       var arrowJT = document.getElementById('lp-arrow-jt');
       var arrowJTLabel = document.getElementById('lp-arrow-jt-label');
       if (arrowJT) arrowJT.classList.toggle('active', changes.jesusNew);
-      if (arrowJTLabel) arrowJTLabel.textContent = jesus.callTrump ? 'analyze' : (jesus.decidedAt ? 'directive' : '—');
+      if (arrowJTLabel) arrowJTLabel.textContent = jesus.callPrometheus ? 'analyze' : (jesus.decidedAt ? 'directive' : '—');
 
-      // Trump node
-      var trumpStatusEl = document.getElementById('lp-trump-status');
-      var planCount = Array.isArray(trump.plans) ? trump.plans.length : 0;
-      if (trumpStatusEl) trumpStatusEl.textContent = planCount > 0 ? (planCount + ' plans | ' + String(trump.projectHealth || '?')) : 'waiting';
-      var trumpNode = document.getElementById('lp-node-trump');
-      if (trumpNode) {
-        trumpNode.classList.toggle('active', planCount > 0);
-        if (changes.trumpNew) { trumpNode.classList.remove('flash'); void trumpNode.offsetWidth; trumpNode.classList.add('flash'); }
+      // Prometheus node
+      var prometheusStatusEl = document.getElementById('lp-prometheus-status');
+      var planCount = Array.isArray(prometheus.plans) ? prometheus.plans.length : 0;
+      if (prometheusStatusEl) prometheusStatusEl.textContent = planCount > 0 ? (planCount + ' plans | ' + String(prometheus.projectHealth || '?')) : 'waiting';
+      var prometheusNode = document.getElementById('lp-node-prometheus');
+      if (prometheusNode) {
+        prometheusNode.classList.toggle('active', planCount > 0);
+        if (changes.prometheusNew) { prometheusNode.classList.remove('flash'); void prometheusNode.offsetWidth; prometheusNode.classList.add('flash'); }
       }
 
-      // Trump → Moses arrow
+      // Prometheus → Athena arrow
       var arrowTM = document.getElementById('lp-arrow-tm');
       var arrowTMLabel = document.getElementById('lp-arrow-tm-label');
-      if (arrowTM) arrowTM.classList.toggle('active', changes.trumpNew);
+      if (arrowTM) arrowTM.classList.toggle('active', changes.prometheusNew);
       if (arrowTMLabel) arrowTMLabel.textContent = planCount > 0 ? (planCount + ' plans') : '—';
 
       // Moses node
@@ -3452,7 +3468,7 @@ function renderHtml() {
     function renderLeadershipPanel(data) {
       var jesus = (data && data.leadership && data.leadership.jesus) ? data.leadership.jesus : {};
       var moses = (data && data.leadership && data.leadership.moses) ? data.leadership.moses : {};
-      var trump = (data && data.leadership && data.leadership.trump) ? data.leadership.trump : {};
+      var prometheus = (data && data.leadership && data.leadership.prometheus) ? data.leadership.prometheus : {};
       var workerActivity = (data && data.workerActivity) ? data.workerActivity : {};
       var latestTasks = (data && data.tasks && Array.isArray(data.tasks.list)) ? data.tasks.list : [];
 
@@ -3485,7 +3501,7 @@ function renderHtml() {
       var topBlocked = blockedTasks[0] || null;
       var health = String(jesus.systemHealth || 'unknown');
       var healthText = health === 'healthy' ? '🟢 Healthy' : health === 'critical' ? '🔴 Critical' : '🟡 Attention';
-      var nextAction = jesus.briefForMoses ? String(jesus.briefForMoses).slice(0, 120) : 'No immediate action';
+      var nextAction = jesus.briefForPrometheus ? String(jesus.briefForPrometheus).slice(0, 120) : 'No immediate action';
 
       document.getElementById('user-overview').textContent = 'System: ' + healthText + ' | Decision: ' + String(jesus.decision || 'unknown');
       document.getElementById('user-blocked').textContent = topBlocked
@@ -3505,7 +3521,7 @@ function renderHtml() {
       var jesusStatusEl = document.getElementById('jesus-status');
       if (jesusStatusEl) jesusStatusEl.innerHTML = 'Health: ' + healthText + ' | Mode: ' + esc(String(jesus.decision || '?')) + freshnessBadge(jesus.decidedAt);
       document.getElementById('jesus-action').textContent = 'Brief to Moses: ' + nextAction;
-      document.getElementById('jesus-blocked').textContent = 'Trump needed: ' + (jesus.callTrump ? 'YES — ' + String(jesus.trumpReason || '').slice(0, 80) : 'No');
+      document.getElementById('jesus-blocked').textContent = 'Prometheus needed: ' + (jesus.callPrometheus ? 'YES — ' + String(jesus.prometheusReason || '').slice(0, 80) : 'No');
       document.getElementById('jesus-queue').textContent = 'Priorities: ' + (Array.isArray(jesus.priorities) ? jesus.priorities.join(', ') : 'none');
 
       var jesusReasoningEl = document.getElementById('jesus-reasoning');
@@ -3532,24 +3548,24 @@ function renderHtml() {
         mosesPlannedEl.textContent = completed.length ? ('Done: ' + completed.join(' | ')) : '';
       }
 
-      // Trump panel
-      var trumpEl = document.getElementById('trump-analysis');
-      if (trumpEl) {
-        var trumpText = trump.analysis ? String(trump.analysis).slice(0, 800) : 'No deep analysis yet';
-        trumpEl.textContent = trumpText;
+      // Prometheus panel
+      var prometheusEl = document.getElementById('prometheus-analysis');
+      if (prometheusEl) {
+        var prometheusText = prometheus.analysis ? String(prometheus.analysis).slice(0, 800) : 'No deep analysis yet';
+        prometheusEl.textContent = prometheusText;
       }
-      var trumpHealthEl = document.getElementById('trump-health');
-      if (trumpHealthEl) {
-        trumpHealthEl.textContent = trump.projectHealth
-          ? ('Project Health: ' + trump.projectHealth + ' | Plans: ' + (Array.isArray(trump.plans) ? trump.plans.length : 0) + ' items')
+      var prometheusHealthEl = document.getElementById('prometheus-health');
+      if (prometheusHealthEl) {
+        prometheusHealthEl.textContent = prometheus.projectHealth
+          ? ('Project Health: ' + prometheus.projectHealth + ' | Plans: ' + (Array.isArray(prometheus.plans) ? prometheus.plans.length : 0) + ' items')
           : 'Not yet analyzed';
       }
-      var trumpRequestsEl = document.getElementById('trump-requests');
-      if (trumpRequestsEl) {
-        var requestBudget = (trump && trump.requestBudget) ? trump.requestBudget : {};
+      var prometheusRequestsEl = document.getElementById('prometheus-requests');
+      if (prometheusRequestsEl) {
+        var requestBudget = (prometheus && prometheus.requestBudget) ? prometheus.requestBudget : {};
         var totalRequests = Number(requestBudget.estimatedPremiumRequestsTotal || 0);
         var confidence = String(requestBudget.confidence || '').trim();
-        trumpRequestsEl.textContent = requestBudget && Number.isFinite(totalRequests) && totalRequests > 0
+        prometheusRequestsEl.textContent = requestBudget && Number.isFinite(totalRequests) && totalRequests > 0
           ? ('Estimated Premium Requests: ' + formatRequestCount(totalRequests) + (confidence ? (' | Confidence: ' + confidence) : ''))
           : 'Estimated Premium Requests: not available';
       }
@@ -3627,55 +3643,55 @@ function renderHtml() {
         : '<div class="muted">No workers</div>';
     }
 
-    function renderTrumpPlanBoard(data) {
-      var board = data && data.trumpPlanBoard ? data.trumpPlanBoard : { activeKey: null, active: null, history: [] };
+    function renderPrometheusPlanBoard(data) {
+      var board = data && data.prometheusPlanBoard ? data.prometheusPlanBoard : { activeKey: null, active: null, history: [] };
       var history = Array.isArray(board.history) ? board.history : [];
 
       // Build a fingerprint from active key + item statuses to skip re-render when unchanged
-      var currentKey = trumpPlanUserSelected ? selectedTrumpPlanKey : (board.activeKey || null);
+      var currentKey = prometheusPlanUserSelected ? selectedPrometheusPlanKey : (board.activeKey || null);
       var selected = history.find(function(entry) { return entry.key === currentKey; }) || board.active || history[0] || null;
-      if (!trumpPlanUserSelected) {
-        selectedTrumpPlanKey = board.activeKey || null;
+      if (!prometheusPlanUserSelected) {
+        selectedPrometheusPlanKey = board.activeKey || null;
       }
       if (selected && selected.key) {
-        if (!trumpPlanUserSelected) selectedTrumpPlanKey = selected.key;
+        if (!prometheusPlanUserSelected) selectedPrometheusPlanKey = selected.key;
       }
 
       var items = selected ? (Array.isArray(selected.items) ? selected.items : []) : [];
-      var fp = String(selectedTrumpPlanKey || '') + '|' +
+      var fp = String(selectedPrometheusPlanKey || '') + '|' +
         String(history.length) + '|' +
         items.map(function(it) { return it.role + ':' + it.status; }).join(',');
-      if (fp === trumpPlanFingerprint) return; // nothing changed — skip DOM update
-      trumpPlanFingerprint = fp;
+      if (fp === prometheusPlanFingerprint) return; // nothing changed — skip DOM update
+      prometheusPlanFingerprint = fp;
 
-      var tabsEl = document.getElementById('trump-plan-tabs');
-      var listEl = document.getElementById('trump-plan-list');
-      var metaEl = document.getElementById('trump-plan-meta');
+      var tabsEl = document.getElementById('prometheus-plan-tabs');
+      var listEl = document.getElementById('prometheus-plan-list');
+      var metaEl = document.getElementById('prometheus-plan-meta');
       if (!tabsEl || !listEl || !metaEl) return;
 
       if (!selected) {
         tabsEl.innerHTML = '<div class="muted">No snapshot history</div>';
         listEl.innerHTML = '<div class="muted">No plans yet</div>';
-        metaEl.textContent = 'Awaiting Trump plan snapshots...';
+        metaEl.textContent = 'Awaiting Prometheus plan snapshots...';
         return;
       }
 
       var tabs = history.map(function(entry, idx) {
         var at = entry.analyzedAt ? String(entry.analyzedAt).replace('T', ' ').replace('Z', '') : ('snapshot-' + (idx + 1));
         var shortAt = at.length > 19 ? at.slice(0, 19) : at;
-        var cls = entry.key === selectedTrumpPlanKey ? 'trump-tab active' : 'trump-tab';
-        return '<button type="button" class="' + cls + '" data-trump-key="' + esc(entry.key) + '">' +
+        var cls = entry.key === selectedPrometheusPlanKey ? 'prometheus-tab active' : 'prometheus-tab';
+        return '<button type="button" class="' + cls + '" data-prometheus-key="' + esc(entry.key) + '">' +
           esc(shortAt) + ' · ' + esc(entry.projectHealth || 'unknown') +
           '</button>';
       });
       tabsEl.innerHTML = tabs.length ? tabs.join('') : '<div class="muted">No snapshot history</div>';
 
-      Array.from(tabsEl.querySelectorAll('button[data-trump-key]')).forEach(function(btn) {
+      Array.from(tabsEl.querySelectorAll('button[data-prometheus-key]')).forEach(function(btn) {
         btn.addEventListener('click', function() {
-          trumpPlanUserSelected = true;
-          selectedTrumpPlanKey = String(btn.getAttribute('data-trump-key') || '');
-          trumpPlanFingerprint = ''; // force re-render on manual tab switch
-          if (latestState) renderTrumpPlanBoard(latestState);
+          prometheusPlanUserSelected = true;
+          selectedPrometheusPlanKey = String(btn.getAttribute('data-prometheus-key') || '');
+          prometheusPlanFingerprint = ''; // force re-render on manual tab switch
+          if (latestState) renderPrometheusPlanBoard(latestState);
         });
       });
 
@@ -3683,12 +3699,12 @@ function renderHtml() {
         var rawStatus = String(item.status || 'queued').toLowerCase();
         var color = (rawStatus === 'done' || rawStatus === 'running') ? 'green' : ((rawStatus === 'skipped' || rawStatus === 'error' || rawStatus === 'failed') ? 'red' : 'neutral');
         var label = (rawStatus === 'done') ? 'done' : ((rawStatus === 'running') ? 'in-progress' : ((rawStatus === 'skipped') ? 'skipped/failed' : 'queued'));
-        return '<div class="trump-plan-item ' + color + '">' +
-          '<div class="trump-plan-head">' +
+        return '<div class="prometheus-plan-item ' + color + '">' +
+          '<div class="prometheus-plan-head">' +
             '<span>P' + esc(item.priority) + ' · ' + esc(item.role) + ' · ' + esc(item.kind || '-') + '</span>' +
             '<span>' + esc(label) + '</span>' +
           '</div>' +
-          '<div class="trump-plan-task">' + esc(item.task || '-') + '</div>' +
+          '<div class="prometheus-plan-task">' + esc(item.task || '-') + '</div>' +
         '</div>';
       });
       listEl.innerHTML = rows.length ? rows.join('') : '<div class="muted">No plans in selected snapshot</div>';
@@ -3876,7 +3892,7 @@ function renderHtml() {
 
       document.getElementById("m-pf").textContent = String(data.tasks.totals.passed || 0) + ' / ' + String(data.tasks.totals.failed || 0);
 
-      // Premium request card — show ACTUAL usage from premium_usage_log, with Trump estimate for context
+      // Premium request card — show ACTUAL usage from premium_usage_log, with Prometheus estimate for context
       var pre = data.premiumRequestEstimate || {};
       var preEstimated = Number(pre.estimatedTotal || 0);
       var preUsed = Number(pre.used || 0);
@@ -4011,7 +4027,7 @@ function renderHtml() {
       var changes = detectLeadershipChanges(data);
       renderLeadershipPipeline(data, changes);
 
-      renderTrumpPlanBoard(data);
+      renderPrometheusPlanBoard(data);
       renderWorkerGrid(data);
       renderPremiumUsagePanel(data);
       renderCelebration(data);

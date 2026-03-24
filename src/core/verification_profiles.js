@@ -20,6 +20,7 @@ const PROFILES = {
   frontend: {
     kind: "frontend",
     label: "Frontend (Esther)",
+    lane: "implementation",
     evidence: {
       build:      "required",
       tests:      "optional",
@@ -36,6 +37,7 @@ const PROFILES = {
   backend: {
     kind: "backend",
     label: "Backend (King David)",
+    lane: "implementation",
     evidence: {
       build:      "required",
       tests:      "required",
@@ -52,6 +54,7 @@ const PROFILES = {
   api: {
     kind: "api",
     label: "API (Aaron)",
+    lane: "implementation",
     evidence: {
       build:      "required",
       tests:      "required",
@@ -68,6 +71,7 @@ const PROFILES = {
   integration: {
     kind: "integration",
     label: "Integration (Joseph)",
+    lane: "integration",
     evidence: {
       build:      "required",
       tests:      "required",
@@ -83,6 +87,7 @@ const PROFILES = {
   test: {
     kind: "test",
     label: "Test (Samuel)",
+    lane: "quality",
     evidence: {
       build:      "optional",
       tests:      "required",
@@ -98,6 +103,7 @@ const PROFILES = {
   qa: {
     kind: "qa",
     label: "QA (Isaiah)",
+    lane: "quality",
     evidence: {
       build:      "required",
       tests:      "required",
@@ -114,6 +120,7 @@ const PROFILES = {
   security: {
     kind: "security",
     label: "Security (Elijah)",
+    lane: "governance",
     evidence: {
       build:      "required",
       tests:      "required",
@@ -130,6 +137,7 @@ const PROFILES = {
   devops: {
     kind: "devops",
     label: "DevOps (Noah)",
+    lane: "infrastructure",
     evidence: {
       build:      "required",
       tests:      "optional",
@@ -146,6 +154,7 @@ const PROFILES = {
   scanA: {
     kind: "scanA",
     label: "Scanner (Issachar)",
+    lane: "observation",
     evidence: {
       build:      "exempt",
       tests:      "exempt",
@@ -161,6 +170,7 @@ const PROFILES = {
   scanB: {
     kind: "scanB",
     label: "Documentation (Ezra)",
+    lane: "observation",
     evidence: {
       build:      "optional",
       tests:      "exempt",
@@ -179,6 +189,7 @@ const PROFILES = {
 const DEFAULT_PROFILE = {
   kind: "unknown",
   label: "Unknown",
+  lane: "implementation",
   evidence: {
     build:      "required",
     tests:      "optional",
@@ -250,6 +261,41 @@ export function buildVerificationChecklist(workerKind) {
   lines.push("⚠️ CRITICAL: Do NOT claim BOX_STATUS=done if you did not make real file changes and open a real PR.");
   lines.push("Saying 'I implemented X' or 'I fixed Y' in prose is NOT evidence. The gate checks BOX_PR_URL and VERIFICATION_REPORT fields.");
   lines.push("If the task was ALREADY DONE in a previous wave (merged PR exists), report BOX_STATUS=skipped with BOX_SKIP_REASON=already-merged.");
+  lines.push("");
+  lines.push("## POST-MERGE VERIFICATION ARTIFACT (MANDATORY)");
+  lines.push("After merging your PR, you MUST include the following in your output:");
+  lines.push("1. Git SHA of the merged commit: run `git rev-parse HEAD` and paste the SHA.");
+  lines.push("2. Raw npm test stdout: run `npm test` on the merged state and paste the FULL raw output.");
+  lines.push("If you skip this, your task will be rejected by the runtime gate.");
+  lines.push("Replace the placeholder below with actual output:");
+  lines.push("");
+  lines.push("```");
+  lines.push("POST_MERGE_TEST_OUTPUT");
+  lines.push("SHA: <paste git rev-parse HEAD here>");
+  lines.push("npm test output:");
+  lines.push("<paste full raw npm test stdout here>");
+  lines.push("```");
 
   return lines.join("\n");
 }
+
+/**
+ * Get all worker kinds that belong to a given lane.
+ * @param {string} lane — "implementation"|"integration"|"quality"|"governance"|"infrastructure"|"observation"
+ * @returns {string[]} — array of worker kind strings
+ */
+export function getWorkersByLane(lane) {
+  return Object.entries(PROFILES)
+    .filter(([, p]) => p.lane === lane)
+    .map(([kind]) => kind);
+}
+
+/** All unique lane names. */
+export const LANES = Object.freeze([
+  "implementation",
+  "integration",
+  "quality",
+  "governance",
+  "infrastructure",
+  "observation"
+]);

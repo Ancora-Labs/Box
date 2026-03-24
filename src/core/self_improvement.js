@@ -272,20 +272,14 @@ async function saveKnowledgeMemory(stateDir, memory) {
  *
  * Primary state sources (replaces stale Moses artifacts):
  *   prometheus_analysis.json  — plans, projectHealth, requestBudget, waves
- *                               (replaces trump_analysis.json)
  *   evolution_progress.json   — completed task IDs
- *                               (replaces moses_coordination.completedTasks)
  *   worker_sessions.json      — per-worker status (unchanged)
  *   worker_${role}.json       — per-worker activityLog → dispatches
- *                               (replaces moses_coordination.dispatchLog)
- *
- * Legacy adapter:
- *   moses_coordination.json   — read and merged when present; absent on Athena-gated runs.
- *   Rollback: re-enable adapter-only mode by removing the prometheus/evolution reads above.
  *
  * Return contract:
  *   { totalPlans, completedCount, projectHealth, workerOutcomes, waves, dispatches,
- *     requestBudget, decisionQuality, timestamp, metricsSource, degraded, degradedReason }
+ *     requestBudget, decisionQuality, athenaPlanReview, timestamp, metricsSource,
+ *     degraded, degradedReason }
  *
  *   degraded:      true when a critical source file is absent or invalid.
  *   degradedReason: OUTCOME_DEGRADED_REASON code or null.
@@ -304,10 +298,6 @@ export async function collectCycleOutcomes(config) {
     readJsonSafe(path.join(stateDir, "evolution_progress.json"))
   ]);
   const workerSessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
-
-  // ── Legacy adapter: moses_coordination.json ──────────────────────────────
-  // Merged when present for backward-compatibility; absent on Athena-gated runs.
-  const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), null);
 
   // ── Input validation — distinguish missing vs invalid ─────────────────────
   let degraded = false;
@@ -357,19 +347,12 @@ export async function collectCycleOutcomes(config) {
       .map(([id]) => id);
   }
 
-  // Legacy adapter: merge Moses completedTasks when file is present.
-  const legacyCompleted = Array.isArray(mosesState?.completedTasks)
-    ? mosesState.completedTasks
-    : [];
-  const completedTasks = legacyCompleted.length > 0
-    ? [...new Set([...completedFromEvolution, ...legacyCompleted])]
-    : completedFromEvolution;
+  const completedTasks = completedFromEvolution;
 
   // ── Determine metrics source ──────────────────────────────────────────────
   const sourceFiles = ["worker_sessions"];
   if (prometheusResult.ok) sourceFiles.unshift("prometheus_analysis");
   if (evolutionResult.ok)  sourceFiles.push("evolution_progress");
-  if (mosesState !== null)  sourceFiles.push("moses_coordination(legacy)");
   const metricsSource = sourceFiles.join("+");
 
   // ── Per-worker outcome analysis ───────────────────────────────────────────
@@ -405,16 +388,14 @@ export async function collectCycleOutcomes(config) {
   }
 
   // ── Build dispatch log from worker activityLog entries ───────────────────
-  // Replaces moses_coordination.dispatchLog — each worker's activityLog is the source.
+  // Each worker's activityLog is the source of dispatch data.
   const allActivityEntries = [];
   for (const [role, activityLog] of Object.entries(workerActivityByRole)) {
     for (const entry of activityLog) {
       allActivityEntries.push({ role, ...entry });
     }
   }
-  // Legacy adapter: merge Moses dispatchLog when present.
-  const legacyDispatches = Array.isArray(mosesState?.dispatchLog) ? mosesState.dispatchLog : [];
-  const dispatches = [...allActivityEntries, ...legacyDispatches].slice(-20);
+  const dispatches = allActivityEntries.slice(-20);
 
   // ── Decision quality from recent postmortems ──────────────────────────────
   let decisionQuality = { score: null, labelCounts: {}, total: 0 };
@@ -428,6 +409,25 @@ export async function collectCycleOutcomes(config) {
       }
     }
   } catch { /* no postmortem data — degrade gracefully */ }
+
+  // ── Latest approved/rejected Athena plan review feedback ─────────────────
+  let athenaPlanReview = null;
+  try {
+    const rawPlanReview = await readJson(path.join(stateDir, "athena_plan_review.json"), null);
+    if (rawPlanReview && typeof rawPlanReview === "object") {
+      athenaPlanReview = {
+        approved: rawPlanReview.approved === true,
+        overallScore: Number.isFinite(Number(rawPlanReview.overallScore))
+          ? Number(rawPlanReview.overallScore)
+          : null,
+        summary: String(rawPlanReview.summary || ""),
+        corrections: Array.isArray(rawPlanReview.corrections)
+          ? rawPlanReview.corrections.map((item) => String(item || "").trim()).filter(Boolean)
+          : [],
+        reviewedAt: rawPlanReview.reviewedAt || null,
+      };
+    }
+  } catch { /* no plan-review data — degrade gracefully */ }
 
   return {
     totalPlans:      plans.length,
@@ -444,6 +444,7 @@ export async function collectCycleOutcomes(config) {
     dispatches,
     requestBudget,
     decisionQuality,
+    athenaPlanReview,
     timestamp: new Date().toISOString(),
     // Athena-gated metadata fields
     metricsSource,
@@ -534,7 +535,7 @@ Analyze the cycle outcomes and produce a JSON response with these fields:
 
 Respond with ONLY valid JSON. No markdown, no explanation before or after.`;
 
-  const args = buildAgentArgs({ agentSlug: "issachar", prompt, allowAll: true, noAskUser: true });
+  const args = buildAgentArgs({ agentSlug: "self-improvement", prompt, allowAll: false, noAskUser: true });
   const result = await spawnAsync(command, args, { env: process.env });
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
@@ -1430,6 +1431,57 @@ export async function generateMonthlyPostmortem(config, monthKey) {
   return { ok: true, status, postmortem };
 }
 
+/**
+ * Quality-signal gate for self-improvement.
+ * Returns true only if recent decision quality is degraded, escalation was recommended,
+ * or enough cycles have elapsed since the last self-improvement run.
+ *
+ * @param {object} config
+ * @param {string} stateDir
+ * @returns {Promise<{ shouldRun: boolean, reason: string }>}
+ */
+export async function shouldTriggerSelfImprovement(config, stateDir) {
+  const siConfig = config.selfImprovement || {};
+
+  // Config override: always run if forceEveryComplete is true
+  if (siConfig.forceEveryComplete === true) {
+    return { shouldRun: true, reason: "forceEveryComplete=true" };
+  }
+
+  // Read recent postmortems
+  const { readJson } = await import("./fs_utils.js");
+  const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
+  const rawPms = await readJson(postmortemsFilePath, null);
+  let recentPms = [];
+  if (rawPms !== null) {
+    const { migrateData, extractPostmortemEntries, STATE_FILE_TYPE } = await import("./schema_registry.js");
+    const migrated = migrateData(rawPms, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+    recentPms = migrated.ok ? extractPostmortemEntries(migrated.data).slice(-5) : [];
+  }
+
+  // (a) Weighted decision score < 0.75 over last 5 postmortems
+  const scoreResult = computeWeightedDecisionScore(recentPms);
+  if (scoreResult.score !== null && scoreResult.score < 0.75) {
+    return { shouldRun: true, reason: `decision_quality_low (score=${scoreResult.score.toFixed(2)})` };
+  }
+
+  // (b) Any postmortem recommended escalation
+  const hasEscalation = recentPms.some(pm => pm.recommendation === "escalate");
+  if (hasEscalation) {
+    return { shouldRun: true, reason: "escalation_recommended" };
+  }
+
+  // (c) 3+ cycles since last self-improvement run
+  const siStatePath = path.join(stateDir, "self_improvement_state.json");
+  const siState = await readJson(siStatePath, {});
+  const cyclesSinceLast = typeof siState.cyclesSinceLastRun === "number" ? siState.cyclesSinceLastRun : Infinity;
+  if (cyclesSinceLast >= 3) {
+    return { shouldRun: true, reason: `cycles_elapsed (${cyclesSinceLast} >= 3)` };
+  }
+
+  return { shouldRun: false, reason: `quality_ok (score=${scoreResult.score?.toFixed(2) ?? "n/a"}, cycles=${cyclesSinceLast})` };
+}
+
 export async function runSelfImprovementCycle(config) {
   const siConfig = config.selfImprovement || {};
   if (!siConfig.enabled) return null;
@@ -1591,6 +1643,7 @@ export async function runSelfImprovementCycle(config) {
         hasPR: w.hasPR
       })),
       decisionQuality: outcomes.decisionQuality,
+      athenaPlanReview: outcomes.athenaPlanReview,
       metricsSource: outcomes.metricsSource,
       degraded: outcomes.degraded,
       degradedReason: outcomes.degradedReason

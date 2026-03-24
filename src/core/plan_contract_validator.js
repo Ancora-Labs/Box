@@ -9,6 +9,8 @@
  * Recommended fields: dependencies, filesInScope, acceptance_criteria
  */
 
+import { checkForbiddenCommands } from "./verification_command_registry.js";
+
 /**
  * Plan contract violation severity levels.
  * @enum {string}
@@ -55,13 +57,16 @@ export function validatePlanContract(plan) {
   }
 
   if (!Array.isArray(plan.acceptance_criteria) || plan.acceptance_criteria.length === 0) {
-    violations.push({ field: "acceptance_criteria", message: "Acceptance criteria should be a non-empty array", severity: PLAN_VIOLATION_SEVERITY.WARNING });
+    violations.push({ field: "acceptance_criteria", message: "Acceptance criteria must be a non-empty array — plans without measurable AC are rejected", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
   }
 
-  // Glob detection: reject plans with forbidden verification patterns
-  const verif = String(plan.verification || "").toLowerCase();
-  if (/node\s+--test\s+tests\/?\*/.test(verif)) {
-    violations.push({ field: "verification", message: "Forbidden glob pattern in verification — use 'npm test' instead", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+  // Forbidden verification command gate (Packet 5) — uses centralized registry
+  const verif = String(plan.verification || "");
+  const forbidden = checkForbiddenCommands(verif);
+  if (forbidden.forbidden) {
+    for (const v of forbidden.violations) {
+      violations.push({ field: "verification", message: `Forbidden command: ${v.reason}`, severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+    }
   }
 
   const criticalCount = violations.filter(v => v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL).length;

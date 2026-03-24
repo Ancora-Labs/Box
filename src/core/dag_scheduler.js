@@ -92,3 +92,74 @@ export function computeNextWaves(allPlans, completedTaskIds = new Set(), failedT
     status: readyWaves.length > 0 ? "ok" : "deadlocked"
   };
 }
+
+/**
+ * Compute the immediate frontier — all tasks whose dependencies are satisfied.
+ * Unlike wave-based scheduling, this returns tasks individually as they become ready.
+ *
+ * @param {object[]} allPlans
+ * @param {Set<string>} completedTaskIds
+ * @param {Set<string>} failedTaskIds
+ * @param {Set<string>} [inProgressTaskIds] — tasks currently being executed
+ * @returns {{ frontier: object[], blocked: object[], status: string }}
+ */
+export function computeFrontier(allPlans, completedTaskIds = new Set(), failedTaskIds = new Set(), inProgressTaskIds = new Set()) {
+  if (!Array.isArray(allPlans) || allPlans.length === 0) {
+    return { frontier: [], blocked: [], status: "all_done" };
+  }
+
+  const remaining = allPlans.filter(p => {
+    const id = p.task_id || p.task || p.role || "";
+    return !completedTaskIds.has(id) && !inProgressTaskIds.has(id);
+  });
+
+  if (remaining.length === 0 && inProgressTaskIds.size > 0) {
+    return { frontier: [], blocked: [], status: "waiting" };
+  }
+  if (remaining.length === 0) {
+    return { frontier: [], blocked: [], status: "all_done" };
+  }
+
+  const frontier = [];
+  const blocked = [];
+
+  for (const plan of remaining) {
+    const deps = Array.isArray(plan.dependencies) ? plan.dependencies : [];
+    const hasFailedDep = deps.some(d => failedTaskIds.has(d));
+    if (hasFailedDep) {
+      blocked.push(plan);
+      continue;
+    }
+    // All dependencies must be completed (not just in progress)
+    const allDepsCompleted = deps.every(d => completedTaskIds.has(d));
+    if (allDepsCompleted) {
+      frontier.push(plan);
+    }
+    // Otherwise: still waiting on deps — not blocked, not ready
+  }
+
+  return {
+    frontier,
+    blocked,
+    status: frontier.length > 0 ? "ok" : (blocked.length > 0 ? "deadlocked" : "waiting")
+  };
+}
+
+/**
+ * Create bounded micro-batches from the frontier.
+ * Ensures no more than `maxConcurrent` tasks are dispatched simultaneously.
+ *
+ * @param {object[]} frontier — tasks ready for dispatch
+ * @param {{ maxConcurrent?: number }} opts
+ * @returns {object[][]} — array of micro-batches
+ */
+export function microBatch(frontier, opts = {}) {
+  const maxConcurrent = opts.maxConcurrent || 3;
+  if (!Array.isArray(frontier) || frontier.length === 0) return [];
+
+  const batches = [];
+  for (let i = 0; i < frontier.length; i += maxConcurrent) {
+    batches.push(frontier.slice(i, i + maxConcurrent));
+  }
+  return batches;
+}

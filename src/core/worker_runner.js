@@ -21,6 +21,7 @@ import { getRoleRegistry } from "./role_registry.js";
 import { appendProgress, appendFailureClassification } from "./state_tracker.js";
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
+import { getVerificationCommands } from "./verification_command_registry.js";
 import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
@@ -30,7 +31,7 @@ import { resolveRetryAction, persistRetryMetric } from "./retry_strategy.js";
 
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
-function logPremiumUsage(config, roleName, model, taskKind, durationMs) {
+function logPremiumUsage(config, roleName, model, taskKind, durationMs, { outcome, taskId } = {}) {
   const logPath = path.join(config.paths?.stateDir || "state", "premium_usage_log.json");
   let entries = [];
   try {
@@ -45,7 +46,9 @@ function logPremiumUsage(config, roleName, model, taskKind, durationMs) {
     taskKind: taskKind || "general",
     startedAt: new Date(Date.now() - durationMs).toISOString(),
     completedAt: new Date().toISOString(),
-    durationMs
+    durationMs,
+    outcome: outcome || "unknown",
+    taskId: taskId || null
   });
   // Keep last 500 entries to prevent unbounded growth
   if (entries.length > 500) entries = entries.slice(-500);
@@ -259,6 +262,14 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
   parts.push("- Complete your ENTIRE assigned task in one shot — do not leave partial work for a follow-up request.");
   parts.push("- If your task involves multiple files, fix ALL of them before reporting done.");
   parts.push("- Senior production standard: correct logic, proper error handling, edge cases handled, tests where relevant.");
+
+  // Canonical verification commands from the central registry
+  const verifCmds = getVerificationCommands(config);
+  parts.push("\n## CANONICAL VERIFICATION COMMANDS");
+  parts.push(`Use these exact commands for verification (do NOT invent shell globs):`);
+  parts.push(`  Test:  ${verifCmds.test}`);
+  parts.push(`  Lint:  ${verifCmds.lint}`);
+  parts.push(`  Build: ${verifCmds.build}`);
 
   // Role-based verification — inject requirements specific to this worker's kind
   if (workerKind) {
@@ -567,7 +578,10 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   }
 
   // Track premium request usage per worker (always log, even for failed verification attempts)
-  logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs);
+  logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
+    outcome: parsed.status,
+    taskId: instruction.taskId || instruction.task || null
+  });
 
   // ── Verification gate — evidence-based done acceptance ──────────────────────
   // Feature-flagged via config.runtime.requireTaskContract (default: true).

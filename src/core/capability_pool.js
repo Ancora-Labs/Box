@@ -159,3 +159,78 @@ export function enforceLaneDiversity(pool, opts = {}) {
     warning: `Only ${laneCount} lane(s) active, minimum is ${minLanes}. Worker topology may be monocultural.`,
   };
 }
+
+/**
+ * Worker dispatch distribution metrics (Packet 12).
+ * Tracks how work is distributed across workers and lanes over time.
+ *
+ * @param {{ assignments: Array<{ plan: object, selection: WorkerSelection }> }} pool
+ * @returns {{ roleDistribution: Record<string, number>, laneDistribution: Record<string, number>, concentrationRatio: number, diversityScore: number }}
+ */
+export function computeDispatchMetrics(pool) {
+  if (!pool || !Array.isArray(pool.assignments) || pool.assignments.length === 0) {
+    return { roleDistribution: {}, laneDistribution: {}, concentrationRatio: 1, diversityScore: 0 };
+  }
+
+  const roleDistribution = {};
+  const laneDistribution = {};
+
+  for (const a of pool.assignments) {
+    const role = a.selection?.role || "unknown";
+    const lane = a.selection?.lane || "unknown";
+    roleDistribution[role] = (roleDistribution[role] || 0) + 1;
+    laneDistribution[lane] = (laneDistribution[lane] || 0) + 1;
+  }
+
+  const total = pool.assignments.length;
+  const maxRoleCount = Math.max(...Object.values(roleDistribution));
+  const concentrationRatio = Math.round((maxRoleCount / total) * 100) / 100;
+  const uniqueRoles = Object.keys(roleDistribution).length;
+  const diversityScore = Math.round((1 - concentrationRatio + (uniqueRoles / Math.max(total, 1))) / 2 * 100) / 100;
+
+  return { roleDistribution, laneDistribution, concentrationRatio, diversityScore };
+}
+
+/**
+ * Multi-worker chain topology for high-complexity tasks (Packet 13).
+ *
+ * Decomposes a high-complexity task into a sequential chain:
+ *   architect → implementation → verification → (optional) learning
+ *
+ * Each stage produces a handoff artifact consumed by the next stage.
+ *
+ * @param {object} plan — the plan to decompose
+ * @param {{ complexity?: string }} hints
+ * @returns {{ isChained: boolean, chain: Array<{ stage: string, lane: string, task: string }> }}
+ */
+export function buildWorkerChain(plan, hints = {}) {
+  const complexity = String(hints.complexity || plan.complexity || "").toLowerCase();
+  const isHighComplexity = ["critical", "massive", "high"].includes(complexity);
+
+  if (!isHighComplexity) {
+    return { isChained: false, chain: [] };
+  }
+
+  const task = String(plan.task || "");
+
+  return {
+    isChained: true,
+    chain: [
+      {
+        stage: "architect",
+        lane: "quality",
+        task: `[ARCHITECT] Decompose and plan implementation approach for: ${task}. Output a step-by-step implementation plan with file paths and acceptance criteria.`,
+      },
+      {
+        stage: "implementation",
+        lane: "implementation",
+        task: `[IMPLEMENT] Execute the architect's plan for: ${task}. Follow the decomposed steps exactly. Output BOX_STATUS and VERIFICATION_REPORT.`,
+      },
+      {
+        stage: "verification",
+        lane: "quality",
+        task: `[VERIFY] Validate the implementation of: ${task}. Run npm test, check edge cases, confirm acceptance criteria are met. Output pass/fail per criterion.`,
+      },
+    ],
+  };
+}

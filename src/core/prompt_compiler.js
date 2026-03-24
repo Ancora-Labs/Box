@@ -118,3 +118,67 @@ export function estimatePromptTokens(sections) {
   }
   return { total, sections: result };
 }
+
+// ─── Packet 18 — Prompt Compiler Tiering by Task Complexity ────────────
+
+/**
+ * Complexity tiers matching model_policy.js classifications.
+ * Each tier defines: max total tokens, section budgets, and anti-fluff strictness.
+ */
+export const PROMPT_TIERS = Object.freeze({
+  T1: { label: "trivial", maxTokens: 800, antiFluff: false },
+  T2: { label: "moderate", maxTokens: 2000, antiFluff: true },
+  T3: { label: "complex", maxTokens: 4000, antiFluff: true },
+});
+
+/**
+ * Vague verbs that add no measurable value to prompts.
+ * Used by the anti-fluff filter in T2/T3 prompts.
+ */
+const FLUFF_PATTERNS = [
+  /\b(significantly|drastically|greatly|massively)\s+(improve|enhance|optimize|boost)\b/gi,
+  /\bstrive\s+to\b/gi,
+  /\bas\s+(?:much|needed|appropriate)\s+as\s+possible\b/gi,
+  /\btry\s+(?:to\s+)?(?:improve|enhance|optimize)\b/gi,
+];
+
+/**
+ * Strip anti-fluff patterns from text.
+ * Replaces vague verb phrases with empty string and collapses whitespace.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripFluff(text) {
+  if (!text) return "";
+  let cleaned = text;
+  for (const pat of FLUFF_PATTERNS) {
+    cleaned = cleaned.replace(pat, "");
+  }
+  return cleaned.replace(/\s{2,}/g, " ").trim();
+}
+
+/**
+ * Compile a tiered prompt — applies complexity-based token budget and anti-fluff.
+ *
+ * @param {Array<{ name: string, content: string, maxTokens?: number }>} sections
+ * @param {{ tier?: "T1"|"T2"|"T3", separator?: string, includeHeaders?: boolean }} opts
+ * @returns {string}
+ */
+export function compileTieredPrompt(sections, opts = {}) {
+  const tier = PROMPT_TIERS[opts.tier] || PROMPT_TIERS.T2;
+
+  let processed = sections;
+  if (tier.antiFluff) {
+    processed = sections.map(s => ({
+      ...s,
+      content: stripFluff(s.content),
+    }));
+  }
+
+  return compilePrompt(processed, {
+    separator: opts.separator,
+    includeHeaders: opts.includeHeaders,
+    tokenBudget: tier.maxTokens,
+  });
+}

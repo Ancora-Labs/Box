@@ -50,6 +50,7 @@ export async function loadConfig() {
     copilotAutoCompact: process.env.BOX_COPILOT_AUTO_COMPACT?.trim() || null,
     copilotRehydrateOnFail: process.env.BOX_COPILOT_REHYDRATE_ON_FAIL?.trim() || null,
     copilotMaxRetries: process.env.BOX_COPILOT_MAX_RETRIES?.trim() || null,
+    stopOnError: process.env.BOX_STOP_ON_ERROR?.trim() || null,
     reviewerProvider: process.env.BOX_REVIEWER_PROVIDER?.trim() || null,
     autonomousMaxAttemptsPerTask: process.env.BOX_AUTONOMOUS_MAX_ATTEMPTS_PER_TASK?.trim() || null,
     autonomousTaskSplitOnFailure: process.env.BOX_AUTONOMOUS_TASK_SPLIT_ON_FAILURE?.trim() || null,
@@ -134,6 +135,9 @@ export async function loadConfig() {
     copilotMaxRetries: env.copilotMaxRetries
       ? Number(env.copilotMaxRetries)
       : Number(fileConfig?.runtime?.copilotMaxRetries ?? 2),
+    stopOnError: env.stopOnError
+      ? ["1", "true", "yes", "on"].includes(env.stopOnError.toLowerCase())
+      : Boolean(fileConfig?.runtime?.stopOnError ?? true),
     reviewerProvider: String(env.reviewerProvider || fileConfig?.runtime?.reviewerProvider || "copilot").trim().toLowerCase(),
     autonomousMaxAttemptsPerTask: env.autonomousMaxAttemptsPerTask
       ? Number(env.autonomousMaxAttemptsPerTask)

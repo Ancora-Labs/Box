@@ -104,6 +104,20 @@ export function buildAgentArgs({
 } = {}) {
   const args = [];
 
+  const pushResolvedModelArg = (requestedModel) => {
+    if (!requestedModel) return;
+    const banCheck = isModelBanned(requestedModel);
+    if (banCheck.banned) {
+      // HARD BLOCK: never pass a banned model to Copilot CLI
+      const safe = toCopilotModelSlug("Claude Sonnet 4.6");
+      if (safe) args.push("--model", safe);
+      logBannedModelAttempt(requestedModel, banCheck.reason);
+      return;
+    }
+    const slug = toCopilotModelSlug(requestedModel);
+    if (slug) args.push("--model", slug);
+  };
+
   if (allowAll) args.push("--allow-all");
   if (noAskUser) args.push("--no-ask-user");
   if (autopilot) {
@@ -114,18 +128,11 @@ export function buildAgentArgs({
 
   if (agentSlug && agentFileExists(agentSlug)) {
     args.push("--agent", agentSlug);
+    // Force explicit model even with custom agent to avoid default-model fallback.
+    pushResolvedModelArg(model);
   } else if (model) {
-    // No agent file ÔÇö fall back to explicit model
-    const banCheck = isModelBanned(model);
-    if (banCheck.banned) {
-      // HARD BLOCK: never pass a banned model to Copilot CLI
-      const safe = toCopilotModelSlug("Claude Sonnet 4.6");
-      if (safe) args.push("--model", safe);
-      logBannedModelAttempt(model, banCheck.reason);
-    } else {
-      const slug = toCopilotModelSlug(model);
-      if (slug) args.push("--model", slug);
-    }
+    // No agent file — explicit model only.
+    pushResolvedModelArg(model);
   }
 
   let promptText = String(prompt);
