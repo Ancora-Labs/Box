@@ -26,7 +26,7 @@ import process from "node:process";
 
 const REQUIRED_VARS = ["WORKER_ROLE", "TASK_PAYLOAD", "TARGET_REPO", "GITHUB_TOKEN"];
 
-function validateEnv() {
+function validateEnv(): void {
   const missing = REQUIRED_VARS.filter((v) => !process.env[v]);
   if (missing.length > 0) {
     process.stderr.write(
@@ -37,7 +37,7 @@ function validateEnv() {
   }
 }
 
-function main() {
+function main(): void {
   validateEnv();
 
   const role = process.env.WORKER_ROLE;

@@ -11,18 +11,18 @@ const COPILOT_CLI_TIMEOUT_MS = (() => {
   return Math.floor(raw);
 })();
 
-function normalizeModelName(name) {
+function normalizeModelName(name: string | null | undefined): string {
   return String(name || "").trim();
 }
 
-function parseCsv(csv) {
+function parseCsv(csv: string | null | undefined): string[] {
   return String(csv || "")
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
-function parseMultipliers(jsonText) {
+function parseMultipliers(jsonText: string | null | undefined): Record<string, unknown> {
   try {
     const parsed = JSON.parse(jsonText || "{}");
     return parsed && typeof parsed === "object" ? parsed : {};
@@ -31,7 +31,7 @@ function parseMultipliers(jsonText) {
   }
 }
 
-function parsePreferenceValue(value) {
+function parsePreferenceValue(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.map((item) => normalizeModelName(item)).filter(Boolean);
   }
@@ -48,9 +48,9 @@ function parsePreferenceValue(value) {
   return [];
 }
 
-function modelCapabilityScore(modelName) {
+function modelCapabilityScore(modelName: string | null | undefined): number {
   const key = String(modelName || "").toLowerCase();
-  const scored = [
+  const scored: [RegExp, number][] = [
     [/claude\s+opus/, 5.0],
     [/claude\s+sonnet/, 4.4],
     [/gpt-?5\.3\s*codex|gpt\s*5\.3\s*codex/, 4.1],
@@ -60,14 +60,14 @@ function modelCapabilityScore(modelName) {
     [/gpt-?4\.1|gpt\s*4\.1/, 3.0]
   ];
   for (const [pattern, score] of scored) {
-    if ((pattern as RegExp).test(key)) {
+    if (pattern.test(key)) {
       return score;
     }
   }
   return 3.4;
 }
 
-function estimateComplexityBand(taskTitle, taskKind) {
+function estimateComplexityBand(taskTitle: string | null | undefined, taskKind: string | null | undefined): "high" | "medium" | "low" {
   const text = `${String(taskTitle || "")} ${String(taskKind || "")}`.toLowerCase();
   const highSignals = [
     "security", "incident", "critical", "architecture", "migration", "production", "outage", "auth", "data loss", "race condition"
@@ -85,7 +85,7 @@ function estimateComplexityBand(taskTitle, taskKind) {
   return "medium";
 }
 
-function targetCapabilityForBand(band) {
+function targetCapabilityForBand(band: "high" | "medium" | "low"): number {
   if (band === "high") {
     return 4.3;
   }
@@ -95,7 +95,7 @@ function targetCapabilityForBand(band) {
   return 4.0;
 }
 
-function chooseDynamicCandidate(candidates, targetCapability) {
+function chooseDynamicCandidate(candidates: string[], targetCapability: number): string | null {
   if (candidates.length === 0) {
     return null;
   }
@@ -113,7 +113,7 @@ function chooseDynamicCandidate(candidates, targetCapability) {
   return rankedAsc[rankedAsc.length - 1].model;
 }
 
-function shouldEscalateToOpus(taskTitle, taskKind, allowOpusEscalation, escalationKeywords) {
+function shouldEscalateToOpus(taskTitle: string | null | undefined, taskKind: string | null | undefined, allowOpusEscalation: boolean, escalationKeywords: string[]): boolean {
   if (!allowOpusEscalation) {
     return false;
   }
@@ -126,7 +126,7 @@ function shouldEscalateToOpus(taskTitle, taskKind, allowOpusEscalation, escalati
   return escalationKeywords.some((keyword) => haystack.includes(String(keyword).toLowerCase()));
 }
 
-function commandSupportsModelFlag(command) {
+function commandSupportsModelFlag(command: string): boolean {
   try {
     const output = execSync(`${command} --help`, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).toString("utf8").toLowerCase();
     return output.includes("--model");
@@ -135,7 +135,7 @@ function commandSupportsModelFlag(command) {
   }
 }
 
-function commandUsesPromptMode(command) {
+function commandUsesPromptMode(command: string): boolean {
   try {
     const output = execSync(`${command} --help`, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).toString("utf8").toLowerCase();
     return output.includes("--prompt") || output.includes("-p, --prompt");
@@ -144,7 +144,17 @@ function commandUsesPromptMode(command) {
   }
 }
 
-function enforceGuards(candidate, { neverUseModels, allowedModels, multipliers, maxMultiplier, defaultModel, opusModel, allowOpusEscalation }) {
+interface GuardOptions {
+  neverUseModels: string[];
+  allowedModels: string[];
+  multipliers: Record<string, unknown>;
+  maxMultiplier: number | string;
+  defaultModel: string;
+  opusModel: string;
+  allowOpusEscalation: boolean;
+}
+
+function enforceGuards(candidate: string, { neverUseModels, allowedModels, multipliers, maxMultiplier, defaultModel, opusModel, allowOpusEscalation }: GuardOptions): { model: string; forcedFallback: string | null } {
   const forbidden = neverUseModels.includes(candidate);
   if (forbidden) {
     return { model: defaultModel, forcedFallback: "never-use-list" };
@@ -185,7 +195,24 @@ export function chooseCopilotModel({
   allowedModelsCsv,
   maxMultiplier,
   multipliersJson
-}) {
+}: {
+  strategy?: string;
+  taskTitle?: string;
+  taskKind?: string;
+  roleName?: string;
+  defaultModel?: string;
+  preferredModelsByTaskKindJson?: string;
+  preferredModelsByRoleJson?: string;
+  opusModel?: string;
+  allowOpusEscalation?: boolean;
+  teamLeadAllowOpus?: boolean;
+  teamLeadReason?: string;
+  opusEscalationKeywordsCsv?: string;
+  neverUseModelsCsv?: string;
+  allowedModelsCsv?: string;
+  maxMultiplier?: number | string;
+  multipliersJson?: string;
+}): Record<string, unknown> {
   const targetStrategy = String(strategy || "task-best").toLowerCase();
   const preferredModels = parseMultipliers(preferredModelsByTaskKindJson);
   const preferredByRole = parseMultipliers(preferredModelsByRoleJson);
@@ -244,7 +271,7 @@ export function chooseCopilotModel({
   };
 }
 
-function runCopilotCli(command, args) {
+function runCopilotCli(command: string, args: string[]): { ok: boolean; status: number | null; stdout: string; stderr: string; error: string; timedOut: boolean } {
   const timeoutOption: any = COPILOT_CLI_TIMEOUT_MS > 0 ? { timeout: COPILOT_CLI_TIMEOUT_MS, killSignal: "SIGKILL" } : {};
   const result = spawnSync(command, args, {
     encoding: "utf8",
@@ -272,12 +299,12 @@ function runCopilotCli(command, args) {
   };
 }
 
-function clipText(value, max = 1200) {
+function clipText(value: unknown, max = 1200): string {
   const text = String(value || "");
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
-function buildResponsePreview(result) {
+function buildResponsePreview(result: { stdout?: string; stderr?: string; error?: string }): string {
   const stdout = String(result?.stdout || "").trim();
   const stderr = String(result?.stderr || "").trim();
   const error = String(result?.error || "").trim();
@@ -285,7 +312,7 @@ function buildResponsePreview(result) {
   return clipText(merged, 1800);
 }
 
-export function buildTaskPrompt({ taskTitle, taskKind }) {
+export function buildTaskPrompt({ taskTitle, taskKind }: { taskTitle: string; taskKind?: string }): string {
   return [
     "<role>",
     "You are a senior software engineer with 10+ years of professional experience, working inside an autonomous delivery runtime.",
@@ -329,7 +356,7 @@ export function buildTaskPrompt({ taskTitle, taskKind }) {
   ].join("\n");
 }
 
-export function runCopilotPrompt(command, prompt, modelDecision) {
+export function runCopilotPrompt(command: string, prompt: string, modelDecision: Record<string, unknown>): Record<string, unknown> {
   const supportsModel = commandSupportsModelFlag(command);
   const usesPromptMode = commandUsesPromptMode(command);
   const requestedModel = toCopilotModelSlug(modelDecision.model);

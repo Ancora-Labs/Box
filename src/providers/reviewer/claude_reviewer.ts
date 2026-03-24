@@ -2,7 +2,7 @@ import { tryExtractJson, validatePlan, validateDecision, validateOpusDecision } 
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
-function getEvidenceQuotes(workerResult) {
+function getEvidenceQuotes(workerResult: Record<string, unknown>): string[] {
   const lines = [];
   const stdoutLines = String(workerResult?.stdout || "").split(/\r?\n/).filter(Boolean);
   const stderrLines = String(workerResult?.stderr || "").split(/\r?\n/).filter(Boolean);
@@ -18,8 +18,14 @@ function getEvidenceQuotes(workerResult) {
 }
 
 export class ClaudeReviewer {
-  [key: string]: any;
-  constructor(apiKey: any, options: any = {}) {
+  apiKey: string;
+  model: string;
+  reviewMaxRetries: number;
+  reviewMaxTokens: number;
+  planMaxTokens: number;
+  thinking: { type: string; effort?: string } | undefined;
+
+  constructor(apiKey: string, options: { model?: string; reviewMaxRetries?: number; reviewMaxTokens?: number; planMaxTokens?: number; thinking?: { type: string; effort?: string } } = {}) {
     this.apiKey = apiKey;
     this.model = options.model || "claude-sonnet-4-6";
     this.reviewMaxRetries = Number(options.reviewMaxRetries || 1);
@@ -28,14 +34,14 @@ export class ClaudeReviewer {
     this.thinking = options.thinking || { type: "adaptive", effort: "medium" };
   }
 
-  buildOutputConfig() {
+  buildOutputConfig(): { effort: string } | undefined {
     if (!this.thinking || this.thinking.type !== "adaptive") {
       return undefined;
     }
     return { effort: this.thinking.effort || "medium" };
   }
 
-  async requestJson(prompt, maxTokens, fallback, validator) {
+  async requestJson<T>(prompt: string, maxTokens: number, fallback: T, validator: (payload: any, fallback: T) => T): Promise<T> {
     let lastError = null;
 
     for (let attempt = 1; attempt <= this.reviewMaxRetries + 1; attempt += 1) {
@@ -74,7 +80,7 @@ export class ClaudeReviewer {
     throw lastError;
   }
 
-  async reviewPlan(summary, tasks) {
+  async reviewPlan(summary: Record<string, unknown>, tasks: unknown[]): Promise<{ tasks: unknown[] }> {
     if (!this.apiKey) {
       return { tasks };
     }
@@ -108,12 +114,12 @@ export class ClaudeReviewer {
       "<output_requirements>Return only JSON object matching schema.</output_requirements>"
     ].join("\n");
 
-    return this.requestJson(prompt, this.planMaxTokens, { tasks }, validatePlan);
+    return this.requestJson(prompt, this.planMaxTokens, { tasks }, (payload, fb) => validatePlan(payload, fb.tasks));
   }
 
-  async reviewResult(task, workerResult, gates) {
+  async reviewResult(task: Record<string, unknown>, workerResult: Record<string, unknown>, gates: Record<string, unknown>): Promise<{ approved: boolean; reason: string }> {
     if (!this.apiKey) {
-      return { approved: gates.ok, reason: "claude disabled" };
+      return { approved: Boolean(gates.ok), reason: "claude disabled" };
     }
 
     const quotes = getEvidenceQuotes(workerResult);
@@ -151,12 +157,12 @@ export class ClaudeReviewer {
     return this.requestJson(
       prompt,
       this.reviewMaxTokens,
-      { approved: gates.ok, reason: "fallback deterministic decision" },
+      { approved: Boolean(gates.ok), reason: "fallback deterministic decision" },
       validateDecision
     );
   }
 
-  async recommendOpusForTask(task, summary, budget) {
+  async recommendOpusForTask(task: Record<string, unknown>, summary: Record<string, unknown>, budget: Record<string, unknown>): Promise<{ allowOpus: boolean; reason: string }> {
     if (!this.apiKey) {
       return { allowOpus: false, reason: "claude disabled" };
     }

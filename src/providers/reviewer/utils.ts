@@ -3,13 +3,13 @@
  * Keep this module pure — no side effects, no imports from provider files.
  */
 
-export function safeArray(value) {
+export function safeArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-export function tryExtractJson(text) {
+export function tryExtractJson(text: string | null | undefined): unknown {
   try {
-    return JSON.parse(text);
+    return JSON.parse(text as string);
   } catch {
     const match = String(text || "").match(/\{[\s\S]*\}/);
     if (!match) {
@@ -23,9 +23,9 @@ export function tryExtractJson(text) {
   }
 }
 
-export function validatePlan(payload, fallbackTasks) {
-  const tasks = safeArray(payload?.tasks)
-    .map((task, idx) => ({
+export function validatePlan(payload: Record<string, unknown> | null, fallbackTasks: unknown[]): { tasks: unknown[] } {
+  const tasks = safeArray((payload as any)?.tasks)
+    .map((task: any, idx: number) => ({
       id: Number(task?.id ?? idx + 1),
       title: String(task?.title || "").trim(),
       priority: Number(task?.priority || 3),
@@ -35,7 +35,7 @@ export function validatePlan(payload, fallbackTasks) {
   return tasks.length > 0 ? { tasks } : { tasks: fallbackTasks };
 }
 
-export function validateDecision(payload, fallback) {
+export function validateDecision(payload: Record<string, unknown> | null, fallback: { approved: boolean; reason: string }): { approved: boolean; reason: string } {
   if (typeof payload?.approved !== "boolean") return fallback;
   return {
     approved: payload.approved,
@@ -43,10 +43,10 @@ export function validateDecision(payload, fallback) {
   };
 }
 
-export function validateOpusDecision(payload, fallback) {
+export function validateOpusDecision(payload: Record<string, unknown> | null, fallback: { allowOpus: boolean; reason: string }): { allowOpus: boolean; reason: string } {
   if (typeof payload?.allowOpus !== "boolean") return fallback;
   return {
-    allowOpus: payload.allowOpus,
+    allowOpus: payload.allowOpus as boolean,
     reason: String(payload?.reason || fallback?.reason || "no reason provided")
   };
 }

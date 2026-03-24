@@ -1,3 +1,4 @@
+import type { Config } from "./types/index.js";
 import { spawn } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import path from "node:path";
@@ -19,7 +20,7 @@ import {
 
 // ── box on: start dashboard + daemon in one command ──────────────────────────
 
-function killByPort(port) {
+function killByPort(port: number): Promise<number | null> {
   return new Promise((resolve) => {
     if (process.platform === "win32") {
       const ps = spawn("powershell", [
@@ -51,7 +52,7 @@ function killByPort(port) {
   });
 }
 
-function spawnDetached(command, args, cwd) {
+function spawnDetached(command: string, args: string[], cwd: string): number | undefined {
   const child = spawn(command, args, {
     cwd,
     detached: true,
@@ -62,12 +63,12 @@ function spawnDetached(command, args, cwd) {
   return child.pid;
 }
 
-function savePid(stateDir, name, pid) {
+function savePid(stateDir: string, name: string, pid: number | undefined): void {
   const filePath = path.join(stateDir, `${name}.pid`);
   writeFileSync(filePath, String(pid), "utf8");
 }
 
-function readPid(stateDir, name) {
+function readPid(stateDir: string, name: string): number | null {
   const filePath = path.join(stateDir, `${name}.pid`);
   try {
     if (existsSync(filePath)) {
@@ -78,16 +79,16 @@ function readPid(stateDir, name) {
   return null;
 }
 
-function removePidFile(stateDir, name) {
+function removePidFile(stateDir: string, name: string): void {
   const filePath = path.join(stateDir, `${name}.pid`);
   try { unlinkSync(filePath); } catch { /* ignore */ }
 }
 
-function waitMs(ms) {
+function waitMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function boxOn(config) {
+async function boxOn(config: Config): Promise<void> {
   const stateDir = config.paths?.stateDir || "state";
   const root = path.resolve(stateDir, "..");
 
@@ -120,7 +121,7 @@ async function boxOn(config) {
   console.log("To stop: node src/cli.js off  (or: npm run box:off)");
 }
 
-async function boxOff(config) {
+async function boxOff(config: Config): Promise<void> {
   const stateDir = config.paths?.stateDir || "state";
 
   // 1. Graceful daemon stop via stop request
@@ -164,7 +165,7 @@ async function boxOff(config) {
   console.log("BOX is down.");
 }
 
-async function main() {
+async function main(): Promise<void> {
   const command = process.argv[2] ?? "once";
   const config = await loadConfig();
 
@@ -348,7 +349,7 @@ async function main() {
     console.log("  active:         " + gate.active);
     console.log("  status:         " + gate.status);
     console.log("  reason:         " + gate.reason);
-    console.log("  config.enabled: " + (config.selfImprovement?.enabled !== false));
+    console.log("  config.enabled: " + ((config as any).selfImprovement?.enabled !== false));
     console.log("  manual.enabled: " + control.enabled);
     if (control.updatedAt) {
       console.log("  manual.updated: " + control.updatedAt + " by " + control.updatedBy);

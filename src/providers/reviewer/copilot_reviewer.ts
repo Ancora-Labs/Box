@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { toCopilotModelSlug } from "../../core/agent_loader.js";
 import { safeArray, tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
 
-function validateAutonomyAudit(payload, fallback) {
+function validateAutonomyAudit(payload: Record<string, unknown> | null, fallback: { healthy: boolean; reason: string; notifyUser: boolean }): { healthy: boolean; reason: string; notifyUser: boolean } {
   if (typeof payload?.healthy !== "boolean") {
     return fallback;
   }
@@ -13,7 +13,7 @@ function validateAutonomyAudit(payload, fallback) {
   };
 }
 
-function validateLoopDecision(payload, fallback) {
+function validateLoopDecision(payload: Record<string, unknown> | null, fallback: { mode: string; reason: string }): { mode: string; reason: string } {
   const mode = String(payload?.mode || "").trim().toLowerCase();
   if (mode !== "strategic" && mode !== "tactical") {
     return fallback;
@@ -24,7 +24,7 @@ function validateLoopDecision(payload, fallback) {
   };
 }
 
-function validatePlannerTriggerDecision(payload, fallback) {
+function validatePlannerTriggerDecision(payload: Record<string, unknown> | null, fallback: { shouldPlan: boolean; reason: string }): { shouldPlan: boolean; reason: string } {
   if (typeof payload?.shouldPlan !== "boolean") {
     return fallback;
   }
@@ -34,7 +34,7 @@ function validatePlannerTriggerDecision(payload, fallback) {
   };
 }
 
-function validateFailureChainDecision(payload, fallback) {
+function validateFailureChainDecision(payload: Record<string, unknown> | null, fallback: { action: string; reason: string }): { action: string; reason: string } {
   const action = String(payload?.action || "").trim().toLowerCase();
   const allowed = new Set(["retry", "split", "park", "escalate_jesus"]);
   if (!allowed.has(action)) {
@@ -46,7 +46,7 @@ function validateFailureChainDecision(payload, fallback) {
   };
 }
 
-function validateEscalatedFailureResolution(payload, fallback) {
+function validateEscalatedFailureResolution(payload: Record<string, unknown> | null, fallback: { action: string; reason: string; notifyUser: boolean }): { action: string; reason: string; notifyUser: boolean } {
   const action = String(payload?.action || "").trim().toLowerCase();
   const allowed = new Set(["retry", "park", "notify_user"]);
   if (!allowed.has(action)) {
@@ -59,7 +59,7 @@ function validateEscalatedFailureResolution(payload, fallback) {
   };
 }
 
-function validateWaveDistributionDecision(payload, fallback) {
+function validateWaveDistributionDecision(payload: Record<string, unknown> | null, fallback: { orderedTaskIds: number[]; deferTaskIds: number[]; reason: string }): { orderedTaskIds: number[]; deferTaskIds: number[]; reason: string } {
   const orderedTaskIdsRaw = safeArray(payload?.orderedTaskIds).map((item) => Number(item)).filter((item) => Number.isFinite(item));
   const deferTaskIdsRaw = safeArray(payload?.deferTaskIds).map((item) => Number(item)).filter((item) => Number.isFinite(item));
 
@@ -74,7 +74,7 @@ function validateWaveDistributionDecision(payload, fallback) {
   };
 }
 
-function validateProjectAnalysis(payload, fallback) {
+function validateProjectAnalysis(payload: Record<string, unknown> | null, fallback: { frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[] }): { frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[] } {
   const frameworks = safeArray(payload?.frameworks).map((item) => String(item).trim()).filter(Boolean);
   const domains = safeArray(payload?.domains).map((item) => String(item).trim()).filter(Boolean);
   const criticalPaths = safeArray(payload?.criticalPaths).map((item) => String(item).trim()).filter(Boolean);
@@ -94,7 +94,7 @@ function validateProjectAnalysis(payload, fallback) {
   };
 }
 
-function validateIdleRecoveryDecision(payload, fallback) {
+function validateIdleRecoveryDecision(payload: Record<string, unknown> | null, fallback: { activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string }): { activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string } {
   if (typeof payload?.activate_idle_path !== "boolean") {
     return fallback;
   }
@@ -107,13 +107,13 @@ function validateIdleRecoveryDecision(payload, fallback) {
   };
 }
 
-function validateMosesCoordinationDecision(payload, fallback) {
+function validateMosesCoordinationDecision(payload: Record<string, unknown> | null, fallback: { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string }): { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string } {
   const tasksToQueue = safeArray(payload?.tasks_to_queue).filter((t) => t && typeof t === "object");
   if (typeof payload?.idle_path_tasks_triggered !== "boolean" && tasksToQueue.length === 0) {
     return fallback;
   }
   return {
-    tasks_to_queue: tasksToQueue.map((t) => ({
+    tasks_to_queue: tasksToQueue.map((t: any) => ({
       issue_id: Number(t?.issue_id || 0),
       task_type: String(t?.task_type || "general"),
       priority: String(t?.priority || "medium"),
@@ -124,7 +124,7 @@ function validateMosesCoordinationDecision(payload, fallback) {
   };
 }
 
-function summarizeGates(gates) {
+function summarizeGates(gates: Record<string, unknown> | null): string {
   if (!gates || typeof gates !== "object") {
     return "no gate result";
   }
@@ -135,16 +135,17 @@ function summarizeGates(gates) {
   return failures.length > 0 ? failures.join(", ") : "required gates failed";
 }
 
-function hasForbiddenPathChange(workerResult) {
-  const files = Array.isArray(workerResult?.copilotMeta?.changedFiles)
-    ? workerResult.copilotMeta.changedFiles.map((item) => String(item || "").toLowerCase())
+function hasForbiddenPathChange(workerResult: Record<string, unknown>): string {
+  const meta = workerResult?.copilotMeta as Record<string, unknown> | undefined;
+  const files = Array.isArray(meta?.changedFiles)
+    ? (meta!.changedFiles as string[]).map((item) => String(item || "").toLowerCase())
     : [];
   const forbiddenPrefixes = [".github/workflows/", "infra/", "security/"];
   return files.find((file) => forbiddenPrefixes.some((prefix) => file.startsWith(prefix))) || "";
 }
 
-function deterministicAudit(context) {
-  const totals = context?.queueTotals || {};
+function deterministicAudit(context: Record<string, unknown>): { healthy: boolean; reason: string; notifyUser: boolean } {
+  const totals = (context?.queueTotals || {}) as Record<string, unknown>;
   const failed = Number(totals.failed || 0);
   const running = Number(totals.running || 0);
   const blocked = Number(totals.blocked || 0);
@@ -159,15 +160,19 @@ function deterministicAudit(context) {
 }
 
 export class CopilotReviewer {
-  [key: string]: any;
-  constructor(options: any = {}) {
+  provider: string;
+  model: string;
+  command: string;
+  lastUsage: { model: string; provider: string; stage?: string } | null;
+
+  constructor(options: { model?: string; command?: string } = {}) {
     this.provider = "copilot";
     this.model = String(options?.model || "Claude Sonnet 4.6");
     this.command = String(options?.command || "copilot");
     this.lastUsage = null;
   }
 
-  consumeLastUsage(stage = "unknown") {
+  consumeLastUsage(stage = "unknown"): { model: string; provider: string; stage: string } | null {
     if (!this.lastUsage) {
       return null;
     }
@@ -176,7 +181,7 @@ export class CopilotReviewer {
     return usage;
   }
 
-  requestJson(prompt, fallback, validator) {
+  requestJson<T>(prompt: string, fallback: T, validator: (payload: any, fallback: T) => T): T {
     const args = ["--allow-all-tools", "-p", String(prompt || "")];
     const slug = toCopilotModelSlug(this.model);
     if (slug) {
@@ -210,7 +215,7 @@ export class CopilotReviewer {
     return validated;
   }
 
-  async reviewPlan(summary, tasks) {
+  async reviewPlan(summary: Record<string, unknown>, tasks: unknown[]): Promise<{ tasks: unknown[] }> {
     const fallback = { tasks: safeArray(tasks) };
     const prompt = [
       "Return only strict JSON with schema: {\"tasks\":[{\"id\":number,\"title\":string,\"priority\":number,\"kind\":string}]}",
@@ -223,8 +228,9 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, (payload, fb) => validatePlan(payload, fb.tasks));
   }
 
-  async reviewResult(task, workerResult, gates) {
-    const changedFilesCount = Number(workerResult?.copilotMeta?.changedFilesCount || 0);
+  async reviewResult(task: Record<string, unknown>, workerResult: Record<string, unknown>, gates: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const meta = workerResult?.copilotMeta as Record<string, unknown> | undefined;
+    const changedFilesCount = Number(meta?.changedFilesCount || 0);
     const forbiddenChangedPath = hasForbiddenPathChange(workerResult);
     if (changedFilesCount > 20) {
       return {
@@ -268,7 +274,7 @@ export class CopilotReviewer {
       `<worker>${JSON.stringify({ exitCode: workerResult?.exitCode, ok: workerResult?.ok })}</worker>`,
       `<changes>${JSON.stringify({
         changedFilesCount,
-        changedFiles: workerResult?.copilotMeta?.changedFiles || []
+        changedFiles: meta?.changedFiles || []
       })}</changes>`,
       `<gates>${JSON.stringify(gates)}</gates>`
     ].join("\n");
@@ -283,7 +289,7 @@ export class CopilotReviewer {
     };
   }
 
-  async recommendOpusForTask(task, summary, budget) {
+  async recommendOpusForTask(task: Record<string, unknown>, summary: Record<string, unknown>, budget: Record<string, unknown>): Promise<{ allowOpus: boolean; reason: string }> {
     const fallback = { allowOpus: false, reason: "Copilot reviewer policy: Opus escalation disabled" };
     const prompt = [
       "Return only strict JSON with schema: {\"allowOpus\":boolean,\"reason\":string}",
@@ -296,7 +302,7 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateOpusDecision);
   }
 
-  async auditAutonomyHealth(context) {
+  async auditAutonomyHealth(context: Record<string, unknown>): Promise<{ healthy: boolean; reason: string; notifyUser: boolean }> {
     const fallback = deterministicAudit(context);
     const prompt = [
       "Return only strict JSON with schema: {\"healthy\":boolean,\"reason\":string,\"notifyUser\":boolean}",
@@ -307,7 +313,7 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateAutonomyAudit);
   }
 
-  async chooseLoopMode(context) {
+  async chooseLoopMode(context: Record<string, unknown>): Promise<{ mode: string; reason: string }> {
     const fallback = {
       mode: context?.strategicDue ? "strategic" : "tactical",
       reason: context?.strategicDue
@@ -324,9 +330,10 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateLoopDecision);
   }
 
-  async decidePlannerTrigger(context) {
+  async decidePlannerTrigger(context: Record<string, unknown>): Promise<{ shouldPlan: boolean; reason: string }> {
+    const totals = (context?.queueTotals || {}) as Record<string, unknown>;
     const fallback = {
-      shouldPlan: Boolean(context?.strategicDue) || Number(context?.queueTotals?.queued || 0) === 0,
+      shouldPlan: Boolean(context?.strategicDue) || Number(totals?.queued || 0) === 0,
       reason: context?.strategicDue
         ? "deterministic planner trigger: strategic due"
         : "deterministic planner trigger: queue depleted"
@@ -342,9 +349,10 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validatePlannerTriggerDecision);
   }
 
-  async analyzeTaskFailure(context) {
+  async analyzeTaskFailure(context: Record<string, unknown>): Promise<{ action: string; reason: string }> {
+    const task = (context?.task || {}) as Record<string, unknown>;
     const fallback = {
-      action: Number(context?.task?.attempt || 1) < Number(context?.maxAttempts || 3) ? "retry" : "split",
+      action: Number(task?.attempt || 1) < Number(context?.maxAttempts || 3) ? "retry" : "split",
       reason: "deterministic fallback: bounded autonomous recovery"
     };
 
@@ -358,7 +366,7 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateFailureChainDecision);
   }
 
-  async resolveEscalatedFailure(context) {
+  async resolveEscalatedFailure(context: Record<string, unknown>): Promise<{ action: string; reason: string; notifyUser: boolean }> {
     const fallback = {
       action: context?.environmentBlocked ? "notify_user" : "park",
       reason: context?.environmentBlocked
@@ -377,9 +385,9 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateEscalatedFailureResolution);
   }
 
-  async decideWaveDistribution(context) {
+  async decideWaveDistribution(context: Record<string, unknown>): Promise<{ orderedTaskIds: number[]; deferTaskIds: number[]; reason: string }> {
     const fallback = {
-      orderedTaskIds: safeArray(context?.plannedTasks).map((task) => Number(task?.id || 0)).filter((id) => Number.isFinite(id) && id > 0),
+      orderedTaskIds: safeArray(context?.plannedTasks).map((task: any) => Number(task?.id || 0)).filter((id) => Number.isFinite(id) && id > 0),
       deferTaskIds: [],
       reason: "deterministic fallback: priority order and ownership constraints"
     };
@@ -395,7 +403,7 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateWaveDistributionDecision);
   }
 
-  async analyzeProjectContext(summary) {
+  async analyzeProjectContext(summary: Record<string, unknown>): Promise<{ frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[] }> {
     const fallback = {
       frameworks: safeArray(summary?.frameworks).map((item) => String(item)).filter(Boolean),
       domains: safeArray(summary?.domains).map((item) => String(item)).filter(Boolean),
@@ -413,10 +421,11 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateProjectAnalysis);
   }
 
-  async evaluateIdleRecovery(context) {
+  async evaluateIdleRecovery(context: Record<string, unknown>): Promise<{ activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string }> {
+    const totals = (context?.queueTotals || {}) as Record<string, unknown>;
     const fallback = {
       activate_idle_path: true,
-      force_strategic_mode: Number(context?.queueTotals?.queued || 0) === 0,
+      force_strategic_mode: Number(totals?.queued || 0) === 0,
       task_seeding_trigger: Number(context?.openIssueCount || 0) > 0,
       docker_containers_needed: 1,
       notes: "deterministic fallback: pipeline starved, activate all recovery paths"
@@ -435,7 +444,7 @@ export class CopilotReviewer {
     return this.requestJson(prompt, fallback, validateIdleRecoveryDecision);
   }
 
-  async coordinateIdleRecovery(context) {
+  async coordinateIdleRecovery(context: Record<string, unknown>): Promise<{ tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string }> {
     const fallback = {
       tasks_to_queue: [],
       idle_path_tasks_triggered: Number(context?.openIssueCount || 0) > 0,

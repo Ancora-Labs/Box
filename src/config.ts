@@ -1,17 +1,18 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import dotenv from "dotenv";
+import type { Config } from "./types/index.js";
 
 dotenv.config();
 
-function must(value, _key) {
+function must(value: string | undefined, _key: string): string | null {
   if (!value || !value.trim()) {
     return null;
   }
   return value.trim();
 }
 
-export async function loadConfig() {
+export async function loadConfig(): Promise<Config> {
   const rootDir = process.cwd();
   const configPath = path.join(rootDir, "box.config.json");
   const raw = await fs.readFile(configPath, "utf8");

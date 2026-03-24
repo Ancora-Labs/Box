@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 
-export async function writeFallbackPatchNote(taskId, taskTitle) {
+export async function writeFallbackPatchNote(taskId: number | string, taskTitle: string): Promise<void> {
   const text = [
     `Task ${taskId}: ${taskTitle}`,
     "Copilot CLI unavailable, fallback provider produced no code changes.",
