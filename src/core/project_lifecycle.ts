@@ -424,7 +424,7 @@ export async function runProjectCompletion(config) {
   const repo = config.env?.targetRepo;
   if (!repo) {
     warn("[lifecycle] No target repo configured — skipping project completion");
-    return;
+    return undefined;
   }
 
   try {

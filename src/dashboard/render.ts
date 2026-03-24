@@ -1,4 +1,4 @@
-export function renderHtml() {
+export function renderHtml(): string {
   return `<!doctype html>
 <html>
 <head>
@@ -1948,4 +1948,4 @@ export function renderHtml() {
   </script>
 </body>
 </html>`;
-}
+}

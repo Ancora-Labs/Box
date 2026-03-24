@@ -82,7 +82,7 @@ const PROMETHEUS_PLAN_HISTORY_LIMIT = 24;
  * @param {any} raw — a typed event object, JSON string, or arbitrary input
  * @returns {{ ok: boolean, event?: object, code?: string, message: string }}
  */
-export function consumeTypedEvent(raw) {
+export function consumeTypedEvent(raw: unknown): { ok: boolean; event?: Record<string, unknown>; code?: string; message: string } {
   return parseTypedEvent(raw);
 }
 
@@ -94,7 +94,7 @@ export function consumeTypedEvent(raw) {
  * @param {string} [domain] — optional filter: one of EVENT_DOMAIN values
  * @returns {boolean}
  */
-export function isTypedEventForDomain(raw, domain) {
+export function isTypedEventForDomain(raw: unknown, domain?: string): boolean {
   const result = parseTypedEvent(raw);
   if (!result.ok) return false;
   if (domain !== undefined && (result as any).event.domain !== domain) return false;
@@ -144,7 +144,21 @@ export const DASHBOARD_PAYLOAD_MAX_BYTES = 51200; // 50 KB
  * @param {object|null} completedEntry — matching entry from completed_projects.json, or null
  * @returns {{ systemStatus: string, systemStatusText: string, statusSource: string, statusFreshnessAt: string|null, degradedReason: string|null }}
  */
-export function deriveSystemStatus(pipelineProgress, orchestratorHealth, daemonStatus, workerSessions, completedEntry) {
+interface SystemStatusResult {
+  systemStatus: string;
+  systemStatusText: string;
+  statusSource: string;
+  statusFreshnessAt: string | null;
+  degradedReason: string | null;
+}
+
+export function deriveSystemStatus(
+  pipelineProgress: Record<string, any>,
+  orchestratorHealth: Record<string, any>,
+  daemonStatus: { running: boolean; pid: number },
+  workerSessions: Record<string, any>,
+  completedEntry: Record<string, any> | null
+): SystemStatusResult {
   const orchStatus = String(orchestratorHealth?.orchestratorStatus || "").toLowerCase();
   const orchReason = orchestratorHealth?.reason || null;
   const orchRecordedAt = orchestratorHealth?.recordedAt || null;
@@ -265,7 +279,7 @@ export function deriveSystemStatus(pipelineProgress, orchestratorHealth, daemonS
  * @param {string} [stateDir] — optional override for STATE_DIR
  * @returns {Promise<{ trendData: Array<{timestamp: string, label: string, count: number}>, total: number }>}
  */
-export async function getDecisionQualityTrend(stateDir) {
+export async function getDecisionQualityTrend(stateDir?: string): Promise<{ trendData: Array<{ timestamp: string; label: string; count: number }>; total: number }> {
   const dir = stateDir || STATE_DIR;
   let entries = [];
   try {
@@ -298,14 +312,14 @@ export async function getDecisionQualityTrend(stateDir) {
   return { trendData, total: entries.length };
 }
 
-function normalizeText(value) {
+function normalizeText(value: unknown): string {
   return String(value || "")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function textLooksRelated(a, b) {
+function textLooksRelated(a: string, b: string): boolean {
   const aa = normalizeText(a);
   const bb = normalizeText(b);
   if (!aa || !bb) return false;
@@ -319,7 +333,7 @@ function textLooksRelated(a, b) {
   return false;
 }
 
-function getLastWorkerMessage(session, roleName) {
+function getLastWorkerMessage(session: Record<string, any>, roleName: string): any {
   const history = Array.isArray(session?.history) ? session.history : [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i];
@@ -330,7 +344,7 @@ function getLastWorkerMessage(session, roleName) {
   return null;
 }
 
-function computePlanStatus(plan, workerSessions, athenaState) {
+function computePlanStatus(plan: Record<string, any>, workerSessions: Record<string, any>, athenaState: Record<string, any>): string {
   const role = String(plan?.role || "");
   const task = String(plan?.task || "");
   const session = workerSessions?.[role] || {};
@@ -360,7 +374,7 @@ function computePlanStatus(plan, workerSessions, athenaState) {
   return "queued";
 }
 
-function buildPrometheusPlanBoard(prometheusAnalysis, workerSessions, athenaState) {
+function buildPrometheusPlanBoard(prometheusAnalysis: Record<string, any>, workerSessions: Record<string, any>, athenaState: Record<string, any>): Record<string, any> {
   const sessions = workerSessions || {};
   const coord = athenaState || {};
 
@@ -513,7 +527,7 @@ async function stopDaemon() {
   return { ok: true, message: `Daemon pid=${pid} force-killed` };
 }
 
-async function readJsonSafe(filePath, fallback) {
+async function readJsonSafe<T>(filePath: string, fallback: T): Promise<T> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
     return JSON.parse(raw);
@@ -522,7 +536,7 @@ async function readJsonSafe(filePath, fallback) {
   }
 }
 
-async function readTailLines(filePath, maxLines) {
+async function readTailLines(filePath: string, maxLines: number): Promise<string[]> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const lines = raw.split(/\r?\n/).filter(Boolean);
@@ -532,7 +546,7 @@ async function readTailLines(filePath, maxLines) {
   }
 }
 
-function isProcessAlive(pid) {
+function isProcessAlive(pid: number | string | null | undefined): boolean {
   const n = Number(pid || 0);
   if (!Number.isFinite(n) || n <= 0) {
     return false;
@@ -556,7 +570,7 @@ async function getDaemonStatus() {
   };
 }
 
-function getRollingWindowRangeUtc(days) {
+function getRollingWindowRangeUtc(days: number): { startingAt: string; endingAt: string } {
   const now = new Date();
   const endingAt = new Date(Date.UTC(
     now.getUTCFullYear(),
@@ -591,7 +605,7 @@ function getCurrentUtcYearMonth() {
   };
 }
 
-function toFiniteNumber(value) {
+function toFiniteNumber(value: unknown): number | null {
   if (value === null || value === undefined) {
     return null;
   }
@@ -602,7 +616,7 @@ function toFiniteNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function parseCopilotUsageFromSummary(payload) {
+function parseCopilotUsageFromSummary(payload: Record<string, any>): { quota: number | null; used: number | null; remaining: number | null; byModel?: unknown[] } | null {
   // Handle the /users/{username}/settings/billing/premium_request/usage response shape:
   // { timePeriod, user, usageItems: [{ product, sku, grossQuantity, netQuantity, ... }] }
   if (Array.isArray(payload?.usageItems)) {
@@ -1144,7 +1158,7 @@ function getMonthKey() {
   return `${d.getUTCFullYear()}-${m}`;
 }
 
-function deriveProjectLabel(targetRepo, packageName) {
+function deriveProjectLabel(targetRepo: string, packageName: string | null): string {
   if (DASHBOARD_PROJECT_LABEL) {
     return DASHBOARD_PROJECT_LABEL;
   }
@@ -1158,7 +1172,7 @@ function deriveProjectLabel(targetRepo, packageName) {
   return String(packageName || "unknown");
 }
 
-function deriveTasks(prometheusAnalysis, workerSessions) {
+function deriveTasks(prometheusAnalysis: Record<string, any>, workerSessions: Record<string, any>): Record<string, any> {
   const allPlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
   // Filter out Issachar/Ezra scan-only tasks (removed from active plan)
   const plans = allPlans.filter(p => !/^(Issachar|Ezra)/i.test(String(p.role || "")));
@@ -1201,7 +1215,7 @@ function deriveTasks(prometheusAnalysis, workerSessions) {
   return { total: list.length, totals, list };
 }
 
-function deriveAlerts(alertsData) {
+function deriveAlerts(alertsData: Record<string, any>): Record<string, any> {
   const entries = Array.isArray(alertsData?.entries) ? alertsData.entries : [];
   const recent = entries.slice(-20);
   return {
@@ -1216,7 +1230,7 @@ function deriveAlerts(alertsData) {
   };
 }
 
-function derivePremiumUsageByWorker(log) {
+function derivePremiumUsageByWorker(log: any): Record<string, any> {
   const entries = Array.isArray(log) ? log : (Array.isArray(log?.entries) ? log.entries : []);
   const byWorker: Record<string, any> = {};
   for (const e of entries) {
@@ -1241,7 +1255,7 @@ function derivePremiumUsageByWorker(log) {
   return { totalRequests: entries.length, byWorker };
 }
 
-function derivePremiumEstimate(prometheusAnalysisRef, usedRequests, quota) {
+function derivePremiumEstimate(prometheusAnalysisRef: Record<string, any>, usedRequests: number | null, quota: number): Record<string, any> {
   const budget = prometheusAnalysisRef?.requestBudget || {};
   const estimated = Number(budget.estimatedPremiumRequestsTotal || 0);
   const confidence = String(budget.confidence || "").trim();
@@ -1274,7 +1288,7 @@ async function collectDashboardData() {
     premiumUsageLog,
     completedProjects
   ] = await Promise.all([
-    readJsonSafe(path.join(ROOT, "box.config.json"), {}),
+    readJsonSafe<Record<string, any>>(path.join(ROOT, "box.config.json"), {}),
     readTailLines(path.join(STATE_DIR, "progress.txt"), 80),
     getHourlyClaudeCost(),
     getHourlyCopilotUsage(),
@@ -4150,7 +4164,7 @@ function renderHtml() {
  * @param {string|undefined} authHeader - value of req.headers.authorization
  * @returns {{ ok: boolean, status: number, error: string } | { ok: true }}
  */
-export function checkDashboardAuth(authHeader) {
+export function checkDashboardAuth(authHeader: string | undefined): { ok: true } | { ok: false; status: number; error: string } {
   // Read token lazily — allows env injection in tests and avoids caching a secret in memory longer than needed.
   const token = process.env.BOX_DASHBOARD_TOKEN?.trim() || "";
 
@@ -4195,17 +4209,18 @@ export function checkDashboardAuth(authHeader) {
  * @param {http.ServerResponse} res
  * @returns {boolean}
  */
-function requireDashboardAuth(req, res) {
+function requireDashboardAuth(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const result = checkDashboardAuth(req.headers["authorization"]);
   if (!result.ok) {
-    res.writeHead(result.status, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: false, error: result.error }));
+    const fail = result as { ok: false; status: number; error: string };
+    res.writeHead(fail.status, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: fail.error }));
     return false;
   }
   return true;
 }
 
-async function serve(req, res) {
+async function serve(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
   if (url.pathname === "/api/force-rebase") {
@@ -4432,7 +4447,7 @@ let _server = null;
  * @param {{ port?: number }} [opts]
  * @returns {http.Server}
  */
-export function startDashboard(opts: any = {}) {
+export function startDashboard(opts: { port?: number } = {}): http.Server | null {
   if (_server) return _server;
   const port = Number(opts.port || PORT);
   _server = http.createServer((req, res) => {

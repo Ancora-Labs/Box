@@ -1,13 +1,14 @@
 import crypto from "node:crypto";
+import type http from "node:http";
+
+interface AuthSuccess { ok: true }
+interface AuthFailure { ok: false; status: number; error: string }
 
 /**
  * Verify a Bearer token from the Authorization header using a timing-safe comparison.
  * Returns an object describing the auth result.
- *
- * @param {string|undefined} authHeader - value of req.headers.authorization
- * @returns {{ ok: boolean, status: number, error: string } | { ok: true }}
  */
-export function checkDashboardAuth(authHeader) {
+export function checkDashboardAuth(authHeader: string | undefined): AuthSuccess | AuthFailure {
   // Read token lazily — allows env injection in tests and avoids caching a secret in memory longer than needed.
   const token = process.env.BOX_DASHBOARD_TOKEN?.trim() || "";
 
@@ -47,17 +48,14 @@ export function checkDashboardAuth(authHeader) {
  * Enforce Bearer token auth on a mutation request.
  * Writes a JSON error response and returns false if the request is not authorized.
  * Returns true if the caller should proceed.
- *
- * @param {http.IncomingMessage} req
- * @param {http.ServerResponse} res
- * @returns {boolean}
  */
-export function requireDashboardAuth(req, res) {
+export function requireDashboardAuth(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const result = checkDashboardAuth(req.headers["authorization"]);
   if (!result.ok) {
-    res.writeHead(result.status, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: false, error: result.error }));
+    const fail = result as AuthFailure;
+    res.writeHead(fail.status, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: fail.error }));
     return false;
   }
   return true;
-}
+}
