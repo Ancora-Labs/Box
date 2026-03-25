@@ -1082,3 +1082,4 @@ Central monitor report includes:
 - `leadership.jesus`
 
 This enables direct rendering of Worker/Moses/Jesus views in live monitoring surfaces
+This enables direct rendering of Worker/Moses/Jesus views in live monitoring surfaces.
