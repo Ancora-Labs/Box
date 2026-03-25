@@ -113,6 +113,94 @@ describe("plan_contract_validator", () => {
       assert.equal(result.valid, false);
       assert.ok(result.violations.some(v => v.field === "verification" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
     });
+
+    it("rejects verification referencing a non-existent test file", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "worker",
+        wave: 1,
+        verification: "node --import tsx --test tests/core/does_not_exist_12345.test.ts",
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v =>
+        v.field === "verification"
+        && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+        && String(v.message).includes("non-existent test file")
+      ));
+    });
+
+    it("allows verification referencing an existing test file", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "worker",
+        wave: 1,
+        verification: "node --import tsx --test tests/core/plan_contract_validator.test.ts",
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, true);
+      assert.equal(result.violations.length, 0);
+    });
+
+    it("rejects context overflow continuation for non evolution workers", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "backend-worker",
+        wave: 1,
+        verification: "npm test",
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+        contextOverflowFollowUpAllowed: true,
+        contextOverflowReason: "needs more room"
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v => v.field === "contextOverflowFollowUpAllowed" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+    });
+
+    it("requires context overflow reason when evolution worker requests overflow continuation", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "evolution-worker",
+        wave: 1,
+        verification: "npm test",
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+        contextOverflowFollowUpAllowed: true,
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v => v.field === "contextOverflowReason" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+    });
+
+    it("allows Prometheus worker fan-out when each task is independently single-call", () => {
+      const plans = [
+        {
+          task: "Add regression coverage for governance pre-dispatch gate",
+          role: "evolution-worker",
+          wave: 1,
+          verification: "node --import tsx --test tests/core/plan_contract_validator.test.ts",
+          dependencies: [],
+          acceptance_criteria: ["Test file executes", "Gate scenario is asserted"]
+        },
+        {
+          task: "Tighten reviewer payload normalization in provider boundary",
+          role: "evolution-worker",
+          wave: 1,
+          verification: "node --import tsx --test tests/core/plan_contract_validator.test.ts",
+          dependencies: [],
+          acceptance_criteria: ["Normalization path is covered", "Invalid payload is rejected"]
+        }
+      ];
+
+      const result = validateAllPlans(plans);
+      assert.equal(result.invalidCount, 0);
+      assert.equal(result.passRate, 1);
+    });
   });
 
   describe("validateAllPlans", () => {

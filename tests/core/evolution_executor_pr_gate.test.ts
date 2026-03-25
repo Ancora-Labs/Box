@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   assessStatusCheckRollup,
+  getArtifactGateGaps,
   injectAthenaMissingItems,
   hardenTaskForAthena,
   repairPrometheusTask,
@@ -166,5 +167,34 @@ describe("Athena missing-item injection", () => {
 
     assert.ok(updated.scope.includes("Need deterministic degraded state definition"));
     assert.ok(updated.acceptance_criteria.some(c => c.includes("Need deterministic degraded state definition")));
+  });
+});
+
+describe("evolution executor artifact gate gaps", () => {
+  it("includes SHA gap when SHA is missing", () => {
+    const gaps = getArtifactGateGaps({
+      hasSha: false,
+      hasTestOutput: true,
+      hasUnfilledPlaceholder: false
+    });
+    assert.ok(gaps.some(g => /sha/i.test(g)));
+  });
+
+  it("includes raw npm output gap when test output is missing", () => {
+    const gaps = getArtifactGateGaps({
+      hasSha: true,
+      hasTestOutput: false,
+      hasUnfilledPlaceholder: false
+    });
+    assert.ok(gaps.some(g => /raw npm test output/i.test(g)));
+  });
+
+  it("includes placeholder gap when output contains placeholder text", () => {
+    const gaps = getArtifactGateGaps({
+      hasSha: true,
+      hasTestOutput: true,
+      hasUnfilledPlaceholder: true
+    });
+    assert.ok(gaps.some(g => /POST_MERGE_TEST_OUTPUT/i.test(g)));
   });
 });

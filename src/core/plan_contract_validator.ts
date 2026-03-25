@@ -10,6 +10,8 @@
  */
 
 import { checkForbiddenCommands } from "./verification_command_registry.js";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 /**
  * Plan contract violation severity levels.
@@ -19,6 +21,16 @@ export const PLAN_VIOLATION_SEVERITY = Object.freeze({
   CRITICAL: "critical",
   WARNING: "warning",
 });
+
+function extractReferencedTestFiles(commandText) {
+  const normalized = String(commandText || "").replace(/\\/g, "/");
+  const regex = /(?:^|[\s"'`])((?:tests?)\/[A-Za-z0-9_./-]+\.(?:test|spec)\.(?:[cm]?ts|[cm]?js))(?=$|[\s"'`,;:)\]])/gi;
+  const files = [];
+  for (const match of normalized.matchAll(regex)) {
+    if (match[1]) files.push(match[1]);
+  }
+  return [...new Set(files)];
+}
 
 /**
  * Validate a single plan against the contract schema.
@@ -60,12 +72,54 @@ export function validatePlanContract(plan) {
     violations.push({ field: "acceptance_criteria", message: "Acceptance criteria must be a non-empty array — plans without measurable AC are rejected", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
   }
 
+  if (plan.contextOverflowFollowUpAllowed === true) {
+    if (String(plan.role || "").trim().toLowerCase() !== "evolution-worker") {
+      violations.push({
+        field: "contextOverflowFollowUpAllowed",
+        message: "Only evolution-worker may request a second premium request for context overflow",
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+      });
+    }
+    if (String(plan.contextOverflowReason || "").trim().length === 0) {
+      violations.push({
+        field: "contextOverflowReason",
+        message: "contextOverflowReason is required when contextOverflowFollowUpAllowed=true",
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+      });
+    }
+  }
+
   // Forbidden verification command gate (Packet 5) — uses centralized registry
   const verif = String(plan.verification || "");
   const forbidden = checkForbiddenCommands(verif);
   if (forbidden.forbidden) {
     for (const v of forbidden.violations) {
       violations.push({ field: "verification", message: `Forbidden command: ${v.reason}`, severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+    }
+  }
+
+  // Verification target existence gate: block plans that reference non-existent
+  // test files in verification strings/commands.
+  const verificationTexts = [
+    String(plan.verification || ""),
+    ...(Array.isArray(plan.verification_commands)
+      ? plan.verification_commands.map((v) => String(v || ""))
+      : [])
+  ];
+  const referencedFiles = new Set();
+  for (const text of verificationTexts) {
+    for (const file of extractReferencedTestFiles(text)) {
+      referencedFiles.add(file);
+    }
+  }
+  for (const relativeFile of referencedFiles) {
+    const absolutePath = path.resolve(process.cwd(), relativeFile);
+    if (!existsSync(absolutePath)) {
+      violations.push({
+        field: "verification",
+        message: `Verification references non-existent test file: ${relativeFile}`,
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+      });
     }
   }
 

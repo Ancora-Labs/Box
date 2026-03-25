@@ -466,6 +466,58 @@ export function computeDecisionQualityLabel(outcome) {
   };
 }
 
+async function loadAthenaPostmortemHistory(config, stateDir) {
+  const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
+  const rawPostmortems = await readJson(postmortemsFilePath, null);
+  if (rawPostmortems === null) {
+    return { history: [], postmortemsFilePath };
+  }
+
+  const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+  if (!migrated.ok) {
+    await recordMigrationTelemetry(stateDir, {
+      fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
+      filePath: postmortemsFilePath,
+      fromVersion: migrated.fromVersion,
+      toVersion: migrated.toVersion,
+      success: false,
+      reason: migrated.reason
+    });
+    if (migrated.reason === MIGRATION_REASON.UNKNOWN_FUTURE_VERSION) {
+      await appendProgress(config,
+        `[ATHENA] WARNING: athena_postmortems.json has unknown future schemaVersion (${migrated.fromVersion}) — ignoring history to avoid data corruption`
+      );
+    }
+    return { history: [], postmortemsFilePath };
+  }
+
+  if (migrated.reason === MIGRATION_REASON.OK) {
+    await recordMigrationTelemetry(stateDir, {
+      fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
+      filePath: postmortemsFilePath,
+      fromVersion: migrated.fromVersion,
+      toVersion: migrated.toVersion,
+      success: true,
+      reason: migrated.reason
+    });
+  }
+
+  return {
+    history: extractPostmortemEntries(migrated.data),
+    postmortemsFilePath
+  };
+}
+
+async function persistAthenaPostmortemHistory(stateDir, postmortemsFilePath, history, latestPostmortem) {
+  const boundedHistory = Array.isArray(history) ? [...history] : [];
+  if (boundedHistory.length > 50) boundedHistory.splice(0, boundedHistory.length - 50);
+  await writeJson(postmortemsFilePath, addSchemaVersion(boundedHistory, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
+  if (latestPostmortem) {
+    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), latestPostmortem);
+  }
+  return boundedHistory;
+}
+
 /**
  * Normalize the decisionQualityLabel field on a postmortem entry.
  * For legacy entries that pre-date T-012, the field will be absent — default to inconclusive.
@@ -1306,6 +1358,19 @@ function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
   };
 }
 
+function buildFallbackPostmortem(workerName, workerStatus, dql) {
+  return {
+    workerName,
+    taskCompleted: workerStatus === "done",
+    recommendation: "proceed",
+    lessonLearned: "",
+    decisionQualityLabel: dql.label,
+    decisionQualityLabelReason: dql.reason,
+    decisionQualityStatus: dql.status,
+    reviewedAt: new Date().toISOString()
+  };
+}
+
 // ── Postmortem (post-work review) ────────────────────────────────────────────
 
 export async function runAthenaPostmortem(config, workerResult, originalPlan) {
@@ -1357,17 +1422,8 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
     chatLog(stateDir, athenaName, `Deterministic postmortem: ${workerName} — clean pass, AI call skipped`);
 
     // Persist to history
-    const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
-    const rawPostmortems = await readJson(postmortemsFilePath, null);
-    let history = [];
-    if (rawPostmortems !== null) {
-      const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
-      history = migrated.ok ? extractPostmortemEntries(migrated.data) : [];
-    }
-    history.push(postmortem);
-    if (history.length > 50) history.splice(0, history.length - 50);
-    await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
-    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
+    const { history, postmortemsFilePath } = await loadAthenaPostmortemHistory(config, stateDir);
+    await persistAthenaPostmortemHistory(stateDir, postmortemsFilePath, [...history, postmortem], postmortem);
 
     return postmortem;
   }
@@ -1377,44 +1433,7 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   const planContext = String(originalPlan?.context || "").slice(0, 2000);
 
   // Load previous postmortems for learning — migrate v0→v1 on read
-  const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
-  const rawPostmortems = await readJson(postmortemsFilePath, null);
-  let pastPostmortems;
-  if (rawPostmortems !== null) {
-    const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
-    if (!migrated.ok) {
-      // Unknown future version or corrupt — fail closed, log telemetry, degrade gracefully
-      await recordMigrationTelemetry(stateDir, {
-        fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
-        filePath: postmortemsFilePath,
-        fromVersion: migrated.fromVersion,
-        toVersion: migrated.toVersion,
-        success: false,
-        reason: migrated.reason
-      });
-      if (migrated.reason === MIGRATION_REASON.UNKNOWN_FUTURE_VERSION) {
-        await appendProgress(config,
-          `[ATHENA] WARNING: athena_postmortems.json has unknown future schemaVersion (${migrated.fromVersion}) — ignoring history to avoid data corruption`
-        );
-      }
-      pastPostmortems = [];
-    } else {
-      if (migrated.reason === MIGRATION_REASON.OK) {
-        // Record telemetry only for actual migrations (not ALREADY_CURRENT)
-        await recordMigrationTelemetry(stateDir, {
-          fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
-          filePath: postmortemsFilePath,
-          fromVersion: migrated.fromVersion,
-          toVersion: migrated.toVersion,
-          success: true,
-          reason: migrated.reason
-        });
-      }
-      pastPostmortems = extractPostmortemEntries(migrated.data);
-    }
-  } else {
-    pastPostmortems = [];
-  }
+  const { history: pastPostmortems, postmortemsFilePath } = await loadAthenaPostmortemHistory(config, stateDir);
 
   // Rank past lessons by time-decayed relevance (lesson_halflife integration)
   const rankedLessons = rankLessonsByRelevance(pastPostmortems, { limit: 5 });
@@ -1441,10 +1460,7 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
     };
     await appendProgress(config, `[ATHENA] Duplicate result detected for ${workerName} — reusing last postmortem (review-on-delta)`);
     chatLog(stateDir, athenaName, `Duplicate result: ${workerName} — AI call skipped`);
-    pastPostmortems.push(dupPm);
-    if (pastPostmortems.length > 50) pastPostmortems.splice(0, pastPostmortems.length - 50);
-    await writeJson(postmortemsFilePath, addSchemaVersion(pastPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
-    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), dupPm);
+    await persistAthenaPostmortemHistory(stateDir, postmortemsFilePath, [...pastPostmortems, dupPm], dupPm);
     return dupPm;
   }
 
@@ -1510,16 +1526,7 @@ ${recurrenceContext}
   if (!aiResult.ok || !aiResult.parsed) {
     await appendProgress(config, `[ATHENA] Postmortem AI call failed — ${(aiResult as any).error || "no JSON"}`);
     chatLog(stateDir, athenaName, `Postmortem AI failed: ${(aiResult as any).error || "no JSON"}`);
-    return {
-      workerName,
-      taskCompleted: workerStatus === "done",
-      recommendation: "proceed",
-      lessonLearned: "",
-      decisionQualityLabel: dql.label,
-      decisionQualityLabelReason: dql.reason,
-      decisionQualityStatus: dql.status,
-      reviewedAt: new Date().toISOString()
-    };
+    return buildFallbackPostmortem(workerName, workerStatus, dql);
   }
 
   logAgentThinking(stateDir, athenaName, aiResult.thinking);
@@ -1554,13 +1561,7 @@ ${recurrenceContext}
   (postmortem as any).defectChannelTag = dc.tag;
 
   // Append to postmortem history (keep last 50)
-  const history = Array.isArray(pastPostmortems) ? pastPostmortems : [];
-  history.push(postmortem);
-  if (history.length > 50) history.splice(0, history.length - 50);
-  await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
-
-  // Also write latest for dashboard visibility
-  await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
+  await persistAthenaPostmortemHistory(stateDir, postmortemsFilePath, [...pastPostmortems, postmortem], postmortem);
 
   await appendProgress(config,
     `[ATHENA] Postmortem: ${workerName} — score=${postmortem.qualityScore}/10 deviation=${postmortem.deviation} recommendation=${postmortem.recommendation} decisionQualityLabel=${postmortem.decisionQualityLabel}`
@@ -1570,4 +1571,211 @@ ${recurrenceContext}
   );
 
   return postmortem;
+}
+
+export async function runAthenaBatchPostmortem(config, reviewItems = []) {
+  const stateDir = config.paths?.stateDir || "state";
+  const registry = getRoleRegistry(config);
+  const athenaName = registry?.qualityReviewer?.name || "Athena";
+  const athenaModel = registry?.qualityReviewer?.model || "Claude Sonnet 4.6";
+  const command = config.env?.copilotCliCommand || "copilot";
+  const items = Array.isArray(reviewItems) ? reviewItems.filter(Boolean) : [];
+
+  if (items.length === 0) return [];
+
+  await appendProgress(config, `[ATHENA] Batch postmortem starting — reviewing ${items.length} worker result(s)`);
+  chatLog(stateDir, athenaName, `Batch postmortem starting for ${items.length} worker result(s)...`);
+
+  const { history: pastPostmortems, postmortemsFilePath } = await loadAthenaPostmortemHistory(config, stateDir);
+  const forceAi = config?.athena?.forceAiPostmortem === true;
+  const rankedLessons = rankLessonsByRelevance(pastPostmortems, { limit: 5 });
+  const recentLessons = rankedLessons.length > 0
+    ? rankedLessons.map(l => `${l.lesson} (relevance=${l.weight.toFixed(2)})`).join("\n  - ")
+    : pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ");
+  const recurrenceMatches = detectRecurrences(pastPostmortems);
+  const recurrenceContext = recurrenceMatches.length > 0
+    ? `\n\nRECURRING PATTERNS (${recurrenceMatches.length}):\n${recurrenceMatches.map(r => `- ${r.pattern} (count=${r.count}, severity=${r.severity})`).join("\n")}`
+    : "";
+
+  const finalized = [];
+  const pendingAi = [];
+
+  for (let reviewIndex = 0; reviewIndex < items.length; reviewIndex++) {
+    const entry = items[reviewIndex] || {};
+    const workerResult = entry.workerResult || entry.result || {};
+    const originalPlan = entry.originalPlan || entry.plan || {};
+    const workerName = workerResult?.roleName || workerResult?.role || originalPlan?.role || `worker-${reviewIndex + 1}`;
+    const workerStatus = workerResult?.status || "unknown";
+    const workerPr = workerResult?.pr || workerResult?.prUrl || "none";
+    const rawOutcome = workerResult?.outcome
+      || (workerStatus === "done" && workerPr !== "none" ? "merged" : null)
+      || (workerStatus === "timeout" ? "timeout" : null)
+      || (workerStatus === "rollback" ? "rollback" : null)
+      || null;
+    const dql = computeDecisionQualityLabel(rawOutcome);
+    const verificationPassed = workerResult?.verificationPassed;
+    const isCleanPass = workerStatus === "done"
+      && verificationPassed === true
+      && workerResult?.verificationEvidence?.build === "pass"
+      && workerResult?.verificationEvidence?.tests === "pass";
+
+    if (isCleanPass && !forceAi) {
+      finalized.push({ reviewIndex, postmortem: computeDeterministicPostmortem(workerResult, originalPlan, dql) });
+      continue;
+    }
+
+    const comparisonHistory = [...pastPostmortems, ...finalized.map(item => item.postmortem)];
+    if (isDuplicateResult(workerResult, comparisonHistory)) {
+      const lastPm = comparisonHistory[comparisonHistory.length - 1];
+      finalized.push({
+        reviewIndex,
+        postmortem: {
+          ...lastPm,
+          reviewedAt: new Date().toISOString(),
+          model: "duplicate-skip",
+          decisionQualityLabel: dql.label,
+          decisionQualityLabelReason: dql.reason,
+          decisionQualityStatus: dql.status,
+        }
+      });
+      continue;
+    }
+
+    pendingAi.push({
+      reviewIndex,
+      workerResult,
+      originalPlan,
+      workerName,
+      workerStatus,
+      workerPr,
+      dql,
+      filesChanged: workerResult?.filesChanged || workerResult?.filesTouched || "unknown",
+      workerSummary: workerResult?.summary || workerResult?.raw?.slice(0, 2000) || "no summary",
+      verificationOutput: workerResult?.verificationOutput || null,
+      verificationPassed,
+      preReviewAssessment: workerResult?.preReviewAssessment || null,
+      preReviewIssues: Array.isArray(workerResult?.preReviewIssues) ? workerResult.preReviewIssues : []
+    });
+  }
+
+  if (pendingAi.length > 0) {
+    const batchSummary = pendingAi.map((entry) => {
+      const planTask = entry.originalPlan?.task || "unknown task";
+      const planVerification = entry.originalPlan?.verification || "no verification defined";
+      const planContext = String(entry.originalPlan?.context || "").slice(0, 1500);
+      return `ReviewIndex: ${entry.reviewIndex}
+Worker: ${entry.workerName}
+Status: ${entry.workerStatus}
+PR: ${entry.workerPr}
+Files Changed: ${entry.filesChanged}
+Task: ${planTask}
+Expected Verification: ${planVerification}
+Plan Context: ${planContext}
+Summary: ${entry.workerSummary}
+Local Verification Passed: ${entry.verificationPassed !== undefined ? entry.verificationPassed : "unknown"}
+Local Verification Output: ${entry.verificationOutput || "(not available)"}
+Pre-Review Assessment: ${entry.preReviewAssessment || "(no pre-review data)"}
+Pre-Review Issues: ${entry.preReviewIssues.length > 0 ? entry.preReviewIssues.join("; ") : "none"}`;
+    }).join("\n\n---\n\n");
+
+    const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
+
+## YOUR MISSION — BATCH POSTMORTEM REVIEW
+
+You are Athena — BOX Quality Gate & Postmortem Reviewer.
+Multiple workers have completed their tasks in the same cycle.
+Review ALL worker results in this single response and return one postmortem record per worker.
+
+## RECENT LESSONS LEARNED (ranked by relevance)
+${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
+${recurrenceContext}
+
+## WORKER RESULTS TO REVIEW
+
+${batchSummary}
+
+## OUTPUT FORMAT
+
+===DECISION===
+{
+  "postmortems": [
+    {
+      "reviewIndex": 0,
+      "workerName": "worker name",
+      "taskCompleted": true,
+      "expectedOutcome": "what was supposed to happen",
+      "actualOutcome": "what actually happened",
+      "deviation": "none | minor | major",
+      "successCriteriaMet": true,
+      "lessonLearned": "one clear, actionable lesson for future cycles",
+      "qualityScore": 1-10,
+      "followUpNeeded": false,
+      "followUpTask": "",
+      "recommendation": "proceed | rework | escalate"
+    }
+  ]
+}
+===END===`;
+
+    const aiResult = await callCopilotAgent(command, "athena", contextPrompt, config, athenaModel);
+    if (!aiResult.ok || !aiResult.parsed) {
+      await appendProgress(config, `[ATHENA] Batch postmortem AI call failed — ${(aiResult as any).error || "no JSON"}`);
+      chatLog(stateDir, athenaName, `Batch postmortem AI failed: ${(aiResult as any).error || "no JSON"}`);
+      for (const entry of pendingAi) {
+        finalized.push({ reviewIndex: entry.reviewIndex, postmortem: buildFallbackPostmortem(entry.workerName, entry.workerStatus, entry.dql) });
+      }
+    } else {
+      logAgentThinking(stateDir, athenaName, aiResult.thinking);
+      const aiPostmortems = Array.isArray(aiResult.parsed?.postmortems) ? aiResult.parsed.postmortems : [];
+      for (const entry of pendingAi) {
+        const matched = aiPostmortems.find(item => Number(item?.reviewIndex) === entry.reviewIndex)
+          || aiPostmortems.find(item => String(item?.workerName || "").trim().toLowerCase() === String(entry.workerName || "").trim().toLowerCase());
+        if (!matched) {
+          finalized.push({ reviewIndex: entry.reviewIndex, postmortem: buildFallbackPostmortem(entry.workerName, entry.workerStatus, entry.dql) });
+          continue;
+        }
+
+        const postmortem = {
+          workerName: matched.workerName || entry.workerName,
+          taskCompleted: matched.taskCompleted !== false,
+          expectedOutcome: matched.expectedOutcome || "",
+          actualOutcome: matched.actualOutcome || "",
+          deviation: matched.deviation || "none",
+          successCriteriaMet: matched.successCriteriaMet !== false,
+          lessonLearned: matched.lessonLearned || "",
+          qualityScore: matched.qualityScore || 0,
+          followUpNeeded: matched.followUpNeeded === true,
+          followUpTask: matched.followUpTask || "",
+          recommendation: matched.recommendation || "proceed",
+          decisionQualityLabel: entry.dql.label,
+          decisionQualityLabelReason: entry.dql.reason,
+          decisionQualityStatus: entry.dql.status,
+          reviewedAt: new Date().toISOString(),
+          model: athenaModel
+        };
+        const dc = classifyDefectChannel({
+          deviation: postmortem.deviation,
+          lessonLearned: postmortem.lessonLearned,
+          actualOutcome: postmortem.actualOutcome
+        });
+        postmortem.defectChannel = dc.channel;
+        postmortem.defectChannelTag = dc.tag;
+        finalized.push({ reviewIndex: entry.reviewIndex, postmortem });
+      }
+    }
+  }
+
+  const orderedPostmortems = finalized.sort((a, b) => a.reviewIndex - b.reviewIndex).map(item => item.postmortem);
+  if (orderedPostmortems.length > 0) {
+    await persistAthenaPostmortemHistory(
+      stateDir,
+      postmortemsFilePath,
+      [...pastPostmortems, ...orderedPostmortems],
+      orderedPostmortems[orderedPostmortems.length - 1]
+    );
+  }
+
+  await appendProgress(config, `[ATHENA] Batch postmortem complete — reviewed ${orderedPostmortems.length} worker(s) in one call`);
+  chatLog(stateDir, athenaName, `Batch postmortem complete: ${orderedPostmortems.length} worker(s) reviewed`);
+  return orderedPostmortems;
 }

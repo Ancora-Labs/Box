@@ -138,6 +138,20 @@ export function shouldHaltOnPreReviewReject(config: any = {}) {
   return config.runtime?.evolutionStopOnPreReviewReject === true;
 }
 
+export function getArtifactGateGaps(artifact: {
+  hasSha?: boolean;
+  hasTestOutput?: boolean;
+  hasUnfilledPlaceholder?: boolean;
+}) {
+  const gaps: string[] = [];
+  if (!artifact?.hasSha) gaps.push("post-merge git SHA missing from worker output");
+  if (!artifact?.hasTestOutput) gaps.push("raw npm test output block missing from worker output");
+  if (artifact?.hasUnfilledPlaceholder) {
+    gaps.push("placeholder POST_MERGE_TEST_OUTPUT found in worker output");
+  }
+  return gaps;
+}
+
 function normalizeStringList(value) {
   const list = Array.isArray(value) ? value : [];
   return list.map(v => String(v || "").trim()).filter(Boolean);
@@ -770,9 +784,7 @@ export async function runEvolutionLoop(config, options: any = {}) {
       // and raw npm test output to prove the change was actually committed and tested.
       const artifact = checkPostMergeArtifact(workerResult.fullOutput || workerResult.summary || "");
       if (!artifact.hasArtifact) {
-        const gaps: string[] = [];
-        if (!artifact.hasSha) gaps.push("post-merge git SHA missing from worker output");
-        if (!artifact.hasTestOutput) gaps.push("raw npm test output block missing from worker output");
+        const gaps = getArtifactGateGaps(artifact);
         taskState.status = "rework";
         taskState.error = `artifact-gate: ${gaps.join("; ")}`;
         await appendProgress(config, `[EVO] ${task.task_id} — artifact gate failed: ${gaps.join("; ")}`);

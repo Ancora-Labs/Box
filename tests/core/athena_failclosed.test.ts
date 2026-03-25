@@ -14,7 +14,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
-import { runAthenaPlanReview } from "../../src/core/athena_reviewer.js";
+import { runAthenaPlanReview, runAthenaBatchPostmortem } from "../../src/core/athena_reviewer.js";
 import { runOnce } from "../../src/core/orchestrator.js";
 import { ALERT_SEVERITY } from "../../src/core/state_tracker.js";
 
@@ -157,6 +157,73 @@ describe("runAthenaPlanReview — fail-closed on AI failure", () => {
     const reviewExists = await fs.access(reviewFile).then(() => true).catch(() => false);
     assert.equal(reviewExists, false,
       "athena_plan_review.json must not be written when AI call fails");
+  });
+});
+
+describe("runAthenaBatchPostmortem", () => {
+  let tmpDir;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-athena-batch-"));
+    await fs.writeFile(path.join(tmpDir, "policy.json"), JSON.stringify({ blockedCommands: [] }), "utf8");
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("writes one postmortem entry per worker result in a single batch review", async () => {
+    const config = makeConfig(tmpDir);
+    const results = await runAthenaBatchPostmortem(config, [
+      {
+        originalPlan: { task: "Task A", verification: "npm test" },
+        workerResult: {
+          roleName: "King David",
+          status: "done",
+          verificationPassed: true,
+          verificationEvidence: { build: "pass", tests: "pass" },
+          summary: "Task A done"
+        }
+      },
+      {
+        originalPlan: { task: "Task B", verification: "npm test" },
+        workerResult: {
+          roleName: "Esther",
+          status: "done",
+          verificationPassed: true,
+          verificationEvidence: { build: "pass", tests: "pass" },
+          summary: "Task B done"
+        }
+      }
+    ]);
+
+    assert.equal(results.length, 2);
+
+    const persisted = JSON.parse(await fs.readFile(path.join(tmpDir, "athena_postmortems.json"), "utf8"));
+    const entries = Array.isArray(persisted.entries) ? persisted.entries : persisted;
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].workerName, "King David");
+    assert.equal(entries[1].workerName, "Esther");
+  });
+
+  it("falls back to deterministic placeholder records when the batch AI call fails", async () => {
+    const config = makeConfig(tmpDir);
+    const results = await runAthenaBatchPostmortem(config, [
+      {
+        originalPlan: { task: "Task A", verification: "npm test" },
+        workerResult: {
+          roleName: "King David",
+          status: "partial",
+          verificationPassed: false,
+          verificationEvidence: { build: "fail", tests: "fail" },
+          summary: "Task A partial"
+        }
+      }
+    ]);
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].workerName, "King David");
+    assert.equal(results[0].decisionQualityLabel, "inconclusive");
   });
 });
 

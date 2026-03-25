@@ -55,6 +55,7 @@ export function buildPrometheusPlanningPolicy(config) {
     maxTasks,
     maxWorkersPerWave,
     preferFewestWorkers: planner.preferFewestWorkers !== false,
+    allowPrometheusLoadBasedWorkerFanout: planner.allowPrometheusLoadBasedWorkerFanout !== false,
     allowSameCycleFollowUps: Boolean(planner.allowSameCycleFollowUps),
     requireDependencyAwareWaves: planner.requireDependencyAwareWaves !== false,
     enforcePrometheusExecutionStrategy: planner.enforcePrometheusExecutionStrategy !== false
@@ -375,6 +376,12 @@ function buildExecutionStrategyFromPlans(plans = []) {
 }
 
 function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}) {
+  const countWorkerRequestsForPlan = (plan) => {
+    const role = String(plan?.role || "evolution-worker").trim().toLowerCase();
+    const overflowAllowed = role === "evolution-worker" && plan?.contextOverflowFollowUpAllowed === true;
+    return overflowAllowed ? 2 : 1;
+  };
+
   const waves = Array.isArray(executionStrategy.waves) ? executionStrategy.waves : [];
   const byWave = waves.map((w) => {
     const waveNum = Number.isFinite(Number(w.wave)) ? Number(w.wave) : 1;
@@ -384,7 +391,7 @@ function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}
       wave: waveNum,
       planCount: wavePlans.length,
       roles,
-      estimatedRequests: wavePlans.length > 0 ? 2 : 0
+      estimatedRequests: wavePlans.reduce((sum, plan) => sum + countWorkerRequestsForPlan(plan) + 1, 0)
     };
   });
 
@@ -396,7 +403,9 @@ function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}
   const byRole = [...byRoleMap.entries()].map(([role, planCount]) => ({
     role,
     planCount,
-    estimatedRequests: planCount
+    estimatedRequests: plans
+      .filter((plan) => String(plan.role || "evolution-worker") === role)
+      .reduce((sum, plan) => sum + countWorkerRequestsForPlan(plan), 0)
   }));
 
   const estimatedPremiumRequestsTotal = Math.max(1, 3 + byWave.reduce((acc, w) => acc + w.estimatedRequests, 0));
@@ -410,7 +419,8 @@ function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}
     byRole,
     assumptions: [
       "1 Jesus + 1 Prometheus + 1 Athena plan review per cycle",
-      "~2 requests per execution wave for worker+postmortem envelope"
+      "Each worker task must fit in 1 premium request; each completed worker also triggers 1 Athena postmortem request",
+      "Only evolution-worker may consume a second premium request, and only for explicit context-overflow continuation"
     ]
   };
 }
@@ -444,10 +454,16 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
   const beforeAfter = deriveBeforeAfterState(src, taskText, normalizedAcceptanceCriteria);
   const riskLevel = String(src.riskLevel || "").trim().toLowerCase() || inferRiskLevel(taskText);
   const premortem = ensureValidPremortem(riskLevel, src.premortem, taskText, targetFiles);
+  const rawContextOverflowFlag = src.contextOverflowFollowUpAllowed === true || src.allowSecondRequestOnContextOverflow === true;
+  const normalizedRole = String(src.role || "evolution-worker").trim() || "evolution-worker";
+  const contextOverflowFollowUpAllowed = String(normalizedRole).toLowerCase() === "evolution-worker" && rawContextOverflowFlag;
+  const contextOverflowReason = contextOverflowFollowUpAllowed
+    ? String(src.contextOverflowReason || src.secondRequestReason || "").trim()
+    : "";
 
   return {
     ...src,
-    role: String(src.role || "evolution-worker").trim() || "evolution-worker",
+    role: normalizedRole,
     task: taskText,
     priority: Number.isFinite(Number(src.priority)) ? Number(src.priority) : index + 1,
     wave,
@@ -471,6 +487,8 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
       : [],
     riskLevel,
     premortem,
+    contextOverflowFollowUpAllowed,
+    contextOverflowReason,
   };
 }
 
@@ -1136,6 +1154,7 @@ You MUST answer these explicitly in a dedicated section titled "Mandatory Answer
 - maxTasks: ${planningPolicy.maxTasks > 0 ? planningPolicy.maxTasks : "UNLIMITED"}
 - maxWorkersPerWave: ${planningPolicy.maxWorkersPerWave}
 - preferFewestWorkers: ${planningPolicy.preferFewestWorkers}
+- allowPrometheusLoadBasedWorkerFanout: ${planningPolicy.allowPrometheusLoadBasedWorkerFanout}
 - requireDependencyAwareWaves: ${planningPolicy.requireDependencyAwareWaves}
 - If maxTasks is UNLIMITED, include ALL materially distinct actionable tasks you find.
 ${behaviorPatternsSection}${carryForwardSection}${repoFileListingSection}${repairFeedbackSection}
@@ -1189,6 +1208,8 @@ These rules are enforced by the quality gate. Violations cause plan rejection:
 5. **acceptance_criteria**: ≥2 items, each a concrete testable statement. Every item must be independently verifiable.
 6. **riskLevel + premortem**: Any task modifying orchestration paths, plan parsing, or dispatch logic is automatically high-risk and requires a compliant premortem.
 7. **requestBudget**: Compute byWave and byRole from actual plan distribution. Never emit _fallback:true. byWave and byRole arrays must not be empty if plans exist.
+8. **Worker request rule**: Prometheus may assign additional workers when task load genuinely justifies fan-out, but every assigned worker task must complete in exactly 1 premium request. Workers may not split a task into multiple premium requests. The only exception is role="evolution-worker" with contextOverflowFollowUpAllowed=true and a concrete contextOverflowReason explaining why a second call is needed only if context size is exhausted.
+9. **No hidden continuation by fan-out**: If you split work across multiple workers, each plan item must be independently completable in one call. Do not split one worker-sized task into multiple plan items just to bypass the single-call rule.
 
 Write the entire response in English only.
 If you include recommendations, rank them by capacity-increase leverage, not by fear or surface risk alone.
@@ -1223,11 +1244,14 @@ The JSON block must contain all of the following fields:
     "dependencies": [],
     "acceptance_criteria": ["...", "..."],
     "verification": "tests/core/foo.test.ts — test: expected description",
-    "premortem": null
+    "premortem": null,
+    "contextOverflowFollowUpAllowed": false,
+    "contextOverflowReason": ""
   }]
 }
 Do NOT omit target_files, before_state, after_state, scope, or acceptance_criteria from any plan entry.
 Do NOT emit requestBudget with _fallback:true — compute byWave and byRole from the actual plan list.
+Do NOT plan more than 1 premium request for any worker task unless role is evolution-worker and the only reason is explicit context-window overflow.
 Keep diagnostic findings in analysis or strategicNarrative and include only actionable redesign work in plans.
 Wrap the JSON companion with markers:
 

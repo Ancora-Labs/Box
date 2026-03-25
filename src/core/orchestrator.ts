@@ -22,7 +22,7 @@ import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, read
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
 import { runPrometheusAnalysis } from "./prometheus.js";
-import { runAthenaPlanReview, runAthenaPostmortem } from "./athena_reviewer.js";
+import { runAthenaPlanReview, runAthenaBatchPostmortem } from "./athena_reviewer.js";
 import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle, shouldTriggerSelfImprovement } from "./self_improvement.js";
 import { collectEvolutionMetrics } from "./evolution_metrics.js";
@@ -604,6 +604,96 @@ async function dispatchWorker(config, plan) {
   };
 }
 
+export function combineEvolutionWorkerPlans(plans = []) {
+  const sourcePlans = Array.isArray(plans) ? plans.filter(Boolean) : [];
+  if (sourcePlans.length <= 1) return sourcePlans;
+
+  const first = sourcePlans[0];
+  const combinedTaskLines = sourcePlans.map((plan, index) => {
+    const taskKind = String(plan?.taskKind || plan?.kind || "implementation");
+    const task = String(plan?.task || `task-${index + 1}`);
+    return `${index + 1}. [${taskKind}] ${task}`;
+  });
+
+  const combinedContextSections = sourcePlans.map((plan, index) => {
+    const verification = String(plan?.verification || "").trim() || "(none)";
+    const scope = String(plan?.scope || "").trim() || "(unspecified scope)";
+    const acceptance = Array.isArray(plan?.acceptance_criteria) && plan.acceptance_criteria.length > 0
+      ? plan.acceptance_criteria.map((criterion, criterionIndex) => `${criterionIndex + 1}. ${criterion}`).join("\n")
+      : "(no acceptance criteria)";
+    return [
+      `Subtask ${index + 1}: ${String(plan?.task || `task-${index + 1}`)}`,
+      `Task kind: ${String(plan?.taskKind || plan?.kind || "implementation")}`,
+      `Scope: ${scope}`,
+      `Verification: ${verification}`,
+      `Acceptance criteria:\n${acceptance}`,
+      `Additional context: ${String(plan?.context || "").trim() || "(none)"}`
+    ].join("\n");
+  });
+
+  const combinedVerification = sourcePlans
+    .map((plan) => String(plan?.verification || "").trim())
+    .filter(Boolean)
+    .join(" && ");
+
+  return [{
+    ...first,
+    task: `Complete this entire evolution batch in one worker call:\n${combinedTaskLines.join("\n")}`,
+    context: `You are receiving a batched evolution assignment created from multiple Prometheus plan items. Complete ALL subtasks in this single worker call.\n\n${combinedContextSections.join("\n\n---\n\n")}`,
+    verification: combinedVerification,
+    taskKind: "implementation",
+    acceptance_criteria: sourcePlans.flatMap((plan) => Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria : []),
+    _batchedPlans: sourcePlans
+  }];
+}
+
+export function batchEvolutionWorkerPlansForDispatch(plans = [], config = {}) {
+  const sourcePlans = Array.isArray(plans) ? plans.filter(Boolean) : [];
+  if (sourcePlans.length <= 1) return sourcePlans;
+
+  const contextLimit = Math.max(2000, Number(config?.runtime?.workerContextTokenLimit || 100000));
+  const roughCharBudget = Math.max(4000, Math.floor(contextLimit * 2.5));
+  const output = [];
+  const groups = new Map();
+
+  for (const plan of sourcePlans) {
+    const role = String(plan?.role || "").trim().toLowerCase();
+    const wave = Number.isFinite(Number(plan?.wave)) ? Number(plan.wave) : 1;
+    const key = `${role}::wave-${wave}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(plan);
+  }
+
+  for (const [, groupPlans] of groups) {
+    const firstRole = String(groupPlans[0]?.role || "").trim().toLowerCase();
+    if (firstRole !== "evolution-worker") {
+      output.push(...groupPlans);
+      continue;
+    }
+
+    let currentBucket = [];
+    let currentSize = 0;
+    for (const plan of groupPlans) {
+      const estimatedSize = String(plan?.task || "").length
+        + String(plan?.context || "").length
+        + String(plan?.verification || "").length
+        + JSON.stringify(plan?.acceptance_criteria || []).length;
+      if (currentBucket.length > 0 && currentSize + estimatedSize > roughCharBudget) {
+        output.push(...combineEvolutionWorkerPlans(currentBucket));
+        currentBucket = [];
+        currentSize = 0;
+      }
+      currentBucket.push(plan);
+      currentSize += estimatedSize;
+    }
+    if (currentBucket.length > 0) {
+      output.push(...combineEvolutionWorkerPlans(currentBucket));
+    }
+  }
+
+  return output;
+}
+
 // ── Count completed plans from worker state files ─────────────────────────
 
 async function countCompletedPlans(config, plans) {
@@ -880,6 +970,18 @@ async function runSingleCycle(config) {
     warn(`[orchestrator] Lane diversity check failed (non-fatal): ${String(err?.message || err)}`);
   }
 
+  const hasMultipleEvolutionPlans = plans.filter((plan) => String(plan?.role || "").trim().toLowerCase() === "evolution-worker").length > 1;
+  if (hasMultipleEvolutionPlans) {
+    const originalCount = plans.length;
+    const combinedPlans = batchEvolutionWorkerPlansForDispatch(plans, config);
+    plans.splice(0, plans.length, ...combinedPlans);
+    const batchedGroups = combinedPlans.filter((plan) => Array.isArray(plan?._batchedPlans) && plan._batchedPlans.length > 1);
+    if (batchedGroups.length > 0) {
+      const subtaskCount = batchedGroups.reduce((sum, plan) => sum + plan._batchedPlans.length, 0);
+      await appendProgress(config, `[CYCLE] Prometheus evolution tasks batched for single-call dispatch (${subtaskCount} subtasks -> ${batchedGroups.length} batch call(s); total plans ${originalCount} -> ${combinedPlans.length})`);
+    }
+  }
+
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
 
   // Pre-dispatch governance gate: single decision source for guardrail pause,
@@ -971,9 +1073,21 @@ async function runSingleCycle(config) {
     && prometheusAnalysis.dependencyGraph?.status !== "cycle_detected";
 
   let workersDone = 0;
+  const completedWorkerReviews = [];
+
+  const flushAthenaBatchPostmortem = async () => {
+    if (completedWorkerReviews.length === 0) return;
+    const pendingReviews = completedWorkerReviews.splice(0, completedWorkerReviews.length);
+    await appendProgress(config, `[CYCLE] ── Step 5: Athena batch postmortem for ${pendingReviews.length} worker(s) ──`);
+    try {
+      await runAthenaBatchPostmortem(config, pendingReviews);
+    } catch (err) {
+      await appendProgress(config, `[CYCLE] Athena batch postmortem failed: ${String(err?.message || err)}`);
+    }
+  };
 
   /**
-   * Dispatch a single plan (worker + postmortem). Shared by both paths.
+   * Dispatch a single plan (worker only). Athena postmortem runs as one batch later.
    * @returns {{ workerResult: object, plan: object }}
    */
   const dispatchOne = async (plan) => {
@@ -986,12 +1100,7 @@ async function runSingleCycle(config) {
       warn(`[orchestrator] worker dispatch error: ${msg}`);
       workerResult = { roleName: plan.role, status: "error", summary: msg };
     }
-    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${plan.role} ──`);
-    try {
-      await runAthenaPostmortem(config, workerResult, plan);
-    } catch (err) {
-      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${plan.role}: ${String(err?.message || err)}`);
-    }
+    completedWorkerReviews.push({ workerResult, originalPlan: plan });
     return { workerResult, plan };
   };
 
@@ -1008,6 +1117,7 @@ async function runSingleCycle(config) {
           const stopReq = await readStopRequest(config);
           if (stopReq?.requestedAt) {
             await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
+            await flushAthenaBatchPostmortem();
             return;
           }
 
@@ -1037,6 +1147,8 @@ async function runSingleCycle(config) {
           await waitForWorkersToFinish(config);
         }
 
+        await flushAthenaBatchPostmortem();
+
         // DAG handled dispatch — skip legacy paths
         useDagScheduler = false; // signal: already dispatched
       } else {
@@ -1063,6 +1175,7 @@ async function runSingleCycle(config) {
       const stopReq = await readStopRequest(config);
       if (stopReq?.requestedAt) {
         await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
+        await flushAthenaBatchPostmortem();
         return;
       }
 
@@ -1097,12 +1210,15 @@ async function runSingleCycle(config) {
       workersDone += 1;
       await waitForWorkersToFinish(config);
     }
+
+    await flushAthenaBatchPostmortem();
   } else if (workersDone === 0) {
     // Sequential fallback
     for (const plan of plans) {
       const stopReq = await readStopRequest(config);
       if (stopReq?.requestedAt) {
         await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
+        await flushAthenaBatchPostmortem();
         return;
       }
 
@@ -1116,6 +1232,8 @@ async function runSingleCycle(config) {
       workersDone += 1;
       await waitForWorkersToFinish(config);
     }
+
+    await flushAthenaBatchPostmortem();
   }
 
   await safeUpdatePipelineProgress(config, "workers_finishing", "All workers finishing up", {
@@ -1123,7 +1241,7 @@ async function runSingleCycle(config) {
     workersDone: plans.length
   });
 
-  await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
+  await appendProgress(config, "[CYCLE] ── All workers dispatched and Athena batch-reviewed — cycle complete ──");
   await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${plans.length} worker(s) processed`, {
     workersTotal: plans.length,
     workersDone: plans.length

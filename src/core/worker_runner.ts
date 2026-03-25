@@ -120,8 +120,9 @@ function resolveModel(config, roleName, taskKind, taskHints: any = {}) {
 
 // ── Build conversation-only context (persona is in .agent.md) ───────────────
 
-function buildConversationContext(history, instruction, sessionState: any = {}, config: any = {}, workerKind = null) {
+function buildConversationContext(history, instruction, sessionState: any = {}, config: any = {}, workerKind = null, roleName = "") {
   const parts = [];
+  const normalizedRoleName = String(roleName || instruction?.role || workerKind || "worker").trim().toLowerCase();
 
   // Persistent worker state — always injected first so workers always know where they stand
   const targetRepo = config.env?.targetRepo || "(not set)";
@@ -267,6 +268,14 @@ function buildConversationContext(history, instruction, sessionState: any = {}, 
   parts.push("- Complete your ENTIRE assigned task in one shot — do not leave partial work for a follow-up request.");
   parts.push("- If your task involves multiple files, fix ALL of them before reporting done.");
   parts.push("- Senior production standard: correct logic, proper error handling, edge cases handled, tests where relevant.");
+  parts.push("\n## PREMIUM REQUEST HARD RULE");
+  parts.push("This task gets exactly ONE premium request. You may NOT split the assigned work into multiple premium requests or leave a planned remainder for later.");
+  if (normalizedRoleName === "evolution-worker") {
+    parts.push("SOLE EXCEPTION: Only evolution-worker may use one additional premium request, and only if the task is genuinely too large and the context window is exhausted after substantial real progress.");
+    parts.push("That exception is overflow-only, not a planning convenience. Do not split the task into phases just because it feels large.");
+  } else {
+    parts.push("If you cannot finish within one premium request, do NOT create a multi-request plan. Output BOX_STATUS=blocked with exact evidence of the blocker.");
+  }
 
   // Canonical verification commands from the central registry
   const verifCmds = getVerificationCommands(config);
@@ -389,7 +398,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   const workerKind = workerConfig?.kind || null;
 
   // Build conversation-only context (persona is in the .agent.md file)
-  const conversationContext = buildConversationContext(history, instruction, sessionState, config, workerKind);
+  const conversationContext = buildConversationContext(history, instruction, sessionState, config, workerKind, roleName);
 
   await appendProgress(config, `[WORKER:${roleName}] [${instruction.taskKind || "general"}→${model}] ${truncate(instruction.task, 70)}`);
 

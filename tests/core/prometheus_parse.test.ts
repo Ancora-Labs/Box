@@ -152,6 +152,37 @@ describe("normalizePrometheusParsedOutput", () => {
     assert.equal(Number(normalized.requestBudget.hardCapTotal) >= 1, true);
   });
 
+  it("caps worker plans at one request and allows evolution-worker overflow continuation only when flagged", () => {
+    const parsed = {
+      plans: [
+        {
+          task: "Implement backend safeguard path",
+          role: "backend-worker",
+          wave: 1,
+          verification: "npm test",
+          acceptance_criteria: ["backend safeguard path is covered", "tests pass"]
+        },
+        {
+          task: "Refactor self-improvement execution graph across core modules",
+          role: "evolution-worker",
+          wave: 1,
+          verification: "npm test",
+          acceptance_criteria: ["graph flow is preserved", "tests pass"],
+          contextOverflowFollowUpAllowed: true,
+          contextOverflowReason: "Large cross-module refactor may exceed context window after initial implementation evidence is gathered"
+        }
+      ]
+    };
+
+    const normalized = normalizePrometheusParsedOutput(parsed, { raw: "" });
+    const byRole = Object.fromEntries((normalized.requestBudget.byRole || []).map((entry) => [entry.role, entry.estimatedRequests]));
+    const byWave = normalized.requestBudget.byWave || [];
+
+    assert.equal(byRole["backend-worker"], 1);
+    assert.equal(byRole["evolution-worker"], 2);
+    assert.equal(byWave[0].estimatedRequests, 5);
+  });
+
   it("extracts plans from narrative wave sections when no JSON plans exist", () => {
     const parsed = {};
     const thinking = `

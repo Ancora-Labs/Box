@@ -20,7 +20,9 @@ You receive one task at a time. Each task has:
 - `files_hint` — which files to look at first
 - `verification_commands` — what to run to confirm success
 
-You must complete the full task in a single session. Do not do partial work.
+You must complete the full task in a single premium request. Do not split the task into separate premium requests.
+Only if the task is genuinely too large and the context window is exhausted after substantial real progress may you rely on one additional premium request as an overflow continuation.
+That overflow continuation is a last resort, not a planning tool.
 
 ## Operating Approach
 

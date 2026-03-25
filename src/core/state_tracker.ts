@@ -78,10 +78,24 @@ function aggregateClaudeByMonth(entries) {
 const PROGRESS_MAX_LINES = 200;
 let _progressLineCount = -1; // lazy init
 
+function isAthenaProgressLine(message) {
+  return typeof message === "string" && message.includes("[ATHENA]");
+}
+
+async function appendAthenaLiveLog(config, line) {
+  const athenaLiveLogFile = path.join(config.paths.stateDir, "live_athena.log");
+  await ensureParent(athenaLiveLogFile);
+  await fs.appendFile(athenaLiveLogFile, line, "utf8");
+}
+
 export async function appendProgress(config, message) {
   await ensureParent(config.paths.progressFile);
   const line = `[${new Date().toISOString()}] ${message}\n`;
   await fs.appendFile(config.paths.progressFile, line, "utf8");
+
+  if (isAthenaProgressLine(message)) {
+    await appendAthenaLiveLog(config, line);
+  }
 
   // Auto-trim: keep only the last PROGRESS_MAX_LINES lines
   _progressLineCount += 1;

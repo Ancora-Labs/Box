@@ -142,6 +142,7 @@
     "enforcePrometheusExecutionStrategy": true,
     "defaultMaxWorkersPerWave": 10,
     "preferFewestWorkers": true,
+    "allowPrometheusLoadBasedWorkerFanout": true,
     "allowSameCycleFollowUps": false,
     "requireDependencyAwareWaves": true
   },
