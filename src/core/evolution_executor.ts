@@ -27,7 +27,6 @@ import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { checkPostMergeArtifact } from "./verification_gate.js";
 
 type EvolutionTask = {
   task_id?: string;
