@@ -51,7 +51,6 @@ import { computeCapabilityDelta } from "./delta_analytics.js";
 import { evaluateRetune } from "./strategy_retuner.js";
 import { compileLessonsToPolicies } from "./learning_policy_compiler.js";
 import { assignWorkersToPlans, enforceLaneDiversity } from "./capability_pool.js";
-import { computeNextWaves } from "./dag_scheduler.js";
 import { runDoctor } from "./doctor.js";
 import { validateAllPlans } from "./plan_contract_validator.js";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
@@ -426,7 +425,10 @@ export async function runDaemon(config) {
   await mainLoop(liveConfig);
 }
 
-async function wasDispatchInterrupted(stateDir) {
+// Stub: checks dispatch_checkpoint.json for an in-flight dispatching state.
+// Reserved for future recovery path — prefixed _wasDispatchInterrupted to satisfy
+// no-unused-vars until the dispatch recovery flow calls it.
+async function _wasDispatchInterrupted(_stateDir: string): Promise<boolean> {
   return false;
 }
 
