@@ -70,6 +70,9 @@ export const ORCHESTRATOR_STATUS = Object.freeze({
   DEGRADED: "degraded"
 });
 
+/** Max automatic retries when a worker hits transient API errors (circuit breaker). */
+const MAX_TRANSIENT_RETRIES = 3;
+
 type WorkerSessionRecord = {
   status?: string;
   [key: string]: unknown;
@@ -591,13 +594,29 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
     });
 
     let workerResult;
-    try {
-      workerResult = await dispatchWorker(config, batch);
-    } catch (err) {
-      const msg = String(err?.message || err).slice(0, 200);
-      await appendProgress(config, `[RESUME] Worker ${batch.role} failed: ${msg}`);
-      warn(`[orchestrator] resumed worker dispatch error: ${msg}`);
-      workerResult = { roleName: batch.role, status: "error", summary: msg };
+    let transientRetries = 0;
+    for (;;) {
+      try {
+        workerResult = await dispatchWorker(config, batch);
+      } catch (err) {
+        const msg = String(err?.message || err).slice(0, 200);
+        await appendProgress(config, `[RESUME] Worker ${batch.role} failed: ${msg}`);
+        warn(`[orchestrator] resumed worker dispatch error: ${msg}`);
+        workerResult = { roleName: batch.role, status: "error", summary: msg };
+      }
+
+      // Auto-retry on transient API errors with escalating cooldown
+      const isTransient = String(workerResult?.status || "") === "transient_error";
+      if (isTransient && transientRetries < MAX_TRANSIENT_RETRIES) {
+        transientRetries++;
+        const cooldownMs = transientRetries * 3 * 60 * 1000; // 3min, 6min, 9min
+        await appendProgress(config,
+          `[RESUME] Transient API error — retry ${transientRetries}/${MAX_TRANSIENT_RETRIES}, cooling down ${Math.round(cooldownMs / 1000)}s`
+        );
+        await sleep(cooldownMs);
+        continue;
+      }
+      break;
     }
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {
@@ -1323,13 +1342,29 @@ async function runSingleCycle(config) {
     });
 
     let workerResult;
-    try {
-      workerResult = await dispatchWorker(config, batch);
-    } catch (err) {
-      const msg = String(err?.message || err).slice(0, 200);
-      await appendProgress(config, `[CYCLE] Worker ${batch.role} failed: ${msg}`);
-      warn(`[orchestrator] worker dispatch error: ${msg}`);
-      workerResult = { roleName: batch.role, status: "error", summary: msg };
+    let transientRetries = 0;
+    for (;;) {
+      try {
+        workerResult = await dispatchWorker(config, batch);
+      } catch (err) {
+        const msg = String(err?.message || err).slice(0, 200);
+        await appendProgress(config, `[CYCLE] Worker ${batch.role} failed: ${msg}`);
+        warn(`[orchestrator] worker dispatch error: ${msg}`);
+        workerResult = { roleName: batch.role, status: "error", summary: msg };
+      }
+
+      // Auto-retry on transient API errors with escalating cooldown
+      const isTransient = String(workerResult?.status || "") === "transient_error";
+      if (isTransient && transientRetries < MAX_TRANSIENT_RETRIES) {
+        transientRetries++;
+        const cooldownMs = transientRetries * 3 * 60 * 1000;
+        await appendProgress(config,
+          `[CYCLE] Transient API error — retry ${transientRetries}/${MAX_TRANSIENT_RETRIES}, cooling down ${Math.round(cooldownMs / 1000)}s`
+        );
+        await sleep(cooldownMs);
+        continue;
+      }
+      break;
     }
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {

@@ -235,6 +235,24 @@ export function spawnAsync(command, args, options) {
         }, timeoutMs)
       : null;
 
+    // AbortSignal support — lets the caller kill the child early
+    if (options.signal) {
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        resolve({
+          status: -1,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: String(options.signal.reason || "[BOX] Process aborted via signal"),
+          aborted: true
+        });
+      };
+      if (options.signal.aborted) { onAbort(); return; }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
     child.on("close", (code) => {
       if (settled) return;
       settled = true;

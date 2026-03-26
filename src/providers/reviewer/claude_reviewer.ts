@@ -74,6 +74,15 @@ export class ClaudeReviewer {
         const text = (json as any)?.content?.map((c) => c.text).filter(Boolean).join("\n") || "";
         const parsed = tryExtractJson(text);
         const validated = validator(parsed, fallback);
+        // Detect validator-level fallback for malformed provider output
+        if ((validated as any)?._source === "fallback") {
+          const reason = String((validated as any)._fallbackReason || "malformed provider output");
+          emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
+            source: "fallback",
+            fallbackReason: reason
+          });
+          return tagProviderDecision(validated, "fallback", reason);
+        }
         return tagProviderDecision(validated, "provider");
       } catch (error) {
         lastError = error;

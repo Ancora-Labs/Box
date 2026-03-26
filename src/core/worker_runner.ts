@@ -77,6 +77,7 @@ type SpawnAsyncResult = {
   stdout: string;
   stderr: string;
   timedOut?: boolean;
+  aborted?: boolean;
 };
 
 type VerificationEvidence = {
@@ -466,7 +467,10 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   ];
 
   // Single-prompt mode: no autopilot continuations.
-  const allowAllTools = String(roleName || "").toLowerCase() === "evolution-worker";
+  // All implementation workers dispatched by the daemon need full tool access.
+  const taskKindLower = String(instruction.taskKind || "").toLowerCase();
+  const isImplementationTask = !taskKindLower || taskKindLower === "implementation";
+  const allowAllTools = isImplementationTask || String(roleName || "").toLowerCase() === "evolution-worker";
   const args = buildAgentArgs({
     agentSlug,
     prompt: conversationContext,
@@ -495,6 +499,13 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   );
 
   const startMs = Date.now();
+
+  // Circuit breaker: detect consecutive transient API errors from the Copilot CLI
+  // and abort the process early instead of waiting for 45-minute timeout.
+  const TRANSIENT_ERROR_THRESHOLD = 10;
+  let transientErrorCount = 0;
+  const abortController = new AbortController();
+
   const result = await spawnAsync(command, args, {
     env: {
       ...process.env,
@@ -504,11 +515,33 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       TARGET_BASE_BRANCH: config.env?.targetBaseBranch || "main"
     },
     timeoutMs: workerTimeoutMs,
+    signal: abortController.signal,
     onStdout: (chunk) => {
-      appendLiveWorkerLog(liveLogPath, String(chunk)).catch(() => {});
+      const text = String(chunk);
+      appendLiveWorkerLog(liveLogPath, text).catch(() => {});
+      if (/transient API error/i.test(text)) {
+        transientErrorCount++;
+        if (transientErrorCount >= TRANSIENT_ERROR_THRESHOLD) {
+          abortController.abort(
+            `[BOX] Transient API error circuit breaker: ${transientErrorCount} consecutive errors — aborting to avoid waste`
+          );
+        }
+      } else if (text.trim().length > 20) {
+        // Reset counter on meaningful (non-error) output
+        transientErrorCount = 0;
+      }
     },
     onStderr: (chunk) => {
-      appendLiveWorkerLog(liveLogPath, `[stderr] ${String(chunk)}`).catch(() => {});
+      const text = String(chunk);
+      appendLiveWorkerLog(liveLogPath, `[stderr] ${text}`).catch(() => {});
+      if (/transient API error/i.test(text)) {
+        transientErrorCount++;
+        if (transientErrorCount >= TRANSIENT_ERROR_THRESHOLD) {
+          abortController.abort(
+            `[BOX] Transient API error circuit breaker: ${transientErrorCount} consecutive errors — aborting to avoid waste`
+          );
+        }
+      }
     }
   }) as SpawnAsyncResult;
 
@@ -516,10 +549,11 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   const stderr = String(result?.stderr || "");
 
   if (result.status !== 0) {
-    const label = result.timedOut ? `Timeout` : `Error exit=${result.status}`;
+    const isTransient = result.aborted === true && /transient API error circuit breaker/i.test(stderr);
+    const label = isTransient ? `TransientAPIError` : result.timedOut ? `Timeout` : `Error exit=${result.status}`;
     await appendLiveWorkerLog(
       liveLogPath,
-      `\n[${new Date().toISOString()}] END status=error exit=${result.status}${result.timedOut ? " timeout=true" : ""}\n`
+      `\n[${new Date().toISOString()}] END status=error exit=${result.status}${result.timedOut ? " timeout=true" : ""}${isTransient ? " transient=true" : ""}\n`
     );
     await appendProgress(config, `[WORKER:${roleName}] ${label}`);
     const errorMsg = truncate(stderr || stdout || "unknown error", 300);
@@ -579,7 +613,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       status: "error"
     });
     return {
-      status: "error",
+      status: isTransient ? "transient_error" : "error",
       summary: errorMsg,
       updatedHistory,
       prUrl: null,

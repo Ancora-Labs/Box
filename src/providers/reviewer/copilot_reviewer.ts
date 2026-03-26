@@ -224,6 +224,16 @@ export class CopilotReviewer {
       return tagProviderDecision(fallback, "fallback", fallbackReason);
     }
     const validated = validator(parsed, fallback);
+    // Detect validator-level fallback: if the validator returned a fallback marker, tag as fallback
+    if ((validated as any)?._source === "fallback") {
+      const reason = String((validated as any)._fallbackReason || "malformed provider output");
+      this.lastUsage = { model: this.model, provider: "copilot" };
+      emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
+        source: "fallback",
+        fallbackReason: reason
+      });
+      return tagProviderDecision(validated, "fallback", reason);
+    }
     this.lastUsage = { model: this.model, provider: "copilot" };
     return tagProviderDecision(validated, "provider");
   }

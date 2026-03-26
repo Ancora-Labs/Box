@@ -46,16 +46,20 @@ export function validatePlan(payload: Record<string, unknown> | null, fallbackTa
   return tasks.length > 0 ? { tasks } : { tasks: fallbackTasks };
 }
 
-export function validateDecision(payload: Record<string, unknown> | null, fallback: { approved: boolean; reason: string }): { approved: boolean; reason: string } {
-  if (typeof payload?.approved !== "boolean") return fallback;
+export function validateDecision(payload: Record<string, unknown> | null, fallback: { approved: boolean; reason: string }): { approved: boolean; reason: string; _source?: "fallback"; _fallbackReason?: string } {
+  if (typeof payload?.approved !== "boolean") {
+    return { ...fallback, _source: "fallback", _fallbackReason: "approved field is not boolean" };
+  }
   return {
     approved: payload.approved,
     reason: String(payload?.reason || fallback?.reason || "review completed")
   };
 }
 
-export function validateOpusDecision(payload: Record<string, unknown> | null, fallback: { allowOpus: boolean; reason: string }): { allowOpus: boolean; reason: string } {
-  if (typeof payload?.allowOpus !== "boolean") return fallback;
+export function validateOpusDecision(payload: Record<string, unknown> | null, fallback: { allowOpus: boolean; reason: string }): { allowOpus: boolean; reason: string; _source?: "fallback"; _fallbackReason?: string } {
+  if (typeof payload?.allowOpus !== "boolean") {
+    return { ...fallback, _source: "fallback", _fallbackReason: "allowOpus field is not boolean", reason: String(fallback?.reason || "no reason provided") };
+  }
   return {
     allowOpus: payload.allowOpus as boolean,
     reason: String(payload?.reason || fallback?.reason || "no reason provided")

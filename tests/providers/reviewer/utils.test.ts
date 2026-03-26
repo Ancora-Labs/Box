@@ -96,9 +96,27 @@ describe("validateDecision", () => {
   });
 
   it("returns fallback when approved is not boolean", () => {
-    assert.deepEqual(validateDecision({ approved: "yes" }, fallback), fallback);
-    assert.deepEqual(validateDecision(null, fallback), fallback);
-    assert.deepEqual(validateDecision({}, fallback), fallback);
+    const r1 = validateDecision({ approved: "yes" }, fallback);
+    assert.equal(r1.approved, false);
+    assert.equal(r1.reason, "fallback reason");
+    assert.equal(r1._source, "fallback");
+
+    const r2 = validateDecision(null, fallback);
+    assert.equal(r2._source, "fallback");
+
+    const r3 = validateDecision({}, fallback);
+    assert.equal(r3._source, "fallback");
+  });
+
+  it("returns fallback with explicit _fallbackReason for malformed payloads", () => {
+    const result = validateDecision({ approved: 42 }, fallback);
+    assert.equal(result._source, "fallback");
+    assert.equal(result._fallbackReason, "approved field is not boolean");
+  });
+
+  it("does not set _source on valid provider decisions", () => {
+    const result = validateDecision({ approved: true, reason: "ok" }, fallback);
+    assert.equal(result._source, undefined);
   });
 
   it("uses fallback reason when payload reason is missing", () => {
@@ -117,8 +135,13 @@ describe("validateOpusDecision", () => {
   });
 
   it("returns fallback when allowOpus is not boolean", () => {
-    assert.deepEqual(validateOpusDecision({ allowOpus: "true" }, fallback), fallback);
-    assert.deepEqual(validateOpusDecision(null, fallback), fallback);
+    const r1 = validateOpusDecision({ allowOpus: "true" }, fallback);
+    assert.equal(r1.allowOpus, fallback.allowOpus);
+    assert.equal(r1._source, "fallback");
+    assert.ok(r1._fallbackReason);
+    const r2 = validateOpusDecision(null, fallback);
+    assert.equal(r2.allowOpus, fallback.allowOpus);
+    assert.equal(r2._source, "fallback");
   });
 
   it("falls back to 'no reason provided' when both reasons are missing", () => {
