@@ -28,6 +28,7 @@ import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { checkPostMergeArtifact, ARTIFACT_GAP, ARTIFACT_GATE_ERROR_PREFIX } from "./verification_gate.js";
+import { VERIFICATION_DEFAULTS } from "./verification_command_registry.js";
 
 type EvolutionTask = {
   task_id?: string;
@@ -189,19 +190,19 @@ const ATHENA_RETRYABLE_REVIEW_PATTERNS = [
 const VERIFICATION_CMD_REWRITES = [
   {
     match: /^node\s+src\/cli\.js\s+once$/i,
-    replacement: "npm test"
+    replacement: VERIFICATION_DEFAULTS.test
   },
   {
     match: /^npm\s+run\s+box:once$/i,
-    replacement: "npm test"
+    replacement: VERIFICATION_DEFAULTS.test
   },
   {
     match: /^node\s+src\/cli\.js\s+start$/i,
-    replacement: "npm test"
+    replacement: VERIFICATION_DEFAULTS.test
   },
   {
     match: /^node\s+src\/cli\.js\s+doctor$/i,
-    replacement: "npm test"
+    replacement: VERIFICATION_DEFAULTS.test
   },
   {
     match: /^node\s+src\/dashboard\/live_dashboard\.js$/i,
@@ -209,7 +210,7 @@ const VERIFICATION_CMD_REWRITES = [
   },
   {
     match: /^node\s+--test\s+tests\/\*\*\/\*\.test\.js$/i,
-    replacement: "npm test"
+    replacement: VERIFICATION_DEFAULTS.test
   }
 ];
 
@@ -255,14 +256,14 @@ function normalizeVerificationCommands(commands = []) {
     if (!deduped.includes(command)) deduped.push(command);
   }
 
-  return deduped.length > 0 ? deduped : ["npm test", "node --test"];
+  return deduped.length > 0 ? deduped : [VERIFICATION_DEFAULTS.test, "node --test"];
 }
 
 function normalizeEvolutionTask(task) {
   return {
     ...task,
     acceptance_criteria: normalizeAcceptanceCriteria(task.acceptance_criteria || []),
-    verification_commands: normalizeVerificationCommands(task.verification_commands || ["npm test"])
+    verification_commands: normalizeVerificationCommands(task.verification_commands || [VERIFICATION_DEFAULTS.test])
   };
 }
 
@@ -326,8 +327,8 @@ export function injectAthenaMissingItems(task: PreparedEvolutionTask, preReview:
     acceptance_criteria: updatedCriteria,
     verification_commands: normalizeVerificationCommands([
       ...(task.verification_commands || []),
-      "npm test",
-      "npm run lint"
+      VERIFICATION_DEFAULTS.test,
+      VERIFICATION_DEFAULTS.lint
     ])
   });
 }
@@ -361,8 +362,8 @@ export function hardenTaskForAthena(task: PreparedEvolutionTask, preReview: Athe
   ];
 
   const hardeningCommands = [
-    "npm test",
-    "npm run lint"
+    VERIFICATION_DEFAULTS.test,
+    VERIFICATION_DEFAULTS.lint
   ];
 
   const acceptance = [...existingCriteria];
@@ -651,7 +652,7 @@ function buildInstruction(task, athenaHints = null) {
     criteria,
     ``,
     `VERIFICATION COMMANDS (run these to confirm):`,
-    verificationCmds || "  npm test",
+    verificationCmds || `  ${VERIFICATION_DEFAULTS.test}`,
     rollback,
     athenaSection,
     ``,
@@ -692,7 +693,7 @@ const BLOCKED_VERIFICATION_CMDS = [
 ];
 
 function runVerificationCommands(task) {
-  const allCmds = task.verification_commands || ["npm test"];
+  const allCmds = task.verification_commands || [VERIFICATION_DEFAULTS.test];
   const cmds = allCmds.filter(cmd => {
     const blocked = BLOCKED_VERIFICATION_CMDS.some(re => re.test(cmd));
     if (blocked) {
@@ -700,7 +701,7 @@ function runVerificationCommands(task) {
     }
     return !blocked;
   });
-  if (cmds.length === 0) cmds.push("npm test"); // always at least run tests
+  if (cmds.length === 0) cmds.push(VERIFICATION_DEFAULTS.test); // always at least run tests
   const results = [];
 
   for (const cmd of cmds) {
@@ -904,6 +905,7 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
       const artifact = checkPostMergeArtifact(workerResult.fullOutput || workerResult.summary || "");
       if (!artifact.hasArtifact) {
         const gaps: string[] = [];
+        if (artifact.hasUnfilledPlaceholder) gaps.push(ARTIFACT_GAP.UNFILLED_PLACEHOLDER);
         if (!artifact.hasSha) gaps.push(ARTIFACT_GAP.MISSING_SHA);
         if (!artifact.hasTestOutput) gaps.push(ARTIFACT_GAP.MISSING_TEST_OUTPUT);
         taskState.status = "rework";

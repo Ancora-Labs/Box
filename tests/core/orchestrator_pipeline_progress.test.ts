@@ -611,8 +611,7 @@ describe("orchestrator typed event emission — GOVERNANCE_GATE_EVALUATED", () =
 // ── Governance gate exception — degraded event emission ───────────────────────
 
 describe("orchestrator governance gate exception — ORCHESTRATION_HEALTH_DEGRADED emission", () => {
-  let tmpDir;
-  let config;
+  let tmpDir;  let config;
   let emittedEvents;
 
   beforeEach(async () => {
@@ -697,5 +696,147 @@ describe("orchestrator governance gate exception — ORCHESTRATION_HEALTH_DEGRAD
       typeof ev.payload.error === "string" && ev.payload.error.length > 0,
       "payload.error must be a non-empty string with the exception message"
     );
+  });
+});
+
+// ── Full leadership chain stage ordering + gate evaluation (Task 3) ───────────
+
+describe("leadership chain stage ordering and gate evaluation", () => {
+  let tmpDir;
+  let config;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-leadership-chain-"));
+    config = {
+      paths: {
+        stateDir: tmpDir,
+        progressFile: path.join(tmpDir, "progress.txt"),
+        policyFile: path.join(tmpDir, "policy.json")
+      },
+      env: {
+        copilotCliCommand: "__missing_copilot_binary__",
+        targetRepo: "CanerDoqdu/Box"
+      },
+      roleRegistry: {
+        ceoSupervisor:  { name: "Jesus",     model: "Claude Sonnet 4.6" },
+        deepPlanner:    { name: "Prometheus", model: "GPT-5.3-Codex" },
+        qualityReviewer: { name: "Athena",   model: "Claude Sonnet 4.6" },
+        workers: {
+          backend: { name: "King David" },
+          test:    { name: "Samuel" }
+        }
+      },
+      copilot: { leadershipAutopilot: false },
+      canary:         { enabled: false },
+      systemGuardian: { enabled: true }
+    };
+    await fs.writeFile(config.paths.policyFile, JSON.stringify({ blockedCommands: [] }, null, 2), "utf8");
+  });
+
+  afterEach(async () => {
+    mock.restoreAll();
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("PIPELINE_STAGE_ENUM encodes the full leadership chain in correct order: Jesus → Prometheus → Athena → Workers", () => {
+    // Verify the canonical stage ordering matches the Jesus → Prometheus → Athena → Workers chain.
+    // Each sub-chain must be contiguous and in order.
+    const stages = [...PIPELINE_STAGE_ENUM];
+
+    const jesusStages    = stages.filter(s => s.startsWith("jesus_") || s === "idle");
+    const prometheusStages = stages.filter(s => s.startsWith("prometheus_"));
+    const athenaStages   = stages.filter(s => s.startsWith("athena_"));
+    const workerStages   = stages.filter(s =>
+      s.startsWith("workers_") || s === "cycle_complete"
+    );
+
+    // All four phases must be present
+    assert.ok(jesusStages.length >= 2,    `Jesus phases must exist; got: ${jesusStages.join(", ")}`);
+    assert.ok(prometheusStages.length >= 2, `Prometheus phases must exist; got: ${prometheusStages.join(", ")}`);
+    assert.ok(athenaStages.length >= 1,   `Athena phases must exist; got: ${athenaStages.join(", ")}`);
+    assert.ok(workerStages.length >= 2,   `Worker phases must exist; got: ${workerStages.join(", ")}`);
+
+    // Ordering: the first Jesus stage must precede the first Prometheus stage,
+    // which must precede the first Athena stage, which must precede the first worker stage.
+    const firstJesus    = stages.indexOf("jesus_awakening");
+    const firstPrometheus = stages.indexOf("prometheus_starting");
+    const firstAthena   = stages.indexOf("athena_reviewing");
+    const firstWorker   = stages.indexOf("workers_dispatching");
+    const cycleComplete = stages.indexOf("cycle_complete");
+
+    assert.ok(firstJesus    >= 0, "jesus_awakening must be in PIPELINE_STAGE_ENUM");
+    assert.ok(firstPrometheus >= 0, "prometheus_starting must be in PIPELINE_STAGE_ENUM");
+    assert.ok(firstAthena   >= 0, "athena_reviewing must be in PIPELINE_STAGE_ENUM");
+    assert.ok(firstWorker   >= 0, "workers_dispatching must be in PIPELINE_STAGE_ENUM");
+    assert.ok(cycleComplete >= 0, "cycle_complete must be in PIPELINE_STAGE_ENUM");
+
+    assert.ok(firstJesus < firstPrometheus,
+      `Jesus must precede Prometheus in PIPELINE_STAGE_ENUM (jesus=${firstJesus} prometheus=${firstPrometheus})`);
+    assert.ok(firstPrometheus < firstAthena,
+      `Prometheus must precede Athena in PIPELINE_STAGE_ENUM (prometheus=${firstPrometheus} athena=${firstAthena})`);
+    assert.ok(firstAthena < firstWorker,
+      `Athena must precede Workers in PIPELINE_STAGE_ENUM (athena=${firstAthena} workers=${firstWorker})`);
+    assert.ok(firstWorker < cycleComplete,
+      `Workers must precede cycle_complete in PIPELINE_STAGE_ENUM (workers=${firstWorker} cycle_complete=${cycleComplete})`);
+  });
+
+  it("gate passes for all-clear config — dispatch is not blocked at any leadership chain stage", async () => {
+    const plans = [
+      { id: "Jesus-T1",    role: "backend", dependsOn: [],        filesInScope: ["src/core/jesus_supervisor.ts"] },
+      { id: "Prometheus-T1", role: "test", dependsOn: ["Jesus-T1"], filesInScope: ["tests/core/orchestrator.test.ts"] }
+    ];
+
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "leadership-all-clear-1");
+
+    assert.equal(result.blocked, false,
+      "gate must not block leadership chain dispatch when all gates are clear");
+    assert.equal(result.reason, null,
+      "reason must be null when gate is clear");
+    assert.ok(result.graphResult, "graphResult must be present");
+    assert.equal(result.graphResult.status, "ok",
+      "dependency graph must resolve cleanly for a valid linear chain");
+  });
+
+  it("gate blocks worker dispatch when governance freeze activates between Athena and Workers phases", async () => {
+    // Simulate freeze activating after Athena approved — gate must block at workers_dispatching
+    const plans = [
+      { id: "T1", role: "backend", dependsOn: [], filesInScope: ["src/core/orchestrator.ts"] }
+    ];
+
+    const frozenConfig = {
+      ...config,
+      governanceFreeze: { enabled: true, manualOverrideActive: true }
+    };
+
+    const result = await evaluatePreDispatchGovernanceGate(frozenConfig, plans, "leadership-freeze-midchain-1");
+
+    assert.equal(result.blocked, true,
+      "gate must block at workers_dispatching stage when governance freeze is active");
+    assert.ok(
+      result.reason?.startsWith("governance_freeze_active:"),
+      `reason must reflect freeze gate; got: ${result.reason}`
+    );
+    // No rollback triggered — freeze is a non-destructive block
+    assert.equal(result.action, undefined,
+      "freeze block must not trigger rollback action");
+  });
+
+  it("negative path: gate blocks and no workers run when lineage cycle exists in leadership chain", async () => {
+    // A circular dependency in the chain blocks dispatch before any worker fires
+    const plans = [
+      { id: "Jesus-T1",    role: "backend", dependsOn: ["Workers-T1"], filesInScope: [] },
+      { id: "Workers-T1",  role: "test",    dependsOn: ["Jesus-T1"],   filesInScope: [] }
+    ];
+
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "leadership-cycle-1");
+
+    assert.equal(result.blocked, true,
+      "circular dependency in leadership chain must block dispatch");
+    assert.ok(
+      result.reason?.includes("cycle_detected") || result.reason?.includes("lineage"),
+      `reason must reference cycle; got: ${result.reason}`
+    );
+    assert.ok(result.graphResult,
+      "graphResult must be present even when cycle blocks dispatch");
   });
 });

@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { checkArchitectureDrift } from "../../src/core/architecture_drift.js";
+import {
+  checkArchitectureDrift,
+  normalizeAliasPath,
+  detectDeprecatedTokensInContent,
+  DEPRECATED_TOKENS,
+} from "../../src/core/architecture_drift.js";
 
 describe("architecture_drift", () => {
   let rootDir: string;
@@ -150,5 +155,219 @@ describe("architecture_drift", () => {
     const report = await checkArchitectureDrift({ rootDir });
     // Same path in same doc should only be counted once
     assert.equal(report.staleCount, 1);
+  });
+});
+
+describe("architecture_drift — recursive docs traversal (Task 1)", () => {
+  let rootDir: string;
+
+  beforeEach(async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-arch-drift-rec-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(rootDir, { recursive: true, force: true });
+  });
+
+  it("recurses into docs subdirectories and scans nested .md files", async () => {
+    await fs.mkdir(path.join(rootDir, "docs", "subdir"), { recursive: true });
+    await fs.mkdir(path.join(rootDir, "src", "core"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "src", "core", "orchestrator.ts"),
+      "export {};\n",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(rootDir, "docs", "subdir", "nested.md"),
+      "# Nested\n\nSee `src/core/orchestrator.ts`.\n",
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    assert.ok(
+      report.scannedDocs.some(d => d.includes("nested.md")),
+      "nested doc file must appear in scannedDocs"
+    );
+    assert.equal(report.presentCount, 1, "nested doc reference must be checked and found present");
+    assert.equal(report.staleCount, 0);
+  });
+
+  it("detects stale references in deeply nested docs subdirectory", async () => {
+    await fs.mkdir(path.join(rootDir, "docs", "a", "b"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "docs", "a", "b", "deep.md"),
+      "Ref: `src/core/ghost.ts`\n",
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    assert.equal(report.staleCount, 1, "stale reference in deeply nested doc must be detected");
+    assert.equal(report.staleReferences[0].referencedPath, "src/core/ghost.ts");
+  });
+});
+
+describe("architecture_drift — TS/JS alias normalization (Task 1)", () => {
+  let rootDir: string;
+
+  beforeEach(async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-arch-drift-alias-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(rootDir, { recursive: true, force: true });
+  });
+
+  it("normalizeAliasPath resolves @core/ to src/core/", () => {
+    assert.equal(normalizeAliasPath("@core/orchestrator.ts"), "src/core/orchestrator.ts");
+  });
+
+  it("normalizeAliasPath resolves @/ to src/", () => {
+    assert.equal(normalizeAliasPath("@/config.ts"), "src/config.ts");
+  });
+
+  it("normalizeAliasPath resolves @tests/ to tests/", () => {
+    assert.equal(normalizeAliasPath("@tests/core/foo.test.ts"), "tests/core/foo.test.ts");
+  });
+
+  it("normalizeAliasPath returns null for non-alias paths", () => {
+    assert.equal(normalizeAliasPath("src/core/foo.ts"), null);
+    assert.equal(normalizeAliasPath("random/path.ts"), null);
+  });
+
+  it("detects stale @core/ alias reference in docs and classifies it as stale after normalization", async () => {
+    await fs.mkdir(path.join(rootDir, "docs"), { recursive: true });
+    // Do NOT create src/core/ghost.ts — alias ref should be stale
+    await fs.mkdir(path.join(rootDir, "src", "core"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "docs", "arch.md"),
+      "See `@core/ghost.ts` for the implementation.\n",
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    const staleAliasRef = report.staleReferences.find(r => r.referencedPath === "src/core/ghost.ts");
+    assert.ok(staleAliasRef, "alias reference @core/ghost.ts must be normalized to src/core/ghost.ts and classified stale");
+  });
+
+  it("resolves @core/ alias reference as present when the real file exists", async () => {
+    await fs.mkdir(path.join(rootDir, "docs"), { recursive: true });
+    await fs.mkdir(path.join(rootDir, "src", "core"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "src", "core", "orchestrator.ts"),
+      "export {};\n",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(rootDir, "docs", "arch.md"),
+      "Entry: `@core/orchestrator.ts`\n",
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    assert.equal(report.presentCount, 1, "normalized alias ref must count as present when file exists");
+    assert.equal(report.staleCount, 0);
+  });
+});
+
+describe("architecture_drift — deprecated token detection (Task 5)", () => {
+  let rootDir: string;
+
+  beforeEach(async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-arch-drift-dep-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(rootDir, { recursive: true, force: true });
+  });
+
+  it("DEPRECATED_TOKENS is non-empty and each entry has pattern + hint", () => {
+    assert.ok(Array.isArray(DEPRECATED_TOKENS) && DEPRECATED_TOKENS.length > 0,
+      "DEPRECATED_TOKENS must be a non-empty array");
+    for (const entry of DEPRECATED_TOKENS) {
+      assert.ok(entry.pattern instanceof RegExp, "each deprecated token entry must have a RegExp pattern");
+      assert.ok(typeof entry.hint === "string" && entry.hint.length > 0,
+        "each deprecated token entry must have a non-empty hint string");
+    }
+  });
+
+  it("detectDeprecatedTokensInContent finds governance_verdict in doc content", () => {
+    const content = "The old API used governance_verdict to signal completion.";
+    const refs = detectDeprecatedTokensInContent("docs/old.md", content);
+    const found = refs.find(r => r.token === "governance_verdict");
+    assert.ok(found, "governance_verdict must be detected as deprecated");
+    assert.equal(found!.docPath, "docs/old.md");
+    assert.ok(found!.hint.length > 0, "hint must be non-empty");
+  });
+
+  it("detectDeprecatedTokensInContent finds resume_dispatch as deprecated", () => {
+    const content = "Calling resume_dispatch will trigger worker resumption.";
+    const refs = detectDeprecatedTokensInContent("docs/resume.md", content);
+    const found = refs.find(r => r.token === "resume_dispatch");
+    assert.ok(found, "resume_dispatch must be detected as deprecated");
+  });
+
+  it("detectDeprecatedTokensInContent returns empty array for clean content", () => {
+    const content = "Use runResumeDispatch and GOVERNANCE_GATE_EVALUATED instead.";
+    const refs = detectDeprecatedTokensInContent("docs/clean.md", content);
+    assert.equal(refs.length, 0, "no deprecated tokens should be found in clean content");
+  });
+
+  it("checkArchitectureDrift includes deprecatedTokenCount and deprecatedTokenRefs in report", async () => {
+    await fs.mkdir(path.join(rootDir, "docs"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "docs", "legacy.md"),
+      "Legacy docs reference governance_verdict and resume_dispatch.\n",
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    assert.ok(typeof report.deprecatedTokenCount === "number",
+      "report must include deprecatedTokenCount");
+    assert.ok(Array.isArray(report.deprecatedTokenRefs),
+      "report must include deprecatedTokenRefs array");
+    assert.ok(report.deprecatedTokenCount >= 2,
+      "must detect at least 2 deprecated tokens in legacy doc");
+  });
+
+  it("negative path: clean docs with no deprecated tokens produce zero deprecatedTokenCount", async () => {
+    await fs.mkdir(path.join(rootDir, "docs"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "docs", "clean.md"),
+      "Use evaluatePreDispatchGovernanceGate and GOVERNANCE_GATE_EVALUATED.\n",
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    assert.equal(report.deprecatedTokenCount, 0,
+      "clean docs must produce zero deprecated token count");
+    assert.deepEqual(report.deprecatedTokenRefs, [],
+      "clean docs must produce empty deprecated token refs");
+  });
+
+  it("deprecated token refs include line number and docPath", async () => {
+    await fs.mkdir(path.join(rootDir, "docs"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(rootDir, "docs", "stale.md"),
+      [
+        "# Old API",
+        "",
+        "Step 1: call governance_verdict",
+        "Step 2: use resumeDispatch"
+      ].join("\n"),
+      "utf8"
+    );
+
+    const report = await checkArchitectureDrift({ rootDir });
+    const verdictRef = report.deprecatedTokenRefs.find(r => r.token === "governance_verdict");
+    assert.ok(verdictRef, "governance_verdict ref must be in report");
+    assert.equal(verdictRef!.line, 3, "line number must be 3 for governance_verdict");
+    assert.ok(verdictRef!.docPath.includes("stale.md"), "docPath must reference stale.md");
   });
 });
