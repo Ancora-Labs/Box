@@ -147,5 +147,169 @@ describe("parser_replay_harness (Packet 10)", () => {
       assert.equal(result.passed, false);
       assert.ok(result.results[0].omittedKeys.includes("scope"));
     });
+
+    // ── Mode-specific regression tests ────────────────────────────────────────
+
+    it("json-direct mode: flags regression when required key is missing", () => {
+      const corpus = [
+        {
+          id: "jd-1",
+          raw: '{"plans":[{"title":"t"}]}',
+          baselineConfidence: 0.95,
+          expectedPlanCount: 1,
+          requiredKeys: ["title", "priority"],
+          parseMode: "json-direct",
+        },
+      ];
+      const result = replayCorpus(corpus, () => ({
+        confidence: 0.95,
+        plans: [{ title: "t" }], // missing 'priority'
+      }));
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("priority"));
+      assert.equal(result.results[0].parseMode, "json-direct");
+    });
+
+    it("json-direct mode: passes when all required keys present", () => {
+      const corpus = [
+        {
+          id: "jd-2",
+          raw: '{"plans":[{"title":"t","priority":1}]}',
+          baselineConfidence: 0.95,
+          expectedPlanCount: 1,
+          requiredKeys: ["title", "priority"],
+          parseMode: "json-direct",
+        },
+      ];
+      const result = replayCorpus(corpus, () => ({
+        confidence: 0.95,
+        plans: [{ title: "t", priority: 1 }],
+      }));
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("fallback mode: flags regression when parser returns empty plans but plans were expected", () => {
+      const corpus = [
+        {
+          id: "fb-1",
+          raw: "some planner output that failed to parse",
+          baselineConfidence: 0.8,
+          expectedPlanCount: 2,
+          requiredKeys: ["title", "scope"],
+          parseMode: "fallback",
+        },
+      ];
+      // Fallback parser returns no plans (degraded)
+      const result = replayCorpus(corpus, () => ({
+        confidence: 0.8,
+        plans: [],
+      }));
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("title"));
+      assert.ok(result.results[0].omittedKeys.includes("scope"));
+      assert.equal(result.results[0].parseMode, "fallback");
+    });
+
+    it("fallback mode: no regression when no plans were expected and parser returns empty", () => {
+      const corpus = [
+        {
+          id: "fb-2",
+          raw: "empty input",
+          baselineConfidence: 0.5,
+          expectedPlanCount: 0,
+          requiredKeys: ["title"],
+          parseMode: "fallback",
+        },
+      ];
+      const result = replayCorpus(corpus, () => ({ confidence: 0.5, plans: [] }));
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("batch-normalized mode: flags regression when any plan in batch is missing required key", () => {
+      const corpus = [
+        {
+          id: "bn-1",
+          raw: "batch output with 3 plans",
+          baselineConfidence: 0.85,
+          expectedPlanCount: 3,
+          requiredKeys: ["id", "title"],
+          parseMode: "batch-normalized",
+        },
+      ];
+      // Third plan missing 'id' after normalization
+      const result = replayCorpus(corpus, () => ({
+        confidence: 0.85,
+        plans: [
+          { id: 1, title: "a" },
+          { id: 2, title: "b" },
+          { title: "c" }, // missing 'id'
+        ],
+      }));
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("id"));
+      assert.equal(result.results[0].parseMode, "batch-normalized");
+    });
+
+    it("batch-normalized mode: passes when all plans in batch have required keys", () => {
+      const corpus = [
+        {
+          id: "bn-2",
+          raw: "batch output with 2 plans",
+          baselineConfidence: 0.85,
+          expectedPlanCount: 2,
+          requiredKeys: ["id", "title"],
+          parseMode: "batch-normalized",
+        },
+      ];
+      const result = replayCorpus(corpus, () => ({
+        confidence: 0.85,
+        plans: [
+          { id: 1, title: "a" },
+          { id: 2, title: "b" },
+        ],
+      }));
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("batch-normalized mode: flags regression when batch returns empty plans with expected count", () => {
+      const corpus = [
+        {
+          id: "bn-3",
+          raw: "batch raw output",
+          baselineConfidence: 0.7,
+          expectedPlanCount: 3,
+          requiredKeys: ["id"],
+          parseMode: "batch-normalized",
+        },
+      ];
+      const result = replayCorpus(corpus, () => ({ confidence: 0.7, plans: [] }));
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("id"));
+    });
+
+    it("result carries parseMode through to output", () => {
+      const corpus = [
+        {
+          id: "pm-1",
+          raw: "input",
+          baselineConfidence: 0.8,
+          expectedPlanCount: 1,
+          parseMode: "json-direct",
+        },
+      ];
+      const result = replayCorpus(corpus, () => ({ confidence: 0.8, plans: [{ title: "x" }] }));
+      assert.equal(result.results[0].parseMode, "json-direct");
+    });
+
+    it("result parseMode is undefined for corpus entries without parseMode", () => {
+      const corpus = [
+        { id: "no-pm", raw: "input", baselineConfidence: 0.8, expectedPlanCount: 1 },
+      ];
+      const result = replayCorpus(corpus, () => ({ confidence: 0.8, plans: [{ title: "x" }] }));
+      assert.equal(result.results[0].parseMode, undefined);
+    });
   });
 });
