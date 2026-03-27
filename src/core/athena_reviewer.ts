@@ -1044,8 +1044,54 @@ export function scorePlanQuality(plan) {
   if (vague.test(String(plan.task || ""))) {
     score -= 15; issues.push("task uses vague language");
   }
+  // capacityDelta and requestROI are mandatory ranking inputs.
+  // Plans missing either cannot be ordered by cost-effectiveness.
+  if (!("capacityDelta" in plan) || !Number.isFinite(Number(plan.capacityDelta))) {
+    score -= 15; issues.push("capacityDelta missing or invalid — required for ranking");
+  }
+  if (!("requestROI" in plan) || !Number.isFinite(Number(plan.requestROI)) || Number(plan.requestROI) <= 0) {
+    score -= 15; issues.push("requestROI missing or invalid — required for ranking");
+  }
 
   return { score: Math.max(0, score), issues };
+}
+
+/**
+ * Compute a composite ranking score for a single plan.
+ *
+ * Formula: requestROI × (1 + capacityDelta)
+ *
+ * Rationale:
+ *   - requestROI captures cost-effectiveness (higher = more return per premium request)
+ *   - capacityDelta captures net system capacity change ([-1, 1] → multiplier [0, 2])
+ *   - Plans with negative capacityDelta (risky or regressive) are down-ranked
+ *   - Plans missing either field score 0 (will be filtered before ranking)
+ *
+ * @param {object} plan
+ * @returns {number} ranking score ≥ 0
+ */
+export function computePlanRankScore(plan: Record<string, any>): number {
+  if (!plan || typeof plan !== "object") return 0;
+  const roi = Number(plan.requestROI);
+  const delta = Number(plan.capacityDelta);
+  if (!Number.isFinite(roi) || roi <= 0) return 0;
+  if (!Number.isFinite(delta)) return 0;
+  return roi * (1 + delta);
+}
+
+/**
+ * Rank plans by composite ROI score (requestROI × (1 + capacityDelta)), descending.
+ *
+ * Plans missing or having invalid capacityDelta/requestROI sort to the end.
+ * The original array is NOT mutated — a new sorted array is returned.
+ * Within equal scores, original order is preserved (stable sort).
+ *
+ * @param {object[]} plans
+ * @returns {object[]} sorted copy of plans, highest score first
+ */
+export function rankPlansByROI(plans: any[]): any[] {
+  if (!Array.isArray(plans)) return [];
+  return [...plans].sort((a, b) => computePlanRankScore(b) - computePlanRankScore(a));
 }
 
 /** Minimum quality score for a plan to pass the deterministic pre-gate. */

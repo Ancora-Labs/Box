@@ -43,20 +43,20 @@ describe("plan_contract_validator", () => {
     });
 
     it("warns on missing wave", () => {
-      const plan = { task: "Implement something long enough", role: "worker", verification: "npm test", dependencies: [], acceptance_criteria: ["pass"] };
+      const plan = { task: "Implement something long enough", role: "worker", verification: "npm test", dependencies: [], acceptance_criteria: ["pass"], capacityDelta: 0.1, requestROI: 1.5 };
       const result = validatePlanContract(plan);
       // wave warning is non-critical
       assert.ok(result.violations.some(v => v.field === "wave"));
     });
 
     it("warns on missing verification", () => {
-      const plan = { task: "Implement something long enough", role: "worker", wave: 1, dependencies: [], acceptance_criteria: ["pass"] };
+      const plan = { task: "Implement something long enough", role: "worker", wave: 1, dependencies: [], acceptance_criteria: ["pass"], capacityDelta: 0.1, requestROI: 1.5 };
       const result = validatePlanContract(plan);
       assert.ok(result.violations.some(v => v.field === "verification"));
     });
 
     it("warns on missing dependencies", () => {
-      const plan = { task: "Implement something long enough", role: "worker", wave: 1, verification: "npm test", acceptance_criteria: ["pass"] };
+      const plan = { task: "Implement something long enough", role: "worker", wave: 1, verification: "npm test", acceptance_criteria: ["pass"], capacityDelta: 0.1, requestROI: 1.5 };
       const result = validatePlanContract(plan);
       assert.ok(result.violations.some(v => v.field === "dependencies"));
     });
@@ -69,6 +69,8 @@ describe("plan_contract_validator", () => {
         verification: "node --test tests/**/*.test.ts",
         dependencies: [],
         acceptance_criteria: ["pass"],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, false);
@@ -83,6 +85,8 @@ describe("plan_contract_validator", () => {
         verification: "npm test",
         dependencies: [],
         acceptance_criteria: ["pass"],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, true);
@@ -96,6 +100,8 @@ describe("plan_contract_validator", () => {
         verification: "npm test",
         dependencies: [],
         acceptance_criteria: [],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, false);
@@ -110,6 +116,8 @@ describe("plan_contract_validator", () => {
         verification: "node --test src/**/*.test.ts",
         dependencies: [],
         acceptance_criteria: ["pass"],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, false);
@@ -125,6 +133,8 @@ describe("plan_contract_validator", () => {
         verification_commands: ["npm test", "node --test tests/**/*.test.ts"],
         dependencies: [],
         acceptance_criteria: ["pass"],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, false);
@@ -140,6 +150,8 @@ describe("plan_contract_validator", () => {
         verification_commands: ["npm test", "npm run lint"],
         dependencies: [],
         acceptance_criteria: ["pass"],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, true);
@@ -154,6 +166,8 @@ describe("plan_contract_validator", () => {
         verification_commands: ["node --test src/**/*.test.ts"],
         dependencies: [],
         acceptance_criteria: ["pass"],
+        capacityDelta: 0.1,
+        requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
       assert.equal(result.valid, false);
@@ -162,7 +176,7 @@ describe("plan_contract_validator", () => {
   });
 
   describe("validatePlanContract — capacityDelta and requestROI (measurable packet scoring)", () => {
-    it("warns when capacityDelta is missing", () => {
+    it("rejects when capacityDelta is missing (CRITICAL)", () => {
       const plan = {
         task: "Implement something long enough",
         role: "worker",
@@ -173,10 +187,11 @@ describe("plan_contract_validator", () => {
         requestROI: 1.5,
       };
       const result = validatePlanContract(plan);
-      assert.ok(result.violations.some(v => v.field === "capacityDelta" && v.severity === PLAN_VIOLATION_SEVERITY.WARNING));
+      assert.equal(result.valid, false, "plan must be invalid without capacityDelta");
+      assert.ok(result.violations.some(v => v.field === "capacityDelta" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
     });
 
-    it("warns when requestROI is missing", () => {
+    it("rejects when requestROI is missing (CRITICAL)", () => {
       const plan = {
         task: "Implement something long enough",
         role: "worker",
@@ -187,7 +202,8 @@ describe("plan_contract_validator", () => {
         capacityDelta: 0.1,
       };
       const result = validatePlanContract(plan);
-      assert.ok(result.violations.some(v => v.field === "requestROI" && v.severity === PLAN_VIOLATION_SEVERITY.WARNING));
+      assert.equal(result.valid, false, "plan must be invalid without requestROI");
+      assert.ok(result.violations.some(v => v.field === "requestROI" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
     });
 
     it("accepts valid capacityDelta at boundaries", () => {
@@ -210,7 +226,7 @@ describe("plan_contract_validator", () => {
       }
     });
 
-    it("warns when capacityDelta is out of range", () => {
+    it("rejects when capacityDelta is out of range (CRITICAL)", () => {
       const plan = {
         task: "Implement something long enough",
         role: "worker",
@@ -222,10 +238,11 @@ describe("plan_contract_validator", () => {
         requestROI: 1.0,
       };
       const result = validatePlanContract(plan);
-      assert.ok(result.violations.some(v => v.field === "capacityDelta" && v.severity === PLAN_VIOLATION_SEVERITY.WARNING));
+      assert.equal(result.valid, false, "plan must be invalid with out-of-range capacityDelta");
+      assert.ok(result.violations.some(v => v.field === "capacityDelta" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
     });
 
-    it("warns when requestROI is zero or negative (not measurable)", () => {
+    it("rejects when requestROI is zero or negative (CRITICAL)", () => {
       for (const roi of [0, -0.5, -1]) {
         const plan = {
           task: "Implement something long enough",
@@ -238,9 +255,10 @@ describe("plan_contract_validator", () => {
           requestROI: roi,
         };
         const result = validatePlanContract(plan);
+        assert.equal(result.valid, false, `plan must be invalid with requestROI=${roi}`);
         assert.ok(
-          result.violations.some(v => v.field === "requestROI" && v.severity === PLAN_VIOLATION_SEVERITY.WARNING),
-          `requestROI=${roi} should produce a warning`
+          result.violations.some(v => v.field === "requestROI" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL),
+          `requestROI=${roi} should produce a CRITICAL violation`
         );
       }
     });
@@ -261,7 +279,7 @@ describe("plan_contract_validator", () => {
       assert.ok(!result.violations.some(v => v.field === "requestROI"), "no requestROI warning expected");
     });
 
-    it("missing capacityDelta/requestROI does not make an otherwise-valid plan invalid (WARNING not CRITICAL)", () => {
+    it("missing capacityDelta/requestROI makes an otherwise-valid plan invalid (CRITICAL violations)", () => {
       const plan = {
         task: "Implement something long enough",
         role: "worker",
@@ -272,9 +290,9 @@ describe("plan_contract_validator", () => {
         // no capacityDelta or requestROI
       };
       const result = validatePlanContract(plan);
-      assert.equal(result.valid, true, "plan should still be valid — these are WARNINGs not CRITICALs");
-      assert.ok(result.violations.some(v => v.field === "capacityDelta"));
-      assert.ok(result.violations.some(v => v.field === "requestROI"));
+      assert.equal(result.valid, false, "plan must be invalid — capacityDelta and requestROI are required");
+      assert.ok(result.violations.some(v => v.field === "capacityDelta" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+      assert.ok(result.violations.some(v => v.field === "requestROI" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
     });
   });
 
@@ -287,7 +305,7 @@ describe("plan_contract_validator", () => {
 
     it("computes correct pass rate for mixed plans", () => {
       const plans = [
-        { task: "Valid plan with enough chars", role: "worker", wave: 1, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"] },
+        { task: "Valid plan with enough chars", role: "worker", wave: 1, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"], capacityDelta: 0.1, requestROI: 1.5 },
         { task: "X", role: "", wave: -1, verification: "" }, // invalid
       ];
       const result = validateAllPlans(plans);
@@ -299,8 +317,8 @@ describe("plan_contract_validator", () => {
 
     it("returns all valid when all plans pass", () => {
       const plans = [
-        { task: "First valid plan task here", role: "w1", wave: 1, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"] },
-        { task: "Second valid plan task here", role: "w2", wave: 2, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"] },
+        { task: "First valid plan task here", role: "w1", wave: 1, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"], capacityDelta: 0.1, requestROI: 2.0 },
+        { task: "Second valid plan task here", role: "w2", wave: 2, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"], capacityDelta: 0.2, requestROI: 1.5 },
       ];
       const result = validateAllPlans(plans);
       assert.equal(result.passRate, 1);
@@ -309,9 +327,9 @@ describe("plan_contract_validator", () => {
 
     it("planIndex correctly identifies critical-violation plans for removal", () => {
       const plans = [
-        { task: "Valid plan with enough chars", role: "worker", wave: 1, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"] },
+        { task: "Valid plan with enough chars", role: "worker", wave: 1, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"], capacityDelta: 0.1, requestROI: 1.5 },
         { task: "X", role: "", wave: -1, verification: "" }, // critical violations
-        { task: "Another valid plan here", role: "worker", wave: 2, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"] },
+        { task: "Another valid plan here", role: "worker", wave: 2, verification: "npm test", dependencies: [], acceptance_criteria: ["ok"], capacityDelta: 0.2, requestROI: 2.0 },
       ];
       const result = validateAllPlans(plans);
 

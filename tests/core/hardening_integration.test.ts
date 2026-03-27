@@ -412,7 +412,7 @@ describe("artifact gate — hard-block integration across done-emission paths", 
 // ── Plan packet — measurable capacity delta and request-ROI ───────────────────
 
 describe("plan packet — capacityDelta and requestROI field enforcement", () => {
-  it("plan without capacityDelta gets a warning violation with measurable message", () => {
+  it("plan without capacityDelta gets a CRITICAL violation with measurable message", () => {
     const plan = {
       task: "Add integration hardening to BOX core",
       role: "evolution-worker",
@@ -425,11 +425,11 @@ describe("plan packet — capacityDelta and requestROI field enforcement", () =>
     const result = validatePlanContract(plan);
     const v = result.violations.find(v => v.field === "capacityDelta");
     assert.ok(v !== undefined, "missing capacityDelta must produce a violation");
-    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.WARNING);
+    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.CRITICAL);
     assert.ok(v!.message.includes("measurable"), "violation message must mention measurable");
   });
 
-  it("plan without requestROI gets a warning with ROI mention", () => {
+  it("plan without requestROI gets a CRITICAL violation with ROI mention", () => {
     const plan = {
       task: "Add integration hardening to BOX core",
       role: "evolution-worker",
@@ -442,7 +442,7 @@ describe("plan packet — capacityDelta and requestROI field enforcement", () =>
     const result = validatePlanContract(plan);
     const v = result.violations.find(v => v.field === "requestROI");
     assert.ok(v !== undefined, "missing requestROI must produce a violation");
-    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.WARNING);
+    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.CRITICAL);
     assert.ok(v!.message.toLowerCase().includes("roi") || v!.message.toLowerCase().includes("return"),
       "violation message must mention ROI or return-on-investment"
     );

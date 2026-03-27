@@ -28,7 +28,9 @@ import {
   verdictFromScore,
   scoreCalibrationPlan,
   computeCalibrationDeviation,
-  runCalibration
+  runCalibration,
+  computePlanRankScore,
+  rankPlansByROI,
 } from "../../src/core/athena_reviewer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -429,4 +431,84 @@ describe("calibration fixture schema — required fields and enums (AC8)", () =>
       }
     });
   }
+});
+
+// ── rankPlansByROI (capacityDelta/requestROI mandatory ranking) ───────────────
+
+describe("computePlanRankScore", () => {
+  it("computes score as requestROI × (1 + capacityDelta)", () => {
+    const score = computePlanRankScore({ requestROI: 2.0, capacityDelta: 0.5 });
+    assert.equal(score, 2.0 * (1 + 0.5));
+  });
+
+  it("returns 0 for missing requestROI", () => {
+    assert.equal(computePlanRankScore({ capacityDelta: 0.5 }), 0);
+  });
+
+  it("returns 0 for missing capacityDelta", () => {
+    assert.equal(computePlanRankScore({ requestROI: 2.0 }), 0);
+  });
+
+  it("returns 0 for non-positive requestROI", () => {
+    assert.equal(computePlanRankScore({ requestROI: 0, capacityDelta: 0.1 }), 0);
+    assert.equal(computePlanRankScore({ requestROI: -1, capacityDelta: 0.1 }), 0);
+  });
+
+  it("handles negative capacityDelta (regressive plan scores lower)", () => {
+    const aggressive = computePlanRankScore({ requestROI: 2.0, capacityDelta: 0.5 });
+    const regressive = computePlanRankScore({ requestROI: 2.0, capacityDelta: -0.5 });
+    assert.ok(aggressive > regressive, "positive delta should rank higher than negative delta");
+  });
+
+  it("returns 0 for null/undefined/non-object input", () => {
+    assert.equal(computePlanRankScore(null), 0);
+    assert.equal(computePlanRankScore(undefined), 0);
+    assert.equal(computePlanRankScore("string" as any), 0);
+  });
+});
+
+describe("rankPlansByROI", () => {
+  it("sorts plans by composite ROI score descending", () => {
+    const plans = [
+      { task: "low", requestROI: 1.0, capacityDelta: 0.1 },
+      { task: "high", requestROI: 3.0, capacityDelta: 0.5 },
+      { task: "medium", requestROI: 2.0, capacityDelta: 0.2 },
+    ];
+    const ranked = rankPlansByROI(plans);
+    assert.equal(ranked[0].task, "high");
+    assert.equal(ranked[1].task, "medium");
+    assert.equal(ranked[2].task, "low");
+  });
+
+  it("plans missing fields sort to the end", () => {
+    const plans = [
+      { task: "no-fields" },
+      { task: "has-fields", requestROI: 2.0, capacityDelta: 0.3 },
+    ];
+    const ranked = rankPlansByROI(plans);
+    assert.equal(ranked[0].task, "has-fields");
+    assert.equal(ranked[1].task, "no-fields");
+  });
+
+  it("does not mutate the original array", () => {
+    const plans = [
+      { task: "b", requestROI: 1.0, capacityDelta: 0.1 },
+      { task: "a", requestROI: 3.0, capacityDelta: 0.5 },
+    ];
+    const original = [...plans];
+    rankPlansByROI(plans);
+    assert.deepEqual(plans.map(p => p.task), original.map(p => p.task));
+  });
+
+  it("returns empty array for non-array input", () => {
+    assert.deepEqual(rankPlansByROI(null as any), []);
+    assert.deepEqual(rankPlansByROI(undefined as any), []);
+  });
+
+  it("returns single-element array unchanged", () => {
+    const plans = [{ task: "only", requestROI: 2.0, capacityDelta: 0.3 }];
+    const ranked = rankPlansByROI(plans);
+    assert.equal(ranked.length, 1);
+    assert.equal(ranked[0].task, "only");
+  });
 });
