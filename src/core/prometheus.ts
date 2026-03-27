@@ -521,6 +521,16 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
     waveDepends: Array.isArray(src.waveDepends)
       ? (src.waveDepends as any[]).map(Number).filter(n => Number.isFinite(n))
       : [],
+    // capacityDelta: mandatory field — expected measurable change in system capacity ∈ [-1.0, 1.0].
+    // Preserved from source when provided and valid; omitted otherwise (contract validator rejects).
+    ...(Number.isFinite(Number(src.capacityDelta)) && Number(src.capacityDelta) >= -1 && Number(src.capacityDelta) <= 1
+      ? { capacityDelta: Number(src.capacityDelta) }
+      : "capacityDelta" in src ? { capacityDelta: src.capacityDelta } : {}),
+    // requestROI: mandatory field — expected return-on-investment for premium request consumed.
+    // Preserved from source when provided and valid; omitted otherwise (contract validator rejects).
+    ...(Number.isFinite(Number(src.requestROI)) && Number(src.requestROI) > 0
+      ? { requestROI: Number(src.requestROI) }
+      : "requestROI" in src ? { requestROI: src.requestROI } : {}),
   };
 }
 
@@ -1114,6 +1124,8 @@ Each packet MUST contain ALL of the following fields:
 - **verification**: Specific test file path AND expected test description or observable log assertion (e.g., "tests/core/foo.test.ts — test: should return X when Y"). Generic "npm test" or "run tests" is REJECTED.
 - **premortem** (REQUIRED when riskLevel is "medium" or "high"): Object with: failureModes (array of ≥2 distinct failure scenarios each with cause+impact), mitigations (array), rollbackPlan (string describing how to revert safely).
 - **leverage_rank**: Which dimension(s) from the EQUAL DIMENSION SET this improves
+- **capacityDelta** (REQUIRED): Finite number ∈ [-1.0, 1.0] — expected net change in system capacity if this plan succeeds. Positive = capacity gain, negative = capacity regression, zero = neutral. Used for plan ranking.
+- **requestROI** (REQUIRED): Positive finite number — expected return-on-investment for the premium request consumed (e.g., 2.0 = doubles value spent). Used for plan ranking.
 
 ## PACKET FIELD ENFORCEMENT RULES
 These rules are enforced by the quality gate. Violations cause plan rejection:
@@ -1124,6 +1136,7 @@ These rules are enforced by the quality gate. Violations cause plan rejection:
 5. **acceptance_criteria**: ≥2 items, each a concrete testable statement. Every item must be independently verifiable.
 6. **riskLevel + premortem**: Any task modifying orchestration paths, plan parsing, or dispatch logic is automatically high-risk and requires a compliant premortem.
 7. **requestBudget**: Compute byWave and byRole from actual plan distribution. Never emit _fallback:true. byWave and byRole arrays must not be empty if plans exist.
+8. **capacityDelta + requestROI**: Both are REQUIRED on every plan. Omitting either causes plan rejection by the contract validator.
 
 Write the entire response in English only.
 If you include recommendations, rank them by capacity-increase leverage, not by fear or surface risk alone.
@@ -1158,10 +1171,12 @@ The JSON block must contain all of the following fields:
     "dependencies": [],
     "acceptance_criteria": ["...", "..."],
     "verification": "tests/core/foo.test.ts — test: expected description",
-    "premortem": null
+    "premortem": null,
+    "capacityDelta": <number ∈ [-1.0, 1.0]>,
+    "requestROI": <positive number>
   }]
 }
-Do NOT omit target_files, before_state, after_state, scope, or acceptance_criteria from any plan entry.
+Do NOT omit target_files, before_state, after_state, scope, acceptance_criteria, capacityDelta, or requestROI from any plan entry.
 Do NOT emit requestBudget with _fallback:true — compute byWave and byRole from the actual plan list.
 Keep diagnostic findings in analysis or strategicNarrative and include only actionable redesign work in plans.
 Wrap the JSON companion with markers:
