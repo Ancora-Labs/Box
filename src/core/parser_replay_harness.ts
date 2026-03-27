@@ -18,6 +18,18 @@ export const MAX_CONFIDENCE_DELTA = -0.15;
 const MAX_CORPUS_SIZE = 50;
 
 /**
+ * Parse modes supported by the replay harness.
+ *
+ * - json-direct:      parser returns a fully-structured JSON object with a `plans` array.
+ * - fallback:         parser degraded gracefully; may return fewer plans or lower confidence.
+ * - batch-normalized: parser merged multiple batch outputs into a single flat `plans` array.
+ *
+ * The `parseMode` field on a corpus entry is informational — required-key omission is treated
+ * as a hard regression in ALL modes.
+ */
+export type ParseMode = "json-direct" | "fallback" | "batch-normalized";
+
+/**
  * @typedef {object} CorpusEntry
  * @property {string} id — unique entry identifier
  * @property {string} raw — raw planner output text (first 5000 chars)
@@ -25,6 +37,7 @@ const MAX_CORPUS_SIZE = 50;
  * @property {number} baselineConfidence — confidence at time of recording
  * @property {string} recordedAt — ISO timestamp
  * @property {string[]} [requiredKeys] — keys that must be present in every parsed plan
+ * @property {ParseMode} [parseMode] — which parse mode was active when the baseline was recorded
  */
 
 /**
@@ -37,6 +50,7 @@ const MAX_CORPUS_SIZE = 50;
  * @property {number} baselinePlanCount
  * @property {number} currentPlanCount
  * @property {string[]} omittedKeys — required keys missing from any parsed plan
+ * @property {ParseMode|undefined} parseMode — mode recorded on the corpus entry
  */
 
 /**
@@ -105,14 +119,25 @@ export function replayCorpus(corpus, parserFn) {
     const delta = currentConfidence - (entry.baselineConfidence || 0);
     const confidenceRegressed = delta < MAX_CONFIDENCE_DELTA;
 
-    // Check for omitted mandatory keys in every parsed plan
+    // Hard regression check: required keys must be present in every parsed plan,
+    // across all parse modes (json-direct, fallback, batch-normalized).
+    // If the parser returned no plans but plans were expected and requiredKeys are
+    // declared, all required keys are treated as omitted — this covers the fallback
+    // mode case where an empty plans array silently hides missing-key regressions.
     const requiredKeys: string[] = Array.isArray(entry.requiredKeys) ? entry.requiredKeys : [];
     const omittedKeys: string[] = [];
-    if (requiredKeys.length > 0 && parsedPlans.length > 0) {
-      for (const key of requiredKeys) {
-        const missing = parsedPlans.some(plan => !(key in (plan as object)));
-        if (missing && !omittedKeys.includes(key)) {
+    if (requiredKeys.length > 0) {
+      if (parsedPlans.length === 0 && (entry.expectedPlanCount || 0) > 0) {
+        // No plans returned but plans were expected — all required keys are absent.
+        for (const key of requiredKeys) {
           omittedKeys.push(key);
+        }
+      } else {
+        for (const key of requiredKeys) {
+          const missing = parsedPlans.some(plan => !(key in (plan as object)));
+          if (missing && !omittedKeys.includes(key)) {
+            omittedKeys.push(key);
+          }
         }
       }
     }
@@ -129,6 +154,7 @@ export function replayCorpus(corpus, parserFn) {
       baselinePlanCount: entry.expectedPlanCount || 0,
       currentPlanCount,
       omittedKeys,
+      parseMode: entry.parseMode,
     });
   }
 
