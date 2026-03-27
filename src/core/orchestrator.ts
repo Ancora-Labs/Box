@@ -72,6 +72,118 @@ export const ORCHESTRATOR_STATUS = Object.freeze({
   DEGRADED: "degraded"
 });
 
+/**
+ * Health divergence state enum.
+ * Describes how operational health (orchestrator) and planner health (Prometheus) relate.
+ *
+ *   none                       — both agree on a healthy state; no warning needed
+ *   planner_warning            — orchestrator is operational but planner reports needs-work
+ *   planner_critical           — orchestrator is operational but planner reports critical
+ *   operational_degraded_planner_ok — orchestrator is degraded but planner reports good
+ *   both_degraded              — orchestrator is degraded AND planner reports needs-work/critical
+ *   unknown                    — insufficient data to determine divergence
+ */
+export const HEALTH_DIVERGENCE_STATE = Object.freeze({
+  NONE:                          "none",
+  PLANNER_WARNING:               "planner_warning",
+  PLANNER_CRITICAL:              "planner_critical",
+  OPERATIONAL_DEGRADED_PLANNER_OK: "operational_degraded_planner_ok",
+  BOTH_DEGRADED:                 "both_degraded",
+  UNKNOWN:                       "unknown",
+});
+
+/**
+ * Resolved pipeline status values produced by the health divergence mapping.
+ * These represent the single authoritative status a consumer should act on
+ * when operational and planner health must be reconciled.
+ */
+export const PIPELINE_HEALTH_STATUS = Object.freeze({
+  HEALTHY:  "healthy",
+  WARNING:  "warning",
+  CRITICAL: "critical",
+  UNKNOWN:  "unknown",
+});
+
+/**
+ * Compare operational health (orchestrator status) with planner health (Prometheus
+ * projectHealth) and return a deterministic divergence record.
+ *
+ * Exported so tests and downstream consumers can verify the mapping logic.
+ *
+ * @param {string} operationalStatus — "operational" | "degraded" | unknown string
+ * @param {string} plannerHealth     — "good" | "needs-work" | "critical" | unknown string
+ * @returns {{ divergenceState, pipelineStatus, operationalStatus, plannerHealth, isWarning }}
+ */
+export function computeHealthDivergence(operationalStatus, plannerHealth) {
+  const opStatus = String(operationalStatus || "").toLowerCase().trim();
+  const phStatus = String(plannerHealth || "").toLowerCase().trim();
+
+  const isOperational = opStatus === ORCHESTRATOR_STATUS.OPERATIONAL;
+  const isDegraded    = opStatus === ORCHESTRATOR_STATUS.DEGRADED;
+  const isGood        = phStatus === "good";
+  const isNeedsWork   = phStatus === "needs-work";
+  const isCritical    = phStatus === "critical";
+
+  if (!opStatus || !phStatus || (!isOperational && !isDegraded) || (!isGood && !isNeedsWork && !isCritical)) {
+    return {
+      divergenceState: HEALTH_DIVERGENCE_STATE.UNKNOWN,
+      pipelineStatus:  PIPELINE_HEALTH_STATUS.UNKNOWN,
+      operationalStatus: opStatus || "unknown",
+      plannerHealth:     phStatus || "unknown",
+      isWarning: false,
+    };
+  }
+
+  if (isDegraded && (isNeedsWork || isCritical)) {
+    return {
+      divergenceState: HEALTH_DIVERGENCE_STATE.BOTH_DEGRADED,
+      pipelineStatus:  PIPELINE_HEALTH_STATUS.CRITICAL,
+      operationalStatus: opStatus,
+      plannerHealth:     phStatus,
+      isWarning: true,
+    };
+  }
+
+  if (isDegraded && isGood) {
+    return {
+      divergenceState: HEALTH_DIVERGENCE_STATE.OPERATIONAL_DEGRADED_PLANNER_OK,
+      pipelineStatus:  PIPELINE_HEALTH_STATUS.WARNING,
+      operationalStatus: opStatus,
+      plannerHealth:     phStatus,
+      isWarning: true,
+    };
+  }
+
+  if (isOperational && isCritical) {
+    return {
+      divergenceState: HEALTH_DIVERGENCE_STATE.PLANNER_CRITICAL,
+      pipelineStatus:  PIPELINE_HEALTH_STATUS.CRITICAL,
+      operationalStatus: opStatus,
+      plannerHealth:     phStatus,
+      isWarning: true,
+    };
+  }
+
+  if (isOperational && isNeedsWork) {
+    return {
+      divergenceState: HEALTH_DIVERGENCE_STATE.PLANNER_WARNING,
+      pipelineStatus:  PIPELINE_HEALTH_STATUS.WARNING,
+      operationalStatus: opStatus,
+      plannerHealth:     phStatus,
+      isWarning: true,
+    };
+  }
+
+  // operational + good → fully healthy
+  return {
+    divergenceState: HEALTH_DIVERGENCE_STATE.NONE,
+    pipelineStatus:  PIPELINE_HEALTH_STATUS.HEALTHY,
+    operationalStatus: opStatus,
+    plannerHealth:     phStatus,
+    isWarning: false,
+  };
+}
+
 /** Max automatic retries when a worker hits transient API errors (circuit breaker). */
 const MAX_TRANSIENT_RETRIES = 3;
 
@@ -1639,6 +1751,39 @@ async function runSingleCycle(config) {
     });
   } catch (err) {
     warn(`[orchestrator] Capacity scoreboard update failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Health divergence: publish deterministic cycle health resolution ──────
+  // Compares operational health (orchestrator_health.json) with planner health
+  // (prometheusAnalysis.projectHealth) and resolves any disagreement into an
+  // explicit warning state written to state/cycle_health.json.
+  // Advisory — never blocks orchestration.
+  try {
+    const plannerHealth = prometheusAnalysis?.projectHealth ?? "unknown";
+    const healthFile = await readJson(path.join(stateDir, "orchestrator_health.json"), null);
+    const operationalStatus = healthFile?.orchestratorStatus ?? ORCHESTRATOR_STATUS.OPERATIONAL;
+    const divergence = computeHealthDivergence(operationalStatus, plannerHealth);
+    await writeJson(path.join(stateDir, "cycle_health.json"), {
+      ...divergence,
+      recordedAt: new Date().toISOString(),
+    });
+    if (divergence.isWarning) {
+      await appendProgress(config,
+        `[HEALTH] Divergence detected — divergenceState=${divergence.divergenceState} pipelineStatus=${divergence.pipelineStatus} operationalStatus=${operationalStatus} plannerHealth=${plannerHealth}`
+      );
+      await appendAlert(config, {
+        severity: divergence.pipelineStatus === PIPELINE_HEALTH_STATUS.CRITICAL ? ALERT_SEVERITY.CRITICAL : ALERT_SEVERITY.HIGH,
+        source: "orchestrator",
+        title: `Health divergence: ${divergence.divergenceState}`,
+        message: `pipelineStatus=${divergence.pipelineStatus} operationalStatus=${operationalStatus} plannerHealth=${plannerHealth}`,
+      });
+    } else {
+      await appendProgress(config,
+        `[HEALTH] Cycle health consistent — pipelineStatus=${divergence.pipelineStatus} divergenceState=${divergence.divergenceState}`
+      );
+    }
+  } catch (err) {
+    warn(`[orchestrator] Health divergence check failed (non-fatal): ${String(err?.message || err)}`);
   }
 
   // ── Delta analytics + strategy retune (Wave 6) ───────────────────────────
