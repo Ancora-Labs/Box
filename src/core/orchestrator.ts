@@ -1476,8 +1476,14 @@ async function runSingleCycle(config) {
   }
 
   // ── Lane diversity gate (Packet 6) ──
+  // Pass the capability pool result (from assignWorkersToPlans) so the gate
+  // inspects actual lane assignments rather than a raw plans array.
+  // minLanes is read from config?.workerPool?.minLanes; defaults to 2.
   try {
-    const diversityResult = enforceLaneDiversity(plans);
+    const diversityPool = capabilityPoolResult || { activeLaneCount: 0, assignments: [] };
+    const diversityResult = enforceLaneDiversity(diversityPool, {
+      minLanes: config?.workerPool?.minLanes,
+    });
     if (!diversityResult.meetsMinimum) {
       await appendProgress(config, `[LANE_DIVERSITY] Warning: ${diversityResult.warning}`);
     }
