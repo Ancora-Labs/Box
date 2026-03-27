@@ -6,6 +6,7 @@ import {
   MANDATORY_ACTIONABLE_PACKET_FIELDS,
   PREMORTEM_RISK_LEVEL,
   validatePatchedPlan,
+  normalizePatchedPlansForDispatch,
 } from "../../src/core/athena_reviewer.js";
 
 const BASE_PLANS = [
@@ -272,4 +273,124 @@ describe("validatePatchedPlan (Task 3)", () => {
   });
 });
 
+// ── normalizePatchedPlansForDispatch ─────────────────────────────────────────
+
+describe("normalizePatchedPlansForDispatch", () => {
+  const ORIGINAL_PLAN = {
+    task: "Implement user authentication module",
+    role: "evolution-worker",
+    wave: 1,
+    priority: 2,
+    verification: "tests/core/auth.test.ts — test: should authenticate user",
+    dependencies: [],
+    acceptance_criteria: ["all tests pass"],
+    capacityDelta: 0.1,
+    requestROI: 2.0,
+    scope: "src/core/auth/",
+    target_files: ["src/core/auth.ts"],
+    riskLevel: "low",
+  };
+
+  it("returns empty array for empty patchedPlans", () => {
+    const result = normalizePatchedPlansForDispatch([], [ORIGINAL_PLAN]);
+    assert.deepEqual(result, []);
+  });
+
+  it("returns empty array when patchedPlans is not an array", () => {
+    const result = normalizePatchedPlansForDispatch(null as unknown as unknown[], [ORIGINAL_PLAN]);
+    assert.deepEqual(result, []);
+  });
+
+  it("inherits required contract fields from original when patched plan omits them", () => {
+    const patched = {
+      task: "Implement user authentication module",
+      role: "evolution-worker",
+      scope: "src/core/auth/",
+      target_files: ["src/core/auth.ts"],
+      acceptance_criteria: ["all tests pass"],
+      // capacityDelta, requestROI, wave, verification omitted
+    };
+    const result = normalizePatchedPlansForDispatch([patched], [ORIGINAL_PLAN]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].capacityDelta, 0.1, "capacityDelta should be inherited from original");
+    assert.equal(result[0].requestROI, 2.0, "requestROI should be inherited from original");
+    assert.equal(result[0].wave, 1, "wave should be inherited from original");
+    assert.equal(result[0].verification, ORIGINAL_PLAN.verification, "verification should be inherited from original");
+  });
+
+  it("Athena patched values override original values", () => {
+    const patched = {
+      ...ORIGINAL_PLAN,
+      task: "Implement updated authentication module",
+      wave: 2,
+      capacityDelta: 0.3,
+    };
+    const result = normalizePatchedPlansForDispatch([patched], [ORIGINAL_PLAN]);
+    assert.equal(result[0].task, "Implement updated authentication module", "patched task should override original");
+    assert.equal(result[0].wave, 2, "patched wave should override original");
+    assert.equal(result[0].capacityDelta, 0.3, "patched capacityDelta should override original");
+    assert.equal(result[0].requestROI, 2.0, "unchanged fields should be inherited from original");
+  });
+
+  it("normalizes targetFiles alias to target_files when target_files is absent", () => {
+    const patched = {
+      task: "Refactor module",
+      role: "evolution-worker",
+      scope: "src/",
+      acceptance_criteria: ["passes"],
+      targetFiles: ["src/core/foo.ts"],
+      // no target_files field
+    };
+    const result = normalizePatchedPlansForDispatch([patched], []);
+    assert.ok(Array.isArray(result[0].target_files), "target_files should be set from targetFiles alias");
+    assert.deepEqual(result[0].target_files, ["src/core/foo.ts"]);
+  });
+
+  it("does not overwrite target_files when both target_files and targetFiles are present", () => {
+    const patched = {
+      task: "Refactor module",
+      role: "evolution-worker",
+      scope: "src/",
+      acceptance_criteria: ["passes"],
+      target_files: ["src/core/bar.ts"],
+      targetFiles: ["src/core/foo.ts"],
+    };
+    const result = normalizePatchedPlansForDispatch([patched], []);
+    assert.deepEqual(result[0].target_files, ["src/core/bar.ts"], "target_files should not be overwritten by targetFiles alias");
+  });
+
+  it("handles non-object patched plan entries gracefully (uses original as base)", () => {
+    const result = normalizePatchedPlansForDispatch([null as unknown, "bad" as unknown], [ORIGINAL_PLAN, ORIGINAL_PLAN]);
+    assert.equal(result.length, 2);
+    // null entry → merged is just the original
+    assert.equal(result[0].task, ORIGINAL_PLAN.task);
+    // string entry → merged is just the original
+    assert.equal(result[1].task, ORIGINAL_PLAN.task);
+  });
+
+  it("handles patched plans beyond the length of originals (no original to merge with)", () => {
+    const patched = {
+      task: "New extra task added by Athena",
+      role: "evolution-worker",
+      wave: 3,
+      scope: "src/new/",
+      target_files: ["src/new/module.ts"],
+      acceptance_criteria: ["passes"],
+      capacityDelta: 0.05,
+      requestROI: 1.5,
+      verification: "tests/core/new.test.ts — test: module loads",
+    };
+    const result = normalizePatchedPlansForDispatch([patched], []); // no originals
+    assert.equal(result.length, 1);
+    assert.equal(result[0].task, patched.task, "extra plan should be preserved as-is");
+    assert.equal(result[0].capacityDelta, 0.05);
+  });
+
+  it("negative path: omitting capacityDelta from both patched and original yields undefined (contract validator catches it)", () => {
+    const originalWithoutCapacity = { task: "Some task here long enough", role: "worker", wave: 1 };
+    const patched = { task: "Some task here long enough", role: "worker" };
+    const result = normalizePatchedPlansForDispatch([patched], [originalWithoutCapacity]);
+    assert.equal(result[0].capacityDelta, undefined, "capacityDelta should be undefined when absent in both — contract validator should catch this");
+  });
+});
 

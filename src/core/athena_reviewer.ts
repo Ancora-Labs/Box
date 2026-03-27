@@ -926,6 +926,44 @@ export function validatePatchedPlan(plan: unknown): { valid: boolean; issues: st
   return { valid: issues.length === 0, issues };
 }
 
+/**
+ * Normalize Athena patchedPlans for dispatch by merging each patched plan with
+ * its corresponding original Prometheus plan at the same index.
+ *
+ * Athena returns the full corrected plan array in patchedPlans but may omit fields
+ * that were not changed (e.g., capacityDelta, requestROI, wave, dependencies).
+ * This function ensures every patched plan inherits required contract fields from
+ * the original, with Athena's patched values taking precedence.
+ *
+ * Also normalizes field aliases: targetFiles → target_files when target_files is absent.
+ *
+ * @param patchedPlans - plan array from Athena's patchedPlans response
+ * @param originalPlans - original plan array from Prometheus (base defaults)
+ * @returns normalized plan array ready for dispatch
+ */
+export function normalizePatchedPlansForDispatch(
+  patchedPlans: unknown[],
+  originalPlans: unknown[],
+): Record<string, unknown>[] {
+  if (!Array.isArray(patchedPlans) || patchedPlans.length === 0) return [];
+  const originals = Array.isArray(originalPlans) ? originalPlans : [];
+  return patchedPlans.map((patched, i) => {
+    const original = (originals[i] != null && typeof originals[i] === "object")
+      ? (originals[i] as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
+    const p = (patched != null && typeof patched === "object")
+      ? (patched as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
+    // Merge: original fields provide defaults, Athena's patched values override
+    const merged: Record<string, unknown> = { ...original, ...p };
+    // Normalize targetFiles alias → target_files when only alias is present
+    if (Array.isArray(merged.targetFiles) && !Array.isArray(merged.target_files)) {
+      merged.target_files = merged.targetFiles;
+    }
+    return merged;
+  });
+}
+
 
 const EXPLICIT_APPROVAL_STATUS_VALUES = new Set([
   "approved", "approve", "pass", "passed", "accept", "accepted",
@@ -1365,6 +1403,14 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
+
+  // ── Re-normalize patchedPlans against original Prometheus plans ────────────
+  // Merges Athena's patched fields onto the originals so required contract fields
+  // (task, role, wave, verification, capacityDelta, requestROI, etc.) are always
+  // present before validation and before the result is persisted to disk.
+  if (Array.isArray(result.patchedPlans) && result.patchedPlans.length > 0) {
+    result.patchedPlans = normalizePatchedPlansForDispatch(result.patchedPlans, plans);
+  }
 
   // ── Patched-plan validation gate (Task 3) ─────────────────────────────────
   // Block approval when Athena's patchedPlans contain unresolved target-file placeholders

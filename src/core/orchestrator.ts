@@ -23,7 +23,7 @@ import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, read
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
 import { runPrometheusAnalysis } from "./prometheus.js";
-import { runAthenaPlanReview } from "./athena_reviewer.js";
+import { runAthenaPlanReview, normalizePatchedPlansForDispatch } from "./athena_reviewer.js";
 import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle, shouldTriggerSelfImprovement } from "./self_improvement.js";
 import { collectEvolutionMetrics } from "./evolution_metrics.js";
@@ -652,8 +652,11 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
 
   const athenaReview = await readJson(path.join(stateDir, "athena_plan_review.json"), null);
   const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
-  const plans = Array.isArray(athenaReview?.patchedPlans) && athenaReview.patchedPlans.length > 0
+  const rawPatchedPlans = Array.isArray(athenaReview?.patchedPlans) && athenaReview.patchedPlans.length > 0
     ? athenaReview.patchedPlans
+    : null;
+  const plans = rawPatchedPlans
+    ? normalizePatchedPlansForDispatch(rawPatchedPlans, Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [])
     : (Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : []);
   if (!athenaReview?.approved || plans.length === 0) return false;
   const workerBatches = buildRoleExecutionBatches(plans, config);
@@ -1381,9 +1384,14 @@ async function runSingleCycle(config) {
   await safeUpdatePipelineProgress(config, "athena_approved", "Athena approved the plan");
 
   // Step 4: Dispatch workers sequentially (1 request per worker)
+  // patchedPlans are already normalized against original Prometheus plans by runAthenaPlanReview.
   const plans = Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0
     ? planReview.patchedPlans
     : prometheusAnalysis.plans;
+
+  if (Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0) {
+    await appendProgress(config, `[CYCLE] Using ${plans.length} Athena-normalized patched plan(s) for dispatch`);
+  }
 
   // Funnel tracking: capture approved count before quality/freeze gates reduce plans.
   const funnelApprovedCount: number = plans.length;
