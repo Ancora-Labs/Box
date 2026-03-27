@@ -204,6 +204,108 @@ Wave 2
   });
 });
 
+describe("normalizePrometheusParsedOutput — confidence components", () => {
+  it("emits full-score components when plans are JSON-direct and health is explicit", () => {
+    const parsed = {
+      projectHealth: "good",
+      plans: [{ task: "Fix verification harness", role: "evolution-worker" }],
+      requestBudget: { estimatedPremiumRequestsTotal: 2, errorMarginPercent: 15, hardCapTotal: 3 }
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.ok(result.parserConfidenceComponents, "parserConfidenceComponents must be present");
+    assert.equal(result.parserConfidenceComponents.plansShape, 1.0);
+    assert.equal(result.parserConfidenceComponents.healthField, 1.0);
+    assert.equal(result.parserConfidenceComponents.requestBudget, 1.0);
+    assert.ok(Array.isArray(result.parserConfidencePenalties), "parserConfidencePenalties must be an array");
+    assert.equal(result.parserConfidencePenalties.length, 0, "no penalties expected for full-score output");
+    assert.equal(result.parserConfidence, 1.0);
+  });
+
+  it("emits plansShape=0.5 and a narrative-fallback penalty when plans come from waves", () => {
+    const parsed = {
+      projectHealth: "needs-work",
+      waves: [{ wave: 1, tasks: ["Fix trust boundary"] }],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 }
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.equal(result.parserConfidenceComponents.plansShape, 0.5);
+    const penalty = result.parserConfidencePenalties.find(p => p.component === "plansShape");
+    assert.ok(penalty, "must have a plansShape penalty");
+    assert.equal(penalty.reason, "plans_from_narrative_fallback");
+    assert.equal(penalty.delta, -0.5);
+    assert.equal(result.parserConfidence, 0.5);
+  });
+
+  it("emits healthField=0.8 and a health-field penalty when projectHealth is missing", () => {
+    const parsed = {
+      plans: [{ task: "Add canary metrics", role: "evolution-worker" }],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 }
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.equal(result.parserConfidenceComponents.healthField, 0.8);
+    const penalty = result.parserConfidencePenalties.find(p => p.component === "healthField");
+    assert.ok(penalty, "must have a healthField penalty");
+    assert.equal(penalty.reason, "health_field_missing_or_invalid");
+    assert.equal(penalty.delta, -0.2);
+    assert.equal(result.parserConfidence, 0.8);
+  });
+
+  it("emits requestBudget=0.9 and a budget-fallback penalty when requestBudget is absent", () => {
+    const parsed = {
+      projectHealth: "good",
+      plans: [{ task: "Improve retry logic", role: "evolution-worker" }],
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.equal(result.parserConfidenceComponents.requestBudget, 0.9);
+    const penalty = result.parserConfidencePenalties.find(p => p.component === "requestBudget");
+    assert.ok(penalty, "must have a requestBudget penalty");
+    assert.equal(penalty.reason, "request_budget_fallback");
+    assert.equal(penalty.delta, -0.1);
+    assert.equal(result.parserConfidence, 0.9);
+  });
+
+  it("accumulates multiple penalties correctly", () => {
+    // Narrative plans (base=0.5) + missing health (-0.2) + no budget (-0.1) = 0.2
+    const parsed = {
+      waves: [{ wave: 1, tasks: ["Fix parser"] }],
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.equal(result.parserConfidenceComponents.plansShape, 0.5);
+    assert.equal(result.parserConfidenceComponents.healthField, 0.8);
+    assert.equal(result.parserConfidenceComponents.requestBudget, 0.9);
+    assert.equal(result.parserConfidencePenalties.length, 3);
+    // 0.5 - 0.2 - 0.1 = 0.2
+    assert.equal(result.parserConfidence, 0.2);
+  });
+
+  it("emits plansShape=0.0 and no_plans_extracted penalty when no plans are found", () => {
+    const result = normalizePrometheusParsedOutput({}, { raw: "" });
+
+    assert.equal(result.parserConfidenceComponents.plansShape, 0.0);
+    const penalty = result.parserConfidencePenalties.find(p => p.reason === "no_plans_extracted");
+    assert.ok(penalty, "must have a no_plans_extracted penalty");
+    assert.equal(penalty.component, "plansShape");
+  });
+
+  it("each penalty entry has required fields: reason, component, delta", () => {
+    const parsed = {
+      waves: [{ wave: 1, tasks: ["Fix something"] }],
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    for (const p of result.parserConfidencePenalties) {
+      assert.ok(typeof p.reason === "string" && p.reason.length > 0, "penalty must have reason");
+      assert.ok(typeof p.component === "string" && p.component.length > 0, "penalty must have component");
+      assert.ok(typeof p.delta === "number" && p.delta < 0, "penalty delta must be a negative number");
+    }
+  });
+});
+
 describe("filterResolvedCarryForwardItems", () => {
   const makePending = (followUpTask, workerName = "evolution-worker") => ({
     followUpNeeded: true,

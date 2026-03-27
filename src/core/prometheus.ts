@@ -857,20 +857,58 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
     };
   }
 
-  // Parser confidence: score 0-1 indicating how structured the AI output was.
-  // 1.0 = JSON plans parsed directly; 0.5 = narrative fallback used; lower = less signal
-  let parserConfidence = 1.0;
-  if (rawPlans.length === 0 && plans.length > 0) {
-    // Plans came from narrative/alternative shape parsing
-    parserConfidence = 0.5;
+  // Capture whether budget was model-provided or deterministically rebuilt.
+  // Must be captured AFTER the rebuild so _fallback=false doesn't shadow the origin.
+  const requestBudgetWasFallback = !(
+    input.requestBudget && Number.isFinite(Number(input.requestBudget.estimatedPremiumRequestsTotal))
+  );
+
+  // ── Parser confidence: structured breakdown ──────────────────────────────
+  // parserConfidenceComponents: per-dimension score (0-1) for each structural signal.
+  // parserConfidencePenalties: explicit list of reasons why the score was reduced.
+  // The aggregate parserConfidence remains a single 0-1 value (backward compatible).
+  //
+  //   plansShape    — 1.0 = JSON plans direct, 0.5 = narrative/alt-shape fallback, 0.0 = no plans
+  //   healthField   — 1.0 = explicit valid health value present, 0.8 = missing/inferred
+  //   requestBudget — 1.0 = budget provided by model, 0.9 = fallback rebuilt deterministically
+
+  const parserConfidencePenalties: Array<{ reason: string; component: string; delta: number }> = [];
+
+  let plansShapeScore: number;
+  if (rawPlans.length > 0) {
+    plansShapeScore = 1.0;
+  } else if (plans.length > 0) {
+    plansShapeScore = 0.5;
+    parserConfidencePenalties.push({ reason: "plans_from_narrative_fallback", component: "plansShape", delta: -0.5 });
+  } else {
+    plansShapeScore = 0.0;
+    parserConfidencePenalties.push({ reason: "no_plans_extracted", component: "plansShape", delta: -0.9 });
   }
-  if (plans.length === 0) {
-    parserConfidence = 0.1;
+
+  const healthFieldValid = Boolean(health && ["good", "needs-work", "critical"].includes(health));
+  const healthFieldScore = healthFieldValid ? 1.0 : 0.8;
+  if (!healthFieldValid) {
+    parserConfidencePenalties.push({ reason: "health_field_missing_or_invalid", component: "healthField", delta: -0.2 });
   }
-  if (!health || !["good", "needs-work", "critical"].includes(health)) {
-    parserConfidence = Math.max(0.1, parserConfidence - 0.2);
+
+  const requestBudgetScore = requestBudgetWasFallback ? 0.9 : 1.0;
+  if (requestBudgetWasFallback) {
+    parserConfidencePenalties.push({ reason: "request_budget_fallback", component: "requestBudget", delta: -0.1 });
   }
-  if (requestBudget._fallback) parserConfidence = Math.max(0.1, parserConfidence - 0.1);
+
+  const parserConfidenceComponents = {
+    plansShape:    plansShapeScore,
+    healthField:   healthFieldScore,
+    requestBudget: requestBudgetScore,
+  };
+
+  // Aggregate: plansShape sets the base; remaining penalties apply cumulatively.
+  let parserConfidence = rawPlans.length > 0 ? 1.0 : plans.length > 0 ? 0.5 : 0.1;
+  for (const penalty of parserConfidencePenalties) {
+    if (penalty.component !== "plansShape") {
+      parserConfidence = Math.max(0.1, parserConfidence + penalty.delta);
+    }
+  }
 
   // ── Strict parser confidence floor (Packet 11) ───────────────────────────
   // If confidence is below the floor, fail-closed: reject plans rather than
@@ -889,6 +927,8 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
     executionStrategy,
     requestBudget,
     parserConfidence: Math.round(parserConfidence * 100) / 100,
+    parserConfidenceComponents,
+    parserConfidencePenalties,
     _parserBelowFloor: belowFloor,
     _parserConfidenceFloor: PARSER_CONFIDENCE_FLOOR,
     plans: finalPlans
