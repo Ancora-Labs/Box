@@ -11,6 +11,10 @@
  */
 
 import { getVerificationProfile } from "./verification_profiles.js";
+import {
+  validateDispatchCommands,
+  type DispatchCommandValidationResult,
+} from "./verification_command_registry.js";
 
 // ── Post-merge verification artifact patterns (Packet 1) ───────────────────
 // Worker output must contain a git SHA and raw npm test stdout block for
@@ -456,4 +460,43 @@ export function decideRework(validationResult, originalTask, currentAttempt, max
     instruction,
     shouldEscalate: false
   };
+}
+
+// ── Dispatch command gate (Task 3) ────────────────────────────────────────────
+
+/** Re-export for callers that only import from verification_gate. */
+export type { DispatchCommandValidationResult };
+
+/**
+ * Apply the dispatch command gate to a task plan before worker dispatch begins.
+ *
+ * Rewrites any non-portable verification commands (shell globs, bash/sh scripts,
+ * BOX daemon invocations) to their canonical, cross-platform equivalents and
+ * returns both the sanitized task and an audit record of applied rewrites.
+ *
+ * This gate is intended to be called immediately before a task plan is handed
+ * off to worker_runner or evolution_executor — NOT after the worker returns.
+ *
+ * Usage:
+ *   const { task: safeTask, gate } = applyDispatchCommandGate(rawTask);
+ *   if (!gate.safe) logger.warn("Rewrote non-portable commands", gate.rewrites);
+ *   dispatch(safeTask);
+ *
+ * @param task — raw task plan object; must have an optional verification_commands array
+ * @returns {{ task: object, gate: DispatchCommandValidationResult }}
+ */
+export function applyDispatchCommandGate(
+  task: { verification_commands?: string[] | unknown } & Record<string, unknown>
+): { task: typeof task; gate: DispatchCommandValidationResult } {
+  const rawCommands = Array.isArray(task?.verification_commands)
+    ? (task.verification_commands as string[])
+    : [];
+
+  const gate = validateDispatchCommands(rawCommands);
+
+  const sanitizedTask = gate.safe
+    ? task
+    : { ...task, verification_commands: gate.sanitizedCommands };
+
+  return { task: sanitizedTask, gate };
 }

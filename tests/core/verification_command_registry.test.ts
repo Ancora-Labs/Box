@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getVerificationCommands, getTestCommand, VERIFICATION_DEFAULTS, checkForbiddenCommands, FORBIDDEN_VERIFICATION_PATTERNS, rewriteVerificationCommand, VERIFICATION_CMD_REWRITE_RULES, normalizeCommandBatch } from "../../src/core/verification_command_registry.js";
+import { getVerificationCommands, getTestCommand, VERIFICATION_DEFAULTS, checkForbiddenCommands, FORBIDDEN_VERIFICATION_PATTERNS, rewriteVerificationCommand, VERIFICATION_CMD_REWRITE_RULES, normalizeCommandBatch, validateDispatchCommands } from "../../src/core/verification_command_registry.js";
+import { applyDispatchCommandGate } from "../../src/core/verification_gate.js";
 
 describe("verification_command_registry", () => {
   describe("getVerificationCommands", () => {
@@ -279,5 +280,136 @@ describe("Windows-safe conformance — AI-generated glob patterns (Task 2)", () 
     // npx tsx glob, ts-node glob, node --test glob all rewrite to npm test — deduplicated to 1
     const npmTestCount = result.filter(c => c === "npm test").length;
     assert.equal(npmTestCount, 1, "all glob rewrites collapse to a single 'npm test' after deduplication");
+  });
+});
+
+// ── Task 3: validateDispatchCommands — dispatch-time gate ─────────────────────
+
+describe("validateDispatchCommands — dispatch-time gate (Task 3)", () => {
+  it("safe=true when all commands are already canonical", () => {
+    const result = validateDispatchCommands(["npm test", "npm run lint", "npm run build"]);
+    assert.equal(result.safe, true);
+    assert.deepEqual(result.rewrites, []);
+    assert.deepEqual(result.sanitizedCommands, ["npm test", "npm run lint", "npm run build"]);
+  });
+
+  it("safe=false and rewrites populated when a non-portable command is present", () => {
+    const result = validateDispatchCommands(["node --test tests/**/*.test.ts", "npm run lint"]);
+    assert.equal(result.safe, false);
+    assert.ok(result.rewrites.length > 0);
+    assert.ok(result.rewrites[0].original === "node --test tests/**/*.test.ts");
+    assert.equal(result.rewrites[0].rewritten, "npm test");
+    assert.ok(result.rewrites[0].reason.length > 0);
+  });
+
+  it("sanitizedCommands contains only the rewritten (canonical) commands", () => {
+    const result = validateDispatchCommands(["bash run.sh", "npm run lint"]);
+    assert.ok(!result.sanitizedCommands.some(cmd => cmd.startsWith("bash")));
+    assert.ok(result.sanitizedCommands.includes("npm test"));
+    assert.ok(result.sanitizedCommands.includes("npm run lint"));
+  });
+
+  it("deduplicates commands that rewrite to the same canonical form", () => {
+    const result = validateDispatchCommands([
+      "node --test tests/**/*.test.ts",
+      "bash scripts/test.sh",
+      "npm test",
+    ]);
+    // All three collapse to "npm test" — only one should appear
+    const count = result.sanitizedCommands.filter(c => c === "npm test").length;
+    assert.equal(count, 1, "deduplication must collapse identical rewrites to one entry");
+  });
+
+  it("returns safe=true and empty arrays for empty input", () => {
+    const result = validateDispatchCommands([]);
+    assert.equal(result.safe, true);
+    assert.deepEqual(result.sanitizedCommands, []);
+    assert.deepEqual(result.rewrites, []);
+  });
+
+  it("returns safe=true and empty sanitizedCommands for non-array input", () => {
+    const result = validateDispatchCommands(null as any);
+    assert.equal(result.safe, true);
+    assert.deepEqual(result.sanitizedCommands, []);
+    assert.deepEqual(result.rewrites, []);
+  });
+
+  it("filters out empty strings from the command list", () => {
+    const result = validateDispatchCommands(["", "  ", "npm test"]);
+    assert.equal(result.sanitizedCommands.length, 1);
+    assert.equal(result.sanitizedCommands[0], "npm test");
+  });
+
+  it("each rewrite entry has original, rewritten, and reason fields", () => {
+    const result = validateDispatchCommands(["sh run.sh"]);
+    assert.ok(result.rewrites.length > 0);
+    const r = result.rewrites[0];
+    assert.ok(typeof r.original === "string" && r.original.length > 0);
+    assert.ok(typeof r.rewritten === "string" && r.rewritten.length > 0);
+    assert.ok(typeof r.reason === "string" && r.reason.length > 0);
+  });
+
+  it("negative path: BOX daemon command is rewritten and gate reports unsafe", () => {
+    const result = validateDispatchCommands(["npm run box:once"]);
+    assert.equal(result.safe, false);
+    assert.equal(result.rewrites[0].original, "npm run box:once");
+    assert.equal(result.rewrites[0].rewritten, "npm test");
+  });
+
+  it("negative path: canonical npm commands are not flagged as unsafe (no false positives)", () => {
+    for (const cmd of ["npm test", "npm run lint", "npm run build"]) {
+      const result = validateDispatchCommands([cmd]);
+      assert.equal(result.safe, true, `"${cmd}" should not be rewritten`);
+      assert.deepEqual(result.rewrites, []);
+    }
+  });
+});
+
+// ── applyDispatchCommandGate — verification_gate integration ──────────────────
+
+describe("applyDispatchCommandGate — dispatch-time integration (Task 3)", () => {
+  it("returns task unchanged when all commands are canonical", () => {
+    const task = { title: "My task", verification_commands: ["npm test", "npm run lint"] };
+    const { task: result, gate } = applyDispatchCommandGate(task);
+    assert.equal(gate.safe, true);
+    assert.deepEqual(result.verification_commands, task.verification_commands);
+    // Returned task is same reference when safe
+    assert.equal(result, task);
+  });
+
+  it("returns sanitized task when non-portable commands are present", () => {
+    const task = {
+      title: "Fix bug",
+      verification_commands: ["node --test tests/**/*.ts", "npm run lint"],
+    };
+    const { task: result, gate } = applyDispatchCommandGate(task);
+    assert.equal(gate.safe, false);
+    assert.ok(!(result.verification_commands as string[]).some(cmd => cmd.includes("*")));
+    assert.ok((result.verification_commands as string[]).includes("npm test"));
+    assert.ok((result.verification_commands as string[]).includes("npm run lint"));
+  });
+
+  it("gate rewrites array describes every substitution made", () => {
+    const task = { verification_commands: ["bash test.sh", "sh run.sh"] };
+    const { gate } = applyDispatchCommandGate(task);
+    assert.ok(gate.rewrites.length > 0, "rewrites must be populated for non-portable commands");
+    for (const r of gate.rewrites) {
+      assert.ok(r.original && r.rewritten && r.reason);
+    }
+  });
+
+  it("task without verification_commands is returned safely (no throw)", () => {
+    const task = { title: "Scan task" };
+    const { task: result, gate } = applyDispatchCommandGate(task);
+    assert.equal(gate.safe, true);
+    assert.deepEqual(gate.sanitizedCommands, []);
+    assert.equal(result, task);
+  });
+
+  it("negative path: non-array verification_commands does not throw", () => {
+    const task = { verification_commands: "npm test" as any };
+    const { task: result, gate } = applyDispatchCommandGate(task);
+    assert.equal(gate.safe, true);
+    assert.ok(result !== undefined);
   });
 });

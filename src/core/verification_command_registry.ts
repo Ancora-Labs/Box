@@ -171,3 +171,82 @@ export function checkForbiddenCommands(command) {
   }
   return { forbidden: violations.length > 0, violations };
 }
+
+// ── Dispatch command validation gate (Task 3) ─────────────────────────────────
+
+/**
+ * A single rewrite applied during dispatch command validation.
+ *
+ * @property original  — the raw command before rewriting
+ * @property rewritten — the canonical command after rewriting
+ * @property reason    — human-readable description of why the rewrite was applied
+ */
+export interface DispatchCommandRewrite {
+  original: string;
+  rewritten: string;
+  reason: string;
+}
+
+/**
+ * Result of validateDispatchCommands().
+ *
+ * @property safe             — true when all commands were already canonical (no rewrites applied)
+ * @property sanitizedCommands — commands after applying all rewrite rules (deduplicated, non-empty)
+ * @property rewrites          — list of rewrites applied; empty when safe=true
+ */
+export interface DispatchCommandValidationResult {
+  safe: boolean;
+  sanitizedCommands: string[];
+  rewrites: DispatchCommandRewrite[];
+}
+
+/**
+ * Validate and rewrite a list of verification commands before worker dispatch.
+ *
+ * This is the canonical dispatch-time gate. It applies all rewrite rules,
+ * collects an audit trail of every substitution made, deduplicates, and
+ * signals whether any command needed rewriting.
+ *
+ * Callers that assemble a task brief for worker dispatch should call this
+ * function and use sanitizedCommands in the outgoing task payload. If
+ * rewrites is non-empty, the caller should log the changes for observability.
+ *
+ * @param {string[]} commands — raw verification command strings from the task plan
+ * @returns {DispatchCommandValidationResult}
+ */
+export function validateDispatchCommands(commands: string[]): DispatchCommandValidationResult {
+  if (!Array.isArray(commands)) {
+    return { safe: true, sanitizedCommands: [], rewrites: [] };
+  }
+
+  const rewrites: DispatchCommandRewrite[] = [];
+  const seen = new Set<string>();
+  const sanitizedCommands: string[] = [];
+
+  for (const rawCmd of commands) {
+    const original = String(rawCmd || "").trim();
+    if (!original) continue;
+
+    const rewritten = rewriteVerificationCommand(original);
+
+    if (rewritten !== original) {
+      // Determine human-readable reason from the matching rewrite rule
+      const matchedRule = VERIFICATION_CMD_REWRITE_RULES.find(r => r.match.test(original));
+      const reason = matchedRule
+        ? `Rewritten to portable equivalent: "${matchedRule.replacement}" (matched pattern: ${matchedRule.match.source})`
+        : `Non-portable command rewritten to "${rewritten}"`;
+      rewrites.push({ original, rewritten, reason });
+    }
+
+    if (rewritten && !seen.has(rewritten)) {
+      seen.add(rewritten);
+      sanitizedCommands.push(rewritten);
+    }
+  }
+
+  return {
+    safe: rewrites.length === 0,
+    sanitizedCommands,
+    rewrites,
+  };
+}

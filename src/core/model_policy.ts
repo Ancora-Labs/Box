@@ -12,6 +12,9 @@
  * to enforce model selection before any AI call.
  */
 
+import path from "node:path";
+import { readJson, writeJson } from "./fs_utils.js";
+
 // ── Banned model patterns (case-insensitive) ─────────────────────────────────
 // These patterns match against the resolved model slug BEFORE any CLI call.
 // If a model matches ANY pattern, it is rejected unconditionally.
@@ -306,4 +309,175 @@ export function routeModelWithUncertainty(taskHints: TaskHints = {}, modelOption
   }
 
   return { ...base, uncertainty };
+}
+
+// ── Route ROI Ledger — Packet 14 persistence ──────────────────────────────────
+//
+// The ledger persists expected and realized quality scores per routing decision
+// so that historical ROI deltas can inform next-cycle model selection.
+//
+// File: state/route_roi_ledger.json  (array of RouteROIEntry, capped at MAX_LEDGER_SIZE)
+
+const ROUTE_ROI_LEDGER_FILE = "route_roi_ledger.json";
+
+/** Maximum number of entries kept in the ledger. */
+export const MAX_LEDGER_SIZE = 200;
+
+/**
+ * A single routing decision record in the ROI ledger.
+ *
+ * @property taskId           — unique task identifier
+ * @property model            — model that was selected for this task
+ * @property tier             — complexity tier (T1/T2/T3)
+ * @property estimatedTokens  — estimated prompt token count at routing time
+ * @property expectedQuality  — quality score predicted at routing time (0–1)
+ * @property realizedQuality  — actual quality score recorded after task completion (null until realized)
+ * @property outcome          — task outcome ("done"/"partial"/"blocked"/"error"; null until realized)
+ * @property roi              — computed ROI = realizedQuality / (estimatedTokens / 1000); null until realized
+ * @property roiDelta         — realizedROI − expectedROI; learning signal for next-cycle routing; null until realized
+ * @property routedAt         — ISO timestamp when the routing decision was made
+ * @property realizedAt       — ISO timestamp when the outcome was recorded; null until realized
+ */
+export interface RouteROIEntry {
+  taskId: string;
+  model: string;
+  tier: string;
+  estimatedTokens: number;
+  expectedQuality: number;
+  realizedQuality: number | null;
+  outcome: string | null;
+  roi: number | null;
+  roiDelta: number | null;
+  routedAt: string;
+  realizedAt: string | null;
+}
+
+/**
+ * Append a new routing decision to the ROI ledger.
+ * The realized fields (realizedQuality, outcome, roi, roiDelta, realizedAt)
+ * start as null and are populated later by realizeRouteROIEntry().
+ *
+ * Never throws — write errors propagate to the caller.
+ *
+ * @param config  — BOX config object (config.paths.stateDir)
+ * @param entry   — routing decision to record (realized fields optional, default null)
+ */
+export async function appendRouteROIEntry(
+  config: object,
+  entry: Pick<RouteROIEntry, "taskId" | "model" | "tier" | "estimatedTokens" | "expectedQuality"> & Partial<RouteROIEntry>
+): Promise<void> {
+  const stateDir = (config as any)?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, ROUTE_ROI_LEDGER_FILE);
+
+  const ledger: RouteROIEntry[] = await readJson(filePath, []);
+  const safeList: RouteROIEntry[] = Array.isArray(ledger) ? ledger : [];
+
+  const record: RouteROIEntry = {
+    taskId:          entry.taskId,
+    model:           entry.model,
+    tier:            entry.tier,
+    estimatedTokens: entry.estimatedTokens,
+    expectedQuality: entry.expectedQuality,
+    realizedQuality: entry.realizedQuality ?? null,
+    outcome:         entry.outcome ?? null,
+    roi:             entry.roi ?? null,
+    roiDelta:        entry.roiDelta ?? null,
+    routedAt:        entry.routedAt || new Date().toISOString(),
+    realizedAt:      entry.realizedAt ?? null,
+  };
+
+  safeList.push(record);
+  const trimmed = safeList.length > MAX_LEDGER_SIZE ? safeList.slice(-MAX_LEDGER_SIZE) : safeList;
+  await writeJson(filePath, trimmed);
+}
+
+/**
+ * Record the realized outcome for a previously appended routing entry.
+ * Locates the most-recent entry for taskId, computes ROI and delta, then
+ * persists the updated ledger.
+ *
+ * No-op (safe) when taskId is not found in the ledger.
+ *
+ * @param config        — BOX config object
+ * @param taskId        — task identifier matching the original appendRouteROIEntry() call
+ * @param qualityScore  — actual quality score (0–1) assessed after task completion
+ * @param outcome       — task outcome string ("done"/"partial"/"blocked"/"error")
+ */
+export async function realizeRouteROIEntry(
+  config: object,
+  taskId: string,
+  qualityScore: number,
+  outcome: string
+): Promise<void> {
+  const stateDir = (config as any)?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, ROUTE_ROI_LEDGER_FILE);
+
+  const ledger: RouteROIEntry[] = await readJson(filePath, []);
+  const safeList: RouteROIEntry[] = Array.isArray(ledger) ? ledger : [];
+
+  // Find the last unrealized entry for this taskId
+  let found = false;
+  for (let i = safeList.length - 1; i >= 0; i--) {
+    if (safeList[i].taskId === taskId && safeList[i].realizedAt === null) {
+      const entry = safeList[i];
+      const tokens = entry.estimatedTokens || 1;
+      const roi = Math.round((qualityScore / (tokens / 1000)) * 100) / 100;
+      const expectedROI = Math.round((entry.expectedQuality / (tokens / 1000)) * 100) / 100;
+      safeList[i] = {
+        ...entry,
+        realizedQuality: qualityScore,
+        outcome,
+        roi,
+        roiDelta: Math.round((roi - expectedROI) * 1000) / 1000,
+        realizedAt: new Date().toISOString(),
+      };
+      found = true;
+      break;
+    }
+  }
+
+  if (found) {
+    await writeJson(filePath, safeList);
+  }
+}
+
+/**
+ * Load the full ROI ledger from state.
+ * Returns an empty array when the file does not exist.
+ *
+ * @param config — BOX config object
+ */
+export async function loadRouteROILedger(config: object): Promise<RouteROIEntry[]> {
+  const stateDir = (config as any)?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, ROUTE_ROI_LEDGER_FILE);
+  const data = await readJson(filePath, []);
+  return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Compute the average realized ROI for a complexity tier from the ledger.
+ *
+ * Only realized entries (realizedAt !== null) for the requested tier are
+ * included. Returns 0 when no realized history is available so callers
+ * can distinguish "no data" from "genuinely zero ROI" (which would require
+ * quality=0 on every task, an unusual but possible state).
+ *
+ * @param config  — BOX config object
+ * @param tier    — COMPLEXITY_TIER value ("T1"/"T2"/"T3")
+ * @param limit   — max entries to consider (most-recent first; default 20)
+ * @returns average realized ROI (0 when no realized history for tier)
+ */
+export async function computeRecentROIForTier(
+  config: object,
+  tier: string,
+  limit = 20
+): Promise<number> {
+  const ledger = await loadRouteROILedger(config);
+  const realized = ledger
+    .filter(e => e.tier === tier && e.realizedAt !== null && typeof e.roi === "number")
+    .slice(-limit);
+
+  if (realized.length === 0) return 0;
+  const sum = realized.reduce((acc, e) => acc + (e.roi as number), 0);
+  return Math.round((sum / realized.length) * 1000) / 1000;
 }

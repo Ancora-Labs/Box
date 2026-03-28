@@ -1,6 +1,18 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { loadCorpus, appendCorpusEntry, replayCorpus, MAX_CONFIDENCE_DELTA } from "../../src/core/parser_replay_harness.js";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
+import {
+  loadCorpus,
+  appendCorpusEntry,
+  replayCorpus,
+  MAX_CONFIDENCE_DELTA,
+  computeDispatchStrictness,
+  DISPATCH_STRICTNESS,
+  persistReplayRegressionState,
+  loadReplayRegressionState,
+} from "../../src/core/parser_replay_harness.js";
 
 describe("parser_replay_harness (Packet 10)", () => {
   describe("loadCorpus", () => {
@@ -311,5 +323,374 @@ describe("parser_replay_harness (Packet 10)", () => {
       const result = replayCorpus(corpus, () => ({ confidence: 0.8, plans: [{ title: "x" }] }));
       assert.equal(result.results[0].parseMode, undefined);
     });
+
+    // ── Adversarial marker / fence pattern corpus entries ──────────────────────
+
+    it("===DECISION===/===END=== marker: parser correctly extracts plans — no regression", () => {
+      // Simulates a planner response that wraps JSON in BOX decision markers.
+      const raw = `Some thinking here.\n===DECISION===\n{"plans":[{"title":"t","priority":1}]}\n===END===`;
+      const corpus = [
+        {
+          id: "adv-decision-marker",
+          raw,
+          baselineConfidence: 0.9,
+          expectedPlanCount: 1,
+          requiredKeys: ["title", "priority"],
+          parseMode: "json-direct" as const,
+        },
+      ];
+      // Parser that handles ===DECISION=== markers
+      const parserFn = (input: string) => {
+        const match = input.match(/===DECISION===\s*([\s\S]*?)===END===/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[1].trim());
+            return { confidence: 0.9, plans: parsed.plans || [] };
+          } catch { /* fall through */ }
+        }
+        return { confidence: 0, plans: [] };
+      };
+      const result = replayCorpus(corpus, parserFn);
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("===DECISION===/===END=== marker: parser regression when key missing after marker extraction", () => {
+      const raw = `Thinking.\n===DECISION===\n{"plans":[{"title":"t"}]}\n===END===`;
+      const corpus = [
+        {
+          id: "adv-marker-missing-key",
+          raw,
+          baselineConfidence: 0.9,
+          expectedPlanCount: 1,
+          requiredKeys: ["title", "priority"],
+          parseMode: "json-direct" as const,
+        },
+      ];
+      const parserFn = (input: string) => {
+        const match = input.match(/===DECISION===\s*([\s\S]*?)===END===/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[1].trim());
+            return { confidence: 0.9, plans: parsed.plans || [] };
+          } catch { /* fall through */ }
+        }
+        return { confidence: 0, plans: [] };
+      };
+      const result = replayCorpus(corpus, parserFn);
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("priority"));
+    });
+
+    it("===KARAR===/===SON=== legacy marker: parser handles legacy Turkish format", () => {
+      const raw = `Düşünce.\n===KARAR===\n{"plans":[{"title":"t","priority":2}]}\n===SON===`;
+      const corpus = [
+        {
+          id: "adv-karar-marker",
+          raw,
+          baselineConfidence: 0.85,
+          expectedPlanCount: 1,
+          requiredKeys: ["title", "priority"],
+          parseMode: "fallback" as const,
+        },
+      ];
+      const parserFn = (input: string) => {
+        const match = input.match(/===KARAR===\s*([\s\S]*?)===SON===/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[1].trim());
+            return { confidence: 0.85, plans: parsed.plans || [] };
+          } catch { /* fall through */ }
+        }
+        return { confidence: 0, plans: [] };
+      };
+      const result = replayCorpus(corpus, parserFn);
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("```json fence: parser extracts JSON from fenced code block — no regression", () => {
+      const raw = `Here is the plan:\n\`\`\`json\n{"plans":[{"id":1,"title":"implement feature"}]}\n\`\`\`\nEnd.`;
+      const corpus = [
+        {
+          id: "adv-json-fence",
+          raw,
+          baselineConfidence: 0.88,
+          expectedPlanCount: 1,
+          requiredKeys: ["id", "title"],
+          parseMode: "json-direct" as const,
+        },
+      ];
+      const parserFn = (input: string) => {
+        const match = input.match(/```json\s*([\s\S]*?)```/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[1].trim());
+            return { confidence: 0.88, plans: parsed.plans || [] };
+          } catch { /* fall through */ }
+        }
+        return { confidence: 0, plans: [] };
+      };
+      const result = replayCorpus(corpus, parserFn);
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("adversarial partial marker (no ===END===): parser degrades to empty plans → regression", () => {
+      // Unclosed marker — parser cannot extract JSON; expected plans were 1 → regression.
+      const raw = `===DECISION===\n{"plans":[{"title":"t","priority":1}]}\n<!-- missing end marker -->`;
+      const corpus = [
+        {
+          id: "adv-partial-marker",
+          raw,
+          baselineConfidence: 0.9,
+          expectedPlanCount: 1,
+          requiredKeys: ["title", "priority"],
+          parseMode: "fallback" as const,
+        },
+      ];
+      const parserFn = (input: string) => {
+        // Strict marker parser — requires both open and close
+        const match = input.match(/===DECISION===\s*([\s\S]*?)===END===/);
+        if (!match) return { confidence: 0.9, plans: [] }; // degraded: no close marker
+        try {
+          const parsed = JSON.parse(match[1].trim());
+          return { confidence: 0.9, plans: parsed.plans || [] };
+        } catch {
+          return { confidence: 0.9, plans: [] };
+        }
+      };
+      const result = replayCorpus(corpus, parserFn);
+      // No plans returned but 1 expected — required keys all omitted → regression
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("title"));
+      assert.ok(result.results[0].omittedKeys.includes("priority"));
+    });
+
+    it("adversarial nested fence (```json inside ===DECISION===): parser uses outer marker", () => {
+      const inner = '```json\n{"plans":[{"title":"nested"}]}\n```';
+      const raw = `===DECISION===\n${inner}\n===END===`;
+      const corpus = [
+        {
+          id: "adv-nested-fence",
+          raw,
+          baselineConfidence: 0.8,
+          expectedPlanCount: 1,
+          requiredKeys: ["title"],
+          parseMode: "json-direct" as const,
+        },
+      ];
+      // Parser that correctly extracts from the outer marker, then optionally from inner fence
+      const parserFn = (input: string) => {
+        const markerMatch = input.match(/===DECISION===\s*([\s\S]*?)===END===/);
+        const section = markerMatch ? markerMatch[1].trim() : input;
+        // Try direct JSON first
+        try { const p = JSON.parse(section); return { confidence: 0.8, plans: p.plans || [] }; } catch {}
+        // Try inner fence
+        const fenceMatch = section.match(/```json\s*([\s\S]*?)```/);
+        if (fenceMatch) {
+          try { const p = JSON.parse(fenceMatch[1].trim()); return { confidence: 0.8, plans: p.plans || [] }; } catch {}
+        }
+        return { confidence: 0.8, plans: [] };
+      };
+      const result = replayCorpus(corpus, parserFn);
+      assert.equal(result.passed, true);
+      assert.deepEqual(result.results[0].omittedKeys, []);
+    });
+
+    it("adversarial confidence-stable marker regression: confidence unchanged but parser returns wrong type", () => {
+      // Parser returns non-array plans — should be treated as empty
+      const raw = `===DECISION===\n{"plans":"not-an-array"}\n===END===`;
+      const corpus = [
+        {
+          id: "adv-wrong-type",
+          raw,
+          baselineConfidence: 0.9,
+          expectedPlanCount: 1,
+          requiredKeys: ["title"],
+          parseMode: "json-direct" as const,
+        },
+      ];
+      const parserFn = (_input: string) => {
+        // Returns non-array plans — harness normalizes to []
+        return { confidence: 0.9, plans: "not-an-array" as any };
+      };
+      const result = replayCorpus(corpus, parserFn);
+      // plans normalized to [] — expectedPlanCount=1 → required keys omitted
+      assert.equal(result.passed, false);
+      assert.ok(result.results[0].omittedKeys.includes("title"));
+    });
+  });
+});
+
+// ── computeDispatchStrictness — calibration tests ─────────────────────────────
+
+describe("computeDispatchStrictness — strictness calibration", () => {
+  it("NORMAL: zero regressions and parser healthy", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 0, totalCount: 10, passed: true, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.NORMAL);
+    assert.equal(result.regressionRate, 0);
+    assert.equal(result.recoveryActive, false);
+  });
+
+  it("NORMAL: no corpus state and parser healthy", () => {
+    const result = computeDispatchStrictness(null, null);
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.NORMAL);
+    assert.equal(result.regressionRate, 0);
+  });
+
+  it("ELEVATED: 1 out of 10 regressions (10% rate)", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 1, totalCount: 10, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.ELEVATED);
+    assert.ok(result.reason.includes("1 regression"));
+  });
+
+  it("ELEVATED: recovery active with high parser confidence (≥0.7)", () => {
+    const result = computeDispatchStrictness(
+      null,
+      { recoveryActive: true, parserConfidence: 0.75, recordedAt: new Date().toISOString() } as any,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.ELEVATED);
+    assert.equal(result.recoveryActive, true);
+    assert.ok(result.reason.toLowerCase().includes("recovery"));
+  });
+
+  it("STRICT: 3 out of 10 regressions (30% rate)", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 3, totalCount: 10, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.STRICT);
+    assert.ok(result.regressionRate > 0.2);
+  });
+
+  it("STRICT: recovery active with deep confidence degradation (<0.7)", () => {
+    const result = computeDispatchStrictness(
+      null,
+      { recoveryActive: true, parserConfidence: 0.5, recordedAt: new Date().toISOString() } as any,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.STRICT);
+    assert.ok(result.reason.includes("deep confidence"));
+  });
+
+  it("STRICT: exactly 21% regression rate (just over 20% boundary)", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 21, totalCount: 100, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.STRICT);
+  });
+
+  it("BLOCKED: 6 out of 10 regressions (60% rate)", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 6, totalCount: 10, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.BLOCKED);
+    assert.ok(result.reason.includes("50%"));
+  });
+
+  it("BLOCKED: exactly 51% regression rate (just over 50% boundary)", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 51, totalCount: 100, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.BLOCKED);
+  });
+
+  it("result always includes regressionCount, totalCount, regressionRate, recoveryActive", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 2, totalCount: 20, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.equal(typeof result.regressionCount, "number");
+    assert.equal(typeof result.totalCount, "number");
+    assert.equal(typeof result.regressionRate, "number");
+    assert.equal(typeof result.recoveryActive, "boolean");
+    assert.equal(typeof result.reason, "string");
+  });
+
+  it("result.strictness is one of the four DISPATCH_STRICTNESS values", () => {
+    const validValues = new Set(Object.values(DISPATCH_STRICTNESS));
+    for (const regressionCount of [0, 1, 3, 6]) {
+      const result = computeDispatchStrictness(
+        { regressionCount, totalCount: 10, passed: regressionCount === 0, computedAt: new Date().toISOString() },
+        null,
+      );
+      assert.ok(validValues.has(result.strictness as any), `Unexpected strictness: ${result.strictness}`);
+    }
+  });
+
+  it("ELEVATED takes precedence over NORMAL when recovery is active regardless of corpus", () => {
+    // No corpus (regressionRate=0) but recovery is active → ELEVATED
+    const result = computeDispatchStrictness(
+      { regressionCount: 0, totalCount: 5, passed: true, computedAt: new Date().toISOString() },
+      { recoveryActive: true, parserConfidence: 0.9, recordedAt: new Date().toISOString() } as any,
+    );
+    assert.equal(result.strictness, DISPATCH_STRICTNESS.ELEVATED);
+  });
+
+  it("negative path: NORMAL is not returned when any regression exists", () => {
+    const result = computeDispatchStrictness(
+      { regressionCount: 1, totalCount: 100, passed: false, computedAt: new Date().toISOString() },
+      null,
+    );
+    assert.notEqual(result.strictness, DISPATCH_STRICTNESS.NORMAL);
+  });
+});
+
+// ── Replay regression state persistence ───────────────────────────────────────
+
+describe("persistReplayRegressionState / loadReplayRegressionState", () => {
+  it("persists and loads regression state", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "prh-test-"));
+    try {
+      const config = { paths: { stateDir: tmpDir } };
+      const replayResult = {
+        regressionCount: 3,
+        results: [{}, {}, {}, {}, {}],
+        passed: false,
+      };
+      await persistReplayRegressionState(config, replayResult);
+      const loaded = await loadReplayRegressionState(config);
+      assert.ok(loaded !== null);
+      assert.equal(loaded!.regressionCount, 3);
+      assert.equal(loaded!.totalCount, 5);
+      assert.equal(loaded!.passed, false);
+      assert.ok(typeof loaded!.computedAt === "string");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loadReplayRegressionState returns null when file does not exist", async () => {
+    const result = await loadReplayRegressionState({ paths: { stateDir: "/nonexistent/path/xyz" } });
+    assert.equal(result, null);
+  });
+
+  it("persisted state matches replayCorpus output shape", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "prh-state-"));
+    try {
+      const config = { paths: { stateDir: tmpDir } };
+      const corpus = [
+        { id: "a", raw: "x", baselineConfidence: 0.9, expectedPlanCount: 1 },
+        { id: "b", raw: "y", baselineConfidence: 0.5, expectedPlanCount: 1 },
+      ];
+      const replayOutput = replayCorpus(corpus, () => ({ confidence: 0.9, plans: [{ title: "x" }] }));
+      await persistReplayRegressionState(config, replayOutput);
+      const loaded = await loadReplayRegressionState(config);
+      assert.ok(loaded !== null);
+      assert.equal(loaded!.regressionCount, replayOutput.regressionCount);
+      assert.equal(loaded!.totalCount, replayOutput.results.length);
+      assert.equal(loaded!.passed, replayOutput.passed);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
