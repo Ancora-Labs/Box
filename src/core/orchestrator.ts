@@ -96,6 +96,57 @@ export const ORCHESTRATOR_STATUS = Object.freeze({
 });
 
 /**
+ * Explicit gate-precedence mapping for evaluatePreDispatchGovernanceGate.
+ *
+ * Each value is the numeric order (1 = evaluated first) in which the gate fires.
+ * Lower numbers take priority — a gate with precedence 1 blocks before any gate
+ * with precedence 2 is evaluated. Consumers can compare result.gateIndex against
+ * these values to determine which gate fired without parsing the reason string.
+ *
+ * Order rationale:
+ *   1. BUDGET_ELIGIBILITY    — hard short-circuit; prevents expensive downstream reads
+ *   2. GUARDRAIL_PAUSE       — system-level safety valve; checked before governance logic
+ *   3. GOVERNANCE_FREEZE     — policy freeze overrides all planning gates
+ *   4. LINEAGE_CYCLE         — structural integrity before scheduling canary/debt checks
+ *   5. GOVERNANCE_CANARY     — canary breach triggers rollback; evaluated before ledger ops
+ *   6. CARRY_FORWARD_DEBT    — outstanding critical debt blocks new dispatch
+ *   7. MANDATORY_DRIFT_DEBT  — architecture integrity gate before plan validation
+ *   8. PLAN_EVIDENCE_COUPLING — last gate; validates individual plan completeness
+ */
+export const GATE_PRECEDENCE = Object.freeze({
+  BUDGET_ELIGIBILITY:     1,
+  GUARDRAIL_PAUSE:        2,
+  GOVERNANCE_FREEZE:      3,
+  LINEAGE_CYCLE:          4,
+  GOVERNANCE_CANARY:      5,
+  CARRY_FORWARD_DEBT:     6,
+  MANDATORY_DRIFT_DEBT:   7,
+  PLAN_EVIDENCE_COUPLING: 8,
+});
+
+/**
+ * Stable block-reason prefix constants emitted by evaluatePreDispatchGovernanceGate.
+ *
+ * Each constant is the authoritative prefix of the reason string returned when
+ * the corresponding gate fires.  Dynamic detail (counts, paths, sub-reasons) is
+ * appended after a `:` separator, but the prefix is guaranteed stable across
+ * releases so consumers can pattern-match on `reason.startsWith(BLOCK_REASON.X)`.
+ *
+ * BUDGET_EXHAUSTED intentionally mirrors the budget_controller output prefix so
+ * both the controller and the gate surface the same token vocabulary.
+ */
+export const BLOCK_REASON = Object.freeze({
+  BUDGET_EXHAUSTED:               "budget_exhausted",
+  GUARDRAIL_PAUSE_WORKERS_ACTIVE: "guardrail_pause_workers_active",
+  GOVERNANCE_FREEZE_ACTIVE:       "governance_freeze_active",
+  LINEAGE_CYCLE_DETECTED:         "lineage_cycle_detected",
+  GOVERNANCE_CANARY_BREACH:       "governance_canary_breach",
+  CRITICAL_DEBT_OVERDUE:          "critical_debt_overdue",
+  MANDATORY_DRIFT_DEBT_UNRESOLVED:"mandatory_drift_debt_unresolved",
+  PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",
+});
+
+/**
  * Health divergence state enum.
  * Describes how operational health (orchestrator) and planner health (Prometheus) relate.
  *
@@ -277,6 +328,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       graphResult: null,
       cycleId,
       budgetEligibility,
+      gateIndex: GATE_PRECEDENCE.BUDGET_ELIGIBILITY,
     };
   }
 
@@ -286,11 +338,12 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       if (pauseActive) {
         return {
           blocked: true,
-          reason: "guardrail_pause_workers_active",
+          reason: BLOCK_REASON.GUARDRAIL_PAUSE_WORKERS_ACTIVE,
           action: undefined,
           graphResult: null,
           cycleId,
-          budgetEligibility
+          budgetEligibility,
+          gateIndex: GATE_PRECEDENCE.GUARDRAIL_PAUSE,
         };
       }
     } catch (err) {
@@ -302,11 +355,12 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
   if (freezeStatus.active) {
     return {
       blocked: true,
-      reason: `governance_freeze_active:${freezeStatus.reason}`,
+      reason: `${BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE}:${freezeStatus.reason}`,
       action: undefined,
       graphResult: null,
       cycleId,
-      budgetEligibility
+      budgetEligibility,
+      gateIndex: GATE_PRECEDENCE.GOVERNANCE_FREEZE,
     };
   }
 
@@ -322,11 +376,12 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
   if (graphResult.status === GRAPH_STATUS.CYCLE_DETECTED) {
     return {
       blocked: true,
-      reason: `lineage_cycle_detected:${graphResult.reasonCode}`,
+      reason: `${BLOCK_REASON.LINEAGE_CYCLE_DETECTED}:${graphResult.reasonCode}`,
       action: undefined,
       graphResult,
       cycleId,
-      budgetEligibility
+      budgetEligibility,
+      gateIndex: GATE_PRECEDENCE.LINEAGE_CYCLE,
     };
   }
 
@@ -355,12 +410,13 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
 
     return {
       blocked: true,
-      reason: `governance_canary_breach:${canaryBreach.reason || "GOVERNANCE_CANARY_BREACH"}`,
+      reason: `${BLOCK_REASON.GOVERNANCE_CANARY_BREACH}:${canaryBreach.reason || "GOVERNANCE_CANARY_BREACH"}`,
       action: "rollback",
       graphResult,
       rollbackResult,
       cycleId,
-      budgetEligibility
+      budgetEligibility,
+      gateIndex: GATE_PRECEDENCE.GOVERNANCE_CANARY,
     };
   }
 
@@ -376,11 +432,12 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
     if (debtGate.shouldBlock) {
       return {
         blocked: true,
-        reason: `critical_debt_overdue:${debtGate.reason}`,
+        reason: `${BLOCK_REASON.CRITICAL_DEBT_OVERDUE}:${debtGate.reason}`,
         action: undefined,
         graphResult,
         cycleId,
         budgetEligibility,
+        gateIndex: GATE_PRECEDENCE.CARRY_FORWARD_DEBT,
       };
     }
   } catch (err) {
@@ -409,12 +466,13 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
         )];
         return {
           blocked: true,
-          reason: `mandatory_drift_debt_unresolved:${mandatoryDebt.length} high-priority drift debt task(s) remain — ${firstHint}`,
+          reason: `${BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED}:${mandatoryDebt.length} high-priority drift debt task(s) remain — ${firstHint}`,
           action: undefined,
           graphResult,
           cycleId,
           budgetEligibility,
           mandatoryDriftPaths,
+          gateIndex: GATE_PRECEDENCE.MANDATORY_DRIFT_DEBT,
         };
       }
     } catch (driftDebtErr) {
@@ -440,11 +498,12 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
     if (invalidPlans.length > 0) {
       return {
         blocked: true,
-        reason: `plan_evidence_coupling_invalid:${invalidPlans[0]}`,
+        reason: `${BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID}:${invalidPlans[0]}`,
         action: undefined,
         graphResult,
         cycleId,
         budgetEligibility,
+        gateIndex: GATE_PRECEDENCE.PLAN_EVIDENCE_COUPLING,
       };
     }
   }
