@@ -2060,7 +2060,7 @@ Consider whether the root causes are:
     // Filter uses deterministic PACKET_VIOLATION_CODE codes (canonical taxonomy from
     // plan_contract_validator.ts) rather than field-name string equality, so matching
     // is immune to field rename and consistent with the generation-boundary gate codes.
-    const CAPACITY_ROI_VIOLATION_CODES = new Set([
+    const CAPACITY_ROI_VIOLATION_CODES: Set<string> = new Set([
       PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA,
       PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA,
       PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
