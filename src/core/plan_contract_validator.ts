@@ -12,6 +12,64 @@
 import { checkForbiddenCommands } from "./verification_command_registry.js";
 
 /**
+ * Canonical deterministic violation code taxonomy.
+ *
+ * Used by both the pre-normalization generation-boundary gate
+ * (checkPacketCompleteness in prometheus.ts) and the post-normalization
+ * contract validator (validatePlanContract below).  Having a single source of
+ * truth means log messages, rejection metadata, and filtering logic all
+ * reference the same well-known codes rather than free-form field-name strings.
+ *
+ * Pre-normalization codes (shared with UNRECOVERABLE_PACKET_REASONS):
+ *   NO_TASK_IDENTITY, MISSING_CAPACITY_DELTA, INVALID_CAPACITY_DELTA,
+ *   MISSING_REQUEST_ROI, INVALID_REQUEST_ROI, MISSING_VERIFICATION_COUPLING
+ *
+ * Post-normalization contract codes:
+ *   TASK_TOO_SHORT, MISSING_ROLE, INVALID_WAVE,
+ *   MISSING_VERIFICATION, NON_SPECIFIC_VERIFICATION, FORBIDDEN_COMMAND,
+ *   MISSING_ACCEPTANCE_CRITERIA, MISSING_DEPENDENCIES
+ */
+export const PACKET_VIOLATION_CODE = Object.freeze({
+  // ── Identity ──────────────────────────────────────────────────────────────
+  /** All identity fields (task/title/task_id/id) are absent. */
+  NO_TASK_IDENTITY:              "no_task_identity",
+  /** task field is present but too short (< 5 chars after normalization). */
+  TASK_TOO_SHORT:                "task_too_short",
+  /** role field is absent or empty. */
+  MISSING_ROLE:                  "missing_role",
+
+  // ── Wave ──────────────────────────────────────────────────────────────────
+  /** wave is not a positive finite integer. */
+  INVALID_WAVE:                  "invalid_wave",
+
+  // ── Verification ─────────────────────────────────────────────────────────
+  /** verification field is absent or blank. */
+  MISSING_VERIFICATION:          "missing_verification",
+  /** verification value is a bare CLI command with no test file reference. */
+  NON_SPECIFIC_VERIFICATION:     "non_specific_verification",
+  /** verification value or verification_commands entry contains a forbidden glob or shell pattern. */
+  FORBIDDEN_COMMAND:             "forbidden_command",
+  /** verification_commands is absent, empty, or contains only blank entries. */
+  MISSING_VERIFICATION_COUPLING: "missing_verification_coupling",
+
+  // ── Acceptance criteria ──────────────────────────────────────────────────
+  /** acceptance_criteria is absent or empty — no measurable completion signal. */
+  MISSING_ACCEPTANCE_CRITERIA:   "missing_acceptance_criteria",
+  /** dependencies field is absent or not an array. */
+  MISSING_DEPENDENCIES:          "missing_dependencies",
+
+  // ── Scoring fields (shared with generation-boundary gate) ────────────────
+  /** capacityDelta is absent. */
+  MISSING_CAPACITY_DELTA:        "missing_capacity_delta",
+  /** capacityDelta is present but not a finite number ∈ [-1.0, 1.0]. */
+  INVALID_CAPACITY_DELTA:        "invalid_capacity_delta",
+  /** requestROI is absent. */
+  MISSING_REQUEST_ROI:           "missing_request_roi",
+  /** requestROI is present but not a positive finite number. */
+  INVALID_REQUEST_ROI:           "invalid_request_roi",
+});
+
+/**
  * Verification values that are non-specific: bare CLI commands with no test file
  * reference or observable assertion description.
  * Per the Prometheus output format, `verification` MUST be a specific test file
@@ -59,34 +117,74 @@ export const PLAN_VIOLATION_SEVERITY = Object.freeze({
 });
 
 /**
+ * A single contract violation emitted by validatePlanContract.
+ * `code` is a deterministic value from PACKET_VIOLATION_CODE and is the
+ * canonical identifier for machine consumption; `message` is human-readable.
+ */
+export interface PlanViolation {
+  field: string;
+  message: string;
+  severity: string;
+  code: string;
+}
+
+/**
  * Validate a single plan against the contract schema.
  *
  * @param {object} plan
- * @returns {{ valid: boolean, violations: Array<{ field: string, message: string, severity: string }> }}
+ * @returns {{ valid: boolean, violations: PlanViolation[] }}
  */
-export function validatePlanContract(plan) {
+export function validatePlanContract(plan): { valid: boolean; violations: PlanViolation[] } {
   if (!plan || typeof plan !== "object") {
-    return { valid: false, violations: [{ field: "plan", message: "Plan is null or not an object", severity: PLAN_VIOLATION_SEVERITY.CRITICAL }] };
+    return {
+      valid: false,
+      violations: [{
+        field: "plan",
+        message: "Plan is null or not an object",
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+        code: PACKET_VIOLATION_CODE.NO_TASK_IDENTITY,
+      }],
+    };
   }
 
-  const violations = [];
+  const violations: PlanViolation[] = [];
 
   // Required fields
   if (!plan.task || String(plan.task).trim().length < 5) {
-    violations.push({ field: "task", message: "Task must be a non-empty string (≥5 chars)", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+    violations.push({
+      field: "task",
+      message: "Task must be a non-empty string (≥5 chars)",
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.TASK_TOO_SHORT,
+    });
   }
 
   if (!plan.role || String(plan.role).trim().length === 0) {
-    violations.push({ field: "role", message: "Role must be specified", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+    violations.push({
+      field: "role",
+      message: "Role must be specified",
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.MISSING_ROLE,
+    });
   }
 
   const wave = Number(plan.wave);
   if (!Number.isFinite(wave) || wave < 1) {
-    violations.push({ field: "wave", message: `Wave must be a positive integer, got: ${plan.wave}`, severity: PLAN_VIOLATION_SEVERITY.WARNING });
+    violations.push({
+      field: "wave",
+      message: `Wave must be a positive integer, got: ${plan.wave}`,
+      severity: PLAN_VIOLATION_SEVERITY.WARNING,
+      code: PACKET_VIOLATION_CODE.INVALID_WAVE,
+    });
   }
 
   if (!plan.verification || String(plan.verification).trim().length === 0) {
-    violations.push({ field: "verification", message: "Verification command must be specified", severity: PLAN_VIOLATION_SEVERITY.WARNING });
+    violations.push({
+      field: "verification",
+      message: "Verification command must be specified",
+      severity: PLAN_VIOLATION_SEVERITY.WARNING,
+      code: PACKET_VIOLATION_CODE.MISSING_VERIFICATION,
+    });
   } else if (isNonSpecificVerification(String(plan.verification))) {
     violations.push({
       field: "verification",
@@ -94,16 +192,27 @@ export function validatePlanContract(plan) {
         "Must reference a specific test file (e.g. tests/core/foo.test.ts — test: expected description). " +
         "Generic commands like 'npm test' alone are rejected.",
       severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.NON_SPECIFIC_VERIFICATION,
     });
   }
 
   // Recommended fields
   if (!Array.isArray(plan.dependencies)) {
-    violations.push({ field: "dependencies", message: "Dependencies should be an array", severity: PLAN_VIOLATION_SEVERITY.WARNING });
+    violations.push({
+      field: "dependencies",
+      message: "Dependencies should be an array",
+      severity: PLAN_VIOLATION_SEVERITY.WARNING,
+      code: PACKET_VIOLATION_CODE.MISSING_DEPENDENCIES,
+    });
   }
 
   if (!Array.isArray(plan.acceptance_criteria) || plan.acceptance_criteria.length === 0) {
-    violations.push({ field: "acceptance_criteria", message: "Acceptance criteria must be a non-empty array — plans without measurable AC are rejected", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+    violations.push({
+      field: "acceptance_criteria",
+      message: "Acceptance criteria must be a non-empty array — plans without measurable AC are rejected",
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.MISSING_ACCEPTANCE_CRITERIA,
+    });
   }
 
   // Measurable capacity delta — expected change in system capacity if plan succeeds.
@@ -113,7 +222,8 @@ export function validatePlanContract(plan) {
     violations.push({
       field: "capacityDelta",
       message: "capacityDelta is missing — plans must declare the expected measurable change in system capacity (number ∈ [-1.0, 1.0])",
-      severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA,
     });
   } else {
     const cd = Number(plan.capacityDelta);
@@ -121,7 +231,8 @@ export function validatePlanContract(plan) {
       violations.push({
         field: "capacityDelta",
         message: `capacityDelta must be a finite number ∈ [-1.0, 1.0]; got: ${plan.capacityDelta}`,
-        severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+        code: PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA,
       });
     }
   }
@@ -133,7 +244,8 @@ export function validatePlanContract(plan) {
     violations.push({
       field: "requestROI",
       message: "requestROI is missing — plans must declare the expected return-on-investment for the premium request consumed (positive finite number)",
-      severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
     });
   } else {
     const roi = Number(plan.requestROI);
@@ -141,7 +253,8 @@ export function validatePlanContract(plan) {
       violations.push({
         field: "requestROI",
         message: `requestROI must be a positive finite number; got: ${plan.requestROI}`,
-        severity: PLAN_VIOLATION_SEVERITY.CRITICAL
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+        code: PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI,
       });
     }
   }
@@ -164,7 +277,12 @@ export function validatePlanContract(plan) {
     const forbidden = checkForbiddenCommands(value);
     if (forbidden.forbidden) {
       for (const v of forbidden.violations) {
-        violations.push({ field, message: `Forbidden command: ${v.reason}`, severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+        violations.push({
+          field,
+          message: `Forbidden command: ${v.reason}`,
+          severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+          code: PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND,
+        });
       }
     }
   }

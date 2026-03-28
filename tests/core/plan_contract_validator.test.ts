@@ -4,6 +4,7 @@ import {
   validatePlanContract,
   validateAllPlans,
   PLAN_VIOLATION_SEVERITY,
+  PACKET_VIOLATION_CODE,
   isNonSpecificVerification,
 } from "../../src/core/plan_contract_validator.js";
 
@@ -416,6 +417,206 @@ describe("plan_contract_validator", () => {
       assert.equal(filtered.length, 2, "critical-violation plan should be removed");
       assert.equal(filtered[0].task, "Valid plan with enough chars");
       assert.equal(filtered[1].task, "Another valid plan here");
+    });
+  });
+});
+
+describe("PACKET_VIOLATION_CODE — deterministic violation taxonomy", () => {
+  it("exports all expected codes as frozen string constants", () => {
+    const expectedCodes = [
+      "NO_TASK_IDENTITY", "TASK_TOO_SHORT", "MISSING_ROLE",
+      "INVALID_WAVE",
+      "MISSING_VERIFICATION", "NON_SPECIFIC_VERIFICATION", "FORBIDDEN_COMMAND", "MISSING_VERIFICATION_COUPLING",
+      "MISSING_ACCEPTANCE_CRITERIA", "MISSING_DEPENDENCIES",
+      "MISSING_CAPACITY_DELTA", "INVALID_CAPACITY_DELTA",
+      "MISSING_REQUEST_ROI", "INVALID_REQUEST_ROI",
+    ];
+    for (const key of expectedCodes) {
+      assert.equal(typeof PACKET_VIOLATION_CODE[key], "string", `${key} must be a string`);
+      assert.ok(PACKET_VIOLATION_CODE[key].length > 0, `${key} must be non-empty`);
+    }
+  });
+
+  it("is frozen — mutation throws in strict mode", () => {
+    assert.throws(
+      () => { (PACKET_VIOLATION_CODE as any).NEW_KEY = "x"; },
+      /Cannot add property/,
+      "PACKET_VIOLATION_CODE must be frozen"
+    );
+  });
+
+  it("scoring codes match UNRECOVERABLE_PACKET_REASONS string values for cross-gate consistency", async () => {
+    // Import UNRECOVERABLE_PACKET_REASONS from prometheus to verify alignment.
+    // Both gates must emit identical string codes for the same violation.
+    const { UNRECOVERABLE_PACKET_REASONS } = await import("../../src/core/prometheus.js");
+    assert.equal(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY,       PACKET_VIOLATION_CODE.NO_TASK_IDENTITY);
+    assert.equal(UNRECOVERABLE_PACKET_REASONS.MISSING_CAPACITY_DELTA, PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA);
+    assert.equal(UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA, PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA);
+    assert.equal(UNRECOVERABLE_PACKET_REASONS.MISSING_REQUEST_ROI,    PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI);
+    assert.equal(UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI,    PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI);
+    assert.equal(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING, PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING);
+  });
+
+  describe("validatePlanContract violations include deterministic code field", () => {
+    const baseValidPlan = () => ({
+      task: "Implement something long enough",
+      role: "evolution-worker",
+      wave: 1,
+      verification: "tests/core/foo.test.ts — test: should pass",
+      dependencies: [],
+      acceptance_criteria: ["All tests pass"],
+      capacityDelta: 0.1,
+      requestROI: 2.0,
+    });
+
+    it("every violation object has a non-empty string code", () => {
+      // Generate a maximally-invalid plan to collect many violations
+      const result = validatePlanContract({
+        task: "X",  // too short → TASK_TOO_SHORT
+        role: "",   // missing → MISSING_ROLE
+        wave: -1,   // invalid → INVALID_WAVE
+        verification: "npm test", // non-specific → NON_SPECIFIC_VERIFICATION
+        // no dependencies, no acceptance_criteria, no capacityDelta, no requestROI
+      });
+      assert.equal(result.valid, false);
+      for (const v of result.violations) {
+        assert.equal(typeof v.code, "string", `violation on field "${v.field}" must have a string code`);
+        assert.ok(v.code.length > 0, `violation code on field "${v.field}" must be non-empty`);
+      }
+    });
+
+    it("TASK_TOO_SHORT code on short task", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), task: "Fix" });
+      const v = result.violations.find(x => x.field === "task");
+      assert.ok(v, "must have task violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.TASK_TOO_SHORT);
+    });
+
+    it("MISSING_ROLE code on empty role", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), role: "" });
+      const v = result.violations.find(x => x.field === "role");
+      assert.ok(v, "must have role violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.MISSING_ROLE);
+    });
+
+    it("INVALID_WAVE code on missing wave", () => {
+      const plan = { ...baseValidPlan() };
+      delete (plan as any).wave;
+      const result = validatePlanContract(plan);
+      const v = result.violations.find(x => x.field === "wave");
+      assert.ok(v, "must have wave violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.INVALID_WAVE);
+    });
+
+    it("NON_SPECIFIC_VERIFICATION code on bare npm test", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), verification: "npm test" });
+      const v = result.violations.find(x => x.field === "verification" && x.severity === PLAN_VIOLATION_SEVERITY.CRITICAL);
+      assert.ok(v, "must have verification violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.NON_SPECIFIC_VERIFICATION);
+    });
+
+    it("MISSING_VERIFICATION code on absent verification", () => {
+      const plan = { ...baseValidPlan() };
+      delete (plan as any).verification;
+      const result = validatePlanContract(plan);
+      const v = result.violations.find(x => x.field === "verification");
+      assert.ok(v, "must have verification violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.MISSING_VERIFICATION);
+    });
+
+    it("MISSING_ACCEPTANCE_CRITERIA code on empty array", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), acceptance_criteria: [] });
+      const v = result.violations.find(x => x.field === "acceptance_criteria");
+      assert.ok(v, "must have acceptance_criteria violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.MISSING_ACCEPTANCE_CRITERIA);
+    });
+
+    it("MISSING_DEPENDENCIES code on absent dependencies", () => {
+      const plan = { ...baseValidPlan() };
+      delete (plan as any).dependencies;
+      const result = validatePlanContract(plan);
+      const v = result.violations.find(x => x.field === "dependencies");
+      assert.ok(v, "must have dependencies violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.MISSING_DEPENDENCIES);
+    });
+
+    it("MISSING_CAPACITY_DELTA code on absent capacityDelta", () => {
+      const plan = { ...baseValidPlan() };
+      delete (plan as any).capacityDelta;
+      const result = validatePlanContract(plan);
+      const v = result.violations.find(x => x.field === "capacityDelta");
+      assert.ok(v, "must have capacityDelta violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA);
+    });
+
+    it("INVALID_CAPACITY_DELTA code on out-of-range capacityDelta", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), capacityDelta: 2.0 });
+      const v = result.violations.find(x => x.field === "capacityDelta");
+      assert.ok(v, "must have capacityDelta violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA);
+    });
+
+    it("MISSING_REQUEST_ROI code on absent requestROI", () => {
+      const plan = { ...baseValidPlan() };
+      delete (plan as any).requestROI;
+      const result = validatePlanContract(plan);
+      const v = result.violations.find(x => x.field === "requestROI");
+      assert.ok(v, "must have requestROI violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI);
+    });
+
+    it("INVALID_REQUEST_ROI code on zero requestROI", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), requestROI: 0 });
+      const v = result.violations.find(x => x.field === "requestROI");
+      assert.ok(v, "must have requestROI violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI);
+    });
+
+    it("FORBIDDEN_COMMAND code on glob pattern in verification", () => {
+      const result = validatePlanContract({ ...baseValidPlan(), verification: "node --test tests/**/*.test.ts" });
+      const v = result.violations.find(x => x.field === "verification" && x.severity === PLAN_VIOLATION_SEVERITY.CRITICAL);
+      assert.ok(v, "must have verification violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND);
+    });
+
+    it("FORBIDDEN_COMMAND code on glob in verification_commands array", () => {
+      const result = validatePlanContract({
+        ...baseValidPlan(),
+        verification_commands: ["node --test src/**/*.test.ts"],
+      });
+      const v = result.violations.find(x => x.field === "verification_commands[0]");
+      assert.ok(v, "must have verification_commands violation");
+      assert.equal(v!.code, PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND);
+    });
+
+    it("NO_TASK_IDENTITY code when plan is null", () => {
+      const result = validatePlanContract(null);
+      assert.equal(result.violations[0].code, PACKET_VIOLATION_CODE.NO_TASK_IDENTITY);
+    });
+
+    it("secondary safety net can filter by code — code-based filter matches field-based filter", () => {
+      const SCORING_CODES = new Set([
+        PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA,
+        PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA,
+        PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
+        PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI,
+      ]);
+      const plans = [
+        { task: "First valid plan here", role: "w1", wave: 1, verification: "tests/core/foo.test.ts — test: first", dependencies: [], acceptance_criteria: ["ok"], capacityDelta: 0.1, requestROI: 2.0 },
+        { task: "Missing scoring fields", role: "w2", wave: 2, verification: "tests/core/bar.test.ts — test: bar", dependencies: [], acceptance_criteria: ["ok"] },
+      ];
+      const result = validateAllPlans(plans);
+      const byCode = result.results
+        .filter(r => !r.valid && r.violations.some(v =>
+          SCORING_CODES.has(v.code) && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+        ))
+        .map(r => r.planIndex);
+      const byField = result.results
+        .filter(r => !r.valid && r.violations.some(v =>
+          (v.field === "capacityDelta" || v.field === "requestROI") && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+        ))
+        .map(r => r.planIndex);
+      assert.deepEqual(byCode, byField, "code-based and field-based filters must identify the same plans");
     });
   });
 });
