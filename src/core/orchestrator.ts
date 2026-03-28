@@ -36,6 +36,7 @@ import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js"
 import { computeCycleSLOs, persistSloMetrics } from "./slo_checker.js";
 import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealth, CYCLE_PHASE } from "./cycle_analytics.js";
 import { computeBaselineRecoveryState, persistBaselineMetrics, PARSER_CONFIDENCE_RECOVERY_THRESHOLD } from "./parser_baseline_recovery.js";
+import { computeDispatchStrictness, loadReplayRegressionState, DISPATCH_STRICTNESS } from "./parser_replay_harness.js";
 import {
   addSchemaVersion,
   migrateData,
@@ -1350,6 +1351,56 @@ async function runSingleCycle(config) {
     } catch (err) {
       warn(`[orchestrator] Baseline recovery metrics persist failed (non-fatal): ${String(err?.message || err)}`);
     }
+  }
+
+  // ── Dispatch strictness gate (replay harness regressions) ────────────────
+  // Load the last persisted replay regression state and combine it with the
+  // current baseline recovery record to determine how strictly dispatch should
+  // behave.  This is fail-open: any error loading state is treated as no signal
+  // (NORMAL strictness) so a missing corpus file never blocks legitimate work.
+  //
+  //   NORMAL   → proceed as usual
+  //   ELEVATED → advisory log; dispatch continues
+  //   STRICT   → warning alert; dispatch continues (caller may reduce concurrency)
+  //   BLOCKED  → hard-stop: dispatch blocked, alert emitted, cycle exits
+  try {
+    const replayRegressionState = await loadReplayRegressionState(config);
+    const strictnessResult = computeDispatchStrictness(replayRegressionState, baselineRecoveryRecord);
+
+    if (strictnessResult.strictness !== DISPATCH_STRICTNESS.NORMAL) {
+      await appendProgress(config,
+        `[DISPATCH_STRICTNESS] level=${strictnessResult.strictness} regressionRate=${(strictnessResult.regressionRate * 100).toFixed(0)}% recoveryActive=${strictnessResult.recoveryActive} — ${strictnessResult.reason}`
+      );
+    }
+
+    if (strictnessResult.strictness === DISPATCH_STRICTNESS.BLOCKED) {
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "orchestrator",
+        title: "Dispatch blocked — replay harness regression rate exceeds threshold",
+        message: strictnessResult.reason,
+      });
+      await safeUpdatePipelineProgress(config, "cycle_complete", `Dispatch blocked: ${strictnessResult.reason}`);
+      return;
+    }
+
+    if (strictnessResult.strictness === DISPATCH_STRICTNESS.STRICT) {
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.HIGH,
+        source: "orchestrator",
+        title: "Strict dispatch mode — replay harness regressions detected",
+        message: strictnessResult.reason,
+      });
+    } else if (strictnessResult.strictness === DISPATCH_STRICTNESS.ELEVATED) {
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.MEDIUM,
+        source: "orchestrator",
+        title: "Elevated dispatch mode — parser regressions or recovery active",
+        message: strictnessResult.reason,
+      });
+    }
+  } catch (err) {
+    warn(`[orchestrator] Dispatch strictness gate failed (non-fatal): ${String(err?.message || err)}`);
   }
 
   await safeUpdatePipelineProgress(config, "prometheus_done", `Prometheus complete — ${prometheusAnalysis.plans.length} plan(s)`, {

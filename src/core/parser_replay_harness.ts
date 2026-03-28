@@ -10,6 +10,7 @@
 
 import path from "node:path";
 import { readJson, writeJson } from "./fs_utils.js";
+import type { BaselineRecoveryRecord } from "./parser_baseline_recovery.js";
 
 /** Maximum confidence delta before flagging a regression. */
 export const MAX_CONFIDENCE_DELTA = -0.15;
@@ -159,4 +160,176 @@ export function replayCorpus(corpus, parserFn) {
   }
 
   return { results, regressionCount, passed: regressionCount === 0 };
+}
+
+// ── Dispatch Strictness ───────────────────────────────────────────────────────
+
+/**
+ * Dispatch strictness levels derived from replay harness regressions combined
+ * with parser baseline recovery state.
+ *
+ *   NORMAL   — zero regressions and parser healthy: standard dispatch.
+ *   ELEVATED — ≤20% corpus regression rate OR baseline recovery active with
+ *              confidence ≥ 0.7: advisory warning, dispatch continues.
+ *   STRICT   — 20–50% corpus regression rate OR baseline recovery active with
+ *              confidence < 0.7: alert emitted, dispatch continues with reduced
+ *              concurrency allowed by the caller.
+ *   BLOCKED  — >50% corpus regression rate: dispatch blocked, human review required.
+ */
+export const DISPATCH_STRICTNESS = Object.freeze({
+  NORMAL:   "normal",
+  ELEVATED: "elevated",
+  STRICT:   "strict",
+  BLOCKED:  "blocked",
+} as const);
+
+export type DispatchStrictnessLevel = typeof DISPATCH_STRICTNESS[keyof typeof DISPATCH_STRICTNESS];
+
+/** Input snapshot from a previous replayCorpus() call (or null if unavailable). */
+export interface ReplayRegressionState {
+  regressionCount: number;
+  totalCount:      number;
+  passed:          boolean;
+  computedAt:      string;
+}
+
+/**
+ * Result of computeDispatchStrictness().
+ *
+ * @property strictness     — resolved strictness level
+ * @property regressionRate — regressionCount / totalCount (0 when no corpus)
+ * @property regressionCount — raw count from replay state
+ * @property totalCount      — corpus size at last replay run
+ * @property recoveryActive  — true when baseline recovery is currently active
+ * @property reason          — human-readable explanation of the resolved level
+ */
+export interface DispatchStrictnessResult {
+  strictness:      DispatchStrictnessLevel;
+  regressionRate:  number;
+  regressionCount: number;
+  totalCount:      number;
+  recoveryActive:  boolean;
+  reason:          string;
+}
+
+/**
+ * Compute the dispatch strictness level from replay harness regression data
+ * and the current parser baseline recovery record.
+ *
+ * Pure function — no I/O.  Safe to call with null/undefined inputs; both
+ * signals are optional and the function degrades gracefully when either is
+ * absent.
+ *
+ * @param replayState           — output of a previous replayCorpus() call persisted
+ *                                via persistReplayRegressionState(), or null/undefined
+ *                                if no corpus run has been recorded yet.
+ * @param baselineRecoveryRecord — output of computeBaselineRecoveryState(), or
+ *                                 null/undefined when the parser is healthy.
+ * @returns DispatchStrictnessResult
+ */
+export function computeDispatchStrictness(
+  replayState:            ReplayRegressionState | null | undefined,
+  baselineRecoveryRecord: BaselineRecoveryRecord | null | undefined
+): DispatchStrictnessResult {
+  const totalCount      = typeof replayState?.totalCount === "number" ? replayState.totalCount : 0;
+  const regressionCount = typeof replayState?.regressionCount === "number" ? replayState.regressionCount : 0;
+  const regressionRate  = totalCount > 0 ? regressionCount / totalCount : 0;
+  const recoveryActive  = baselineRecoveryRecord?.recoveryActive === true;
+  const parserConfidence: number =
+    typeof baselineRecoveryRecord?.parserConfidence === "number"
+      ? baselineRecoveryRecord.parserConfidence
+      : 1.0;
+
+  // Hard block: >50% of the replay corpus has regressed.
+  if (regressionRate > 0.5) {
+    return {
+      strictness:      DISPATCH_STRICTNESS.BLOCKED,
+      regressionRate,
+      regressionCount,
+      totalCount,
+      recoveryActive,
+      reason: `Replay regression rate ${(regressionRate * 100).toFixed(0)}% exceeds 50% — dispatch blocked pending human review`,
+    };
+  }
+
+  // Strict: 20–50% regression OR deep recovery (confidence < 0.7).
+  if (regressionRate > 0.2 || (recoveryActive && parserConfidence < 0.7)) {
+    const rateReason = regressionRate > 0.2
+      ? `Replay regression rate ${(regressionRate * 100).toFixed(0)}% exceeds 20%`
+      : `Baseline recovery active with deep confidence degradation (confidence=${parserConfidence})`;
+    return {
+      strictness:      DISPATCH_STRICTNESS.STRICT,
+      regressionRate,
+      regressionCount,
+      totalCount,
+      recoveryActive,
+      reason: rateReason,
+    };
+  }
+
+  // Elevated: any regression present OR recovery active (shallow).
+  if (regressionRate > 0 || recoveryActive) {
+    const rateReason = regressionRate > 0
+      ? `Replay corpus has ${regressionCount} regression(s) (${(regressionRate * 100).toFixed(0)}% rate)`
+      : `Baseline recovery mode active (confidence=${parserConfidence})`;
+    return {
+      strictness:      DISPATCH_STRICTNESS.ELEVATED,
+      regressionRate,
+      regressionCount,
+      totalCount,
+      recoveryActive,
+      reason: rateReason,
+    };
+  }
+
+  return {
+    strictness:      DISPATCH_STRICTNESS.NORMAL,
+    regressionRate:  0,
+    regressionCount: 0,
+    totalCount,
+    recoveryActive:  false,
+    reason:          "No replay regressions and parser confidence healthy",
+  };
+}
+
+// ── Replay regression state persistence ──────────────────────────────────────
+
+const REGRESSION_STATE_FILE = "parser_replay_regression_state.json";
+
+/**
+ * Persist a snapshot of the most recent replayCorpus() result so the
+ * orchestrator can load it at dispatch time without re-running the corpus.
+ *
+ * Never throws — I/O errors propagate to the caller.
+ *
+ * @param config — BOX config object
+ * @param replayResult — output of replayCorpus()
+ */
+export async function persistReplayRegressionState(
+  config: object,
+  replayResult: { regressionCount: number; results: unknown[]; passed: boolean }
+): Promise<void> {
+  const stateDir = (config as any)?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, REGRESSION_STATE_FILE);
+  const state: ReplayRegressionState = {
+    regressionCount: replayResult.regressionCount,
+    totalCount:      Array.isArray(replayResult.results) ? replayResult.results.length : 0,
+    passed:          replayResult.passed,
+    computedAt:      new Date().toISOString(),
+  };
+  await writeJson(filePath, state);
+}
+
+/**
+ * Load the last persisted replay regression state from state/.
+ * Returns null when the file does not exist (no corpus run recorded yet).
+ *
+ * @param config — BOX config object
+ */
+export async function loadReplayRegressionState(
+  config: object
+): Promise<ReplayRegressionState | null> {
+  const stateDir = (config as any)?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, REGRESSION_STATE_FILE);
+  return readJson(filePath, null);
 }
