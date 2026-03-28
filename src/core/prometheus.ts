@@ -37,7 +37,7 @@ import {
   LEADERSHIP_CONTRACT_TYPE,
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
-import { validateAllPlans, PLAN_VIOLATION_SEVERITY } from "./plan_contract_validator.js";
+import { validateAllPlans, PLAN_VIOLATION_SEVERITY, PACKET_VIOLATION_CODE } from "./plan_contract_validator.js";
 import { section, compilePrompt } from "./prompt_compiler.js";
 import { computeFingerprint } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
@@ -80,20 +80,25 @@ export const BEHAVIOR_PATTERNS_MAX_TOKENS = 1500;
  * Reason codes emitted by checkPacketCompleteness for unrecoverable conditions.
  * Used in logs and _rejectedIncompletePackets metadata so callers can diagnose
  * which field caused rejection without inspecting the raw plan object.
+ *
+ * These values are aliases into the canonical PACKET_VIOLATION_CODE taxonomy
+ * defined in plan_contract_validator.ts.  Both the generation-boundary gate
+ * (here) and the post-normalization contract validator share the same string
+ * values, so log output, metadata, and filtering logic are consistent end-to-end.
  */
 export const UNRECOVERABLE_PACKET_REASONS = Object.freeze({
   /** Raw plan has no task/title/task_id/id — normalization would synthesize "Task-N" */
-  NO_TASK_IDENTITY:       "no_task_identity",
+  NO_TASK_IDENTITY:              PACKET_VIOLATION_CODE.NO_TASK_IDENTITY,
   /** capacityDelta field is absent — normalization cannot synthesize it */
-  MISSING_CAPACITY_DELTA: "missing_capacity_delta",
+  MISSING_CAPACITY_DELTA:        PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA,
   /** capacityDelta is present but not a finite number ∈ [-1.0, 1.0] */
-  INVALID_CAPACITY_DELTA: "invalid_capacity_delta",
+  INVALID_CAPACITY_DELTA:        PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA,
   /** requestROI field is absent — normalization cannot synthesize it */
-  MISSING_REQUEST_ROI:    "missing_request_roi",
+  MISSING_REQUEST_ROI:           PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
   /** requestROI is present but not a positive finite number */
-  INVALID_REQUEST_ROI:    "invalid_request_roi",
+  INVALID_REQUEST_ROI:           PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI,
   /** verification_commands is absent or empty — no automated completion signal */
-  MISSING_VERIFICATION_COUPLING: "missing_verification_coupling",
+  MISSING_VERIFICATION_COUPLING: PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING,
 });
 
 /**
@@ -112,12 +117,16 @@ export const UNRECOVERABLE_PACKET_REASONS = Object.freeze({
  *     remove the plan anyway, so rejecting early avoids wasted processing.
  *  3. Missing/invalid requestROI  — same rationale as capacityDelta.
  *
+ * Reason codes are values from the canonical PACKET_VIOLATION_CODE taxonomy
+ * (plan_contract_validator.ts) so they are identical to codes emitted by the
+ * post-normalization validator — no translation layer needed.
+ *
  * @param rawPlan - raw plan object as emitted by the AI, before any normalization
  * @returns {{ recoverable: boolean, reasons: string[] }}
  */
 export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; reasons: string[] } {
   if (!rawPlan || typeof rawPlan !== "object") {
-    return { recoverable: false, reasons: [UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY] };
+    return { recoverable: false, reasons: [PACKET_VIOLATION_CODE.NO_TASK_IDENTITY] };
   }
 
   const reasons: string[] = [];
@@ -125,26 +134,26 @@ export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; r
   // 1. Task identity: at least one of task/title/task_id/id must be a non-empty string.
   const taskText = String(rawPlan.task || rawPlan.title || rawPlan.task_id || rawPlan.id || "").trim();
   if (taskText.length === 0) {
-    reasons.push(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY);
+    reasons.push(PACKET_VIOLATION_CODE.NO_TASK_IDENTITY);
   }
 
   // 2. capacityDelta: must be present and a finite number ∈ [-1.0, 1.0].
   if (!("capacityDelta" in rawPlan)) {
-    reasons.push(UNRECOVERABLE_PACKET_REASONS.MISSING_CAPACITY_DELTA);
+    reasons.push(PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA);
   } else {
     const cd = Number(rawPlan.capacityDelta);
     if (!Number.isFinite(cd) || cd < -1 || cd > 1) {
-      reasons.push(UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA);
+      reasons.push(PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA);
     }
   }
 
   // 3. requestROI: must be present and a positive finite number.
   if (!("requestROI" in rawPlan)) {
-    reasons.push(UNRECOVERABLE_PACKET_REASONS.MISSING_REQUEST_ROI);
+    reasons.push(PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI);
   } else {
     const roi = Number(rawPlan.requestROI);
     if (!Number.isFinite(roi) || roi <= 0) {
-      reasons.push(UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI);
+      reasons.push(PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI);
     }
   }
 
@@ -157,7 +166,7 @@ export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; r
     cmds.length > 0 &&
     cmds.some(c => typeof c === "string" && String(c).trim().length > 0);
   if (!hasValidCmds) {
-    reasons.push(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING);
+    reasons.push(PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING);
   }
 
   return { recoverable: reasons.length === 0, reasons };
@@ -1986,9 +1995,19 @@ Consider whether the root causes are:
     // This secondary pass catches any surviving violations from alternative-shape synthesized
     // plans (waves, bottlenecks, narrative fallback) or drift debt tasks that bypass the
     // pre-normalization gate. These fields are required for plan ranking and budget comparison.
+    //
+    // Filter uses deterministic PACKET_VIOLATION_CODE codes (canonical taxonomy from
+    // plan_contract_validator.ts) rather than field-name string equality, so matching
+    // is immune to field rename and consistent with the generation-boundary gate codes.
+    const CAPACITY_ROI_VIOLATION_CODES = new Set([
+      PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA,
+      PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA,
+      PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
+      PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI,
+    ]);
     const capacityRoiViolatingIndices = contractResult.results
       .filter(r => !r.valid && r.violations.some(v =>
-        (v.field === "capacityDelta" || v.field === "requestROI") &&
+        CAPACITY_ROI_VIOLATION_CODES.has(v.code) &&
         v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
       ))
       .map(r => r.planIndex)
