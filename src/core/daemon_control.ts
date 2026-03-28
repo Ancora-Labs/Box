@@ -125,7 +125,7 @@ export function isDaemonProcess(pid) {
         encoding: "utf8",
         windowsHide: true
       });
-      return /src[\\/]cli\.js\s+start/i.test(String(output || ""));
+      return /src[\\/]cli\.[jt]s\s+start/i.test(String(output || ""));
     }
 
     const output = execSync(`ps -p ${n} -o command=`, {
@@ -133,10 +133,51 @@ export function isDaemonProcess(pid) {
       encoding: "utf8",
       windowsHide: true
     });
-    return /src[\\/]cli\.js\s+start/i.test(String(output || ""));
+    return /src[\\/]cli\.[jt]s\s+start/i.test(String(output || ""));
   } catch {
     return false;
   }
+}
+
+/**
+ * Kill ALL running daemon processes (not just the one in the PID file).
+ * Prevents orphan daemons from accumulating when box:off only kills one PID
+ * but other instances survive (e.g. child workers kept parent alive).
+ * Returns the PIDs that were killed.
+ */
+export function killAllDaemonProcesses(excludePid?: number): number[] {
+  const killed: number[] = [];
+  try {
+    let pids: number[];
+    if (process.platform === "win32") {
+      const cmd = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'src[\\\\/]cli\\.[jt]s\\s+start' } | Select-Object -ExpandProperty ProcessId`;
+      const output = execSync(`powershell -NoProfile -Command "${cmd}"`, {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 10_000,
+      });
+      pids = String(output || "").split(/\r?\n/).map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+    } else {
+      const output = execSync("pgrep -f 'src/cli\\.[jt]s start'", {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 10_000,
+      });
+      pids = String(output || "").split(/\r?\n/).map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+    }
+
+    for (const pid of pids) {
+      if (pid === process.pid) continue;        // never kill self
+      if (pid === excludePid) continue;          // caller may want to spare one
+      try {
+        process.kill(pid, "SIGKILL");
+        killed.push(pid);
+      } catch { /* already gone */ }
+    }
+  } catch { /* no matches or command failed — safe to ignore */ }
+  return killed;
 }
 
 /**

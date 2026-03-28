@@ -15,7 +15,8 @@ import {
   requestDaemonReload,
   clearDaemonPid,
   clearStopRequest,
-  clearAllAIState
+  clearAllAIState,
+  killAllDaemonProcesses
 } from "./core/daemon_control.js";
 
 // ── box on: start dashboard + daemon in one command ──────────────────────────
@@ -96,7 +97,13 @@ async function boxOn(config: Config): Promise<void> {
   const killed = await killByPort(8787);
   if (killed) console.log(`[box on] killed stale dashboard on port 8787 (pid=${killed})`);
 
-  // 2. Check if daemon is already running
+  // 2. Kill any orphan daemon processes before starting fresh
+  const orphans = killAllDaemonProcesses();
+  if (orphans.length > 0) {
+    console.log(`[box on] killed ${orphans.length} orphan daemon(s): ${orphans.join(", ")}`);
+  }
+
+  // 3. Check if daemon is already running
   const daemonPidState = await readDaemonPid(config);
   const daemonPid = Number(daemonPidState?.pid || 0);
   if (daemonPid && isDaemonProcess(daemonPid)) {
@@ -105,13 +112,13 @@ async function boxOn(config: Config): Promise<void> {
     // Clear stale stop requests
     await clearStopRequest(config);
 
-    // 3. Start daemon (detached)
+    // 4. Start daemon (detached)
     const dPid = spawnDetached("node", ["--import", "tsx", "src/cli.ts", "start"], root);
     savePid(stateDir, "daemon_bg", dPid);
     console.log(`[box on] daemon started pid=${dPid}`);
   }
 
-  // 4. Start dashboard (detached)
+  // 5. Start dashboard (detached)
   const dashPid = spawnDetached("node", ["--import", "tsx", "src/dashboard/live_dashboard.ts"], root);
   savePid(stateDir, "dashboard_bg", dashPid);
   console.log(`[box on] dashboard started pid=${dashPid} → http://localhost:8787`);
@@ -149,6 +156,12 @@ async function boxOff(config: Config): Promise<void> {
   }
   removePidFile(stateDir, "daemon_bg");
 
+  // 1b. Sweep orphan daemon processes that escaped PID-file tracking
+  const orphans = killAllDaemonProcesses();
+  if (orphans.length > 0) {
+    console.log(`[box off] killed ${orphans.length} orphan daemon(s): ${orphans.join(", ")}`);
+  }
+
   // 2. Kill dashboard by saved PID
   const dashPid = readPid(stateDir, "dashboard_bg");
   if (dashPid && isProcessAlive(dashPid)) {
@@ -175,6 +188,12 @@ async function main(): Promise<void> {
   }
 
   if (command === "start") {
+    // Kill orphan daemons before starting — prevents multiple instances
+    const orphans = killAllDaemonProcesses();
+    if (orphans.length > 0) {
+      console.log(`[box] killed ${orphans.length} orphan daemon(s): ${orphans.join(", ")}`);
+    }
+
     const daemonPidState = await readDaemonPid(config);
     const daemonPid = Number(daemonPidState?.pid || 0);
     if (daemonPid && isDaemonProcess(daemonPid)) {
