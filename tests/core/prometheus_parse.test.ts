@@ -1284,6 +1284,22 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI));
   });
 
+  it("accepts non-empty verification text when verification_commands is absent", () => {
+    const plan = validRawPlan({ verification: "npm test" });
+    delete (plan as any).verification_commands;
+    const result = checkPacketCompleteness(plan);
+    assert.equal(result.recoverable, true);
+    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+  });
+
+  it("returns missing_verification_coupling when verification_commands is absent and verification is blank", () => {
+    const plan = validRawPlan({ verification: "   " });
+    delete (plan as any).verification_commands;
+    const result = checkPacketCompleteness(plan);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
+  });
+
   it("accumulates multiple reasons when multiple fields are unrecoverable", () => {
     const result = checkPacketCompleteness({ wave: 1 }); // no task, no capacityDelta, no requestROI, no verification_commands
     assert.equal(result.recoverable, false);

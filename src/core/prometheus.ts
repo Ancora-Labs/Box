@@ -97,7 +97,7 @@ export const UNRECOVERABLE_PACKET_REASONS = Object.freeze({
   MISSING_REQUEST_ROI:           PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
   /** requestROI is present but not a positive finite number */
   INVALID_REQUEST_ROI:           PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI,
-  /** verification_commands is absent or empty — no automated completion signal */
+  /** verification and verification_commands are both absent/empty — no completion signal */
   MISSING_VERIFICATION_COUPLING: PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING,
 });
 
@@ -116,6 +116,8 @@ export const UNRECOVERABLE_PACKET_REASONS = Object.freeze({
  *     when it is absent or out of range; the downstream contract validator would
  *     remove the plan anyway, so rejecting early avoids wasted processing.
  *  3. Missing/invalid requestROI  — same rationale as capacityDelta.
+ *  4. Missing verification coupling — both verification_commands and verification
+ *     are empty, so there is no deterministic completion signal.
  *
  * Reason codes are values from the canonical PACKET_VIOLATION_CODE taxonomy
  * (plan_contract_validator.ts) so they are identical to codes emitted by the
@@ -157,15 +159,17 @@ export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; r
     }
   }
 
-  // 4. verification_commands: must be a non-empty array with at least one non-empty string.
-  //    Plans without verification commands have no automated completion signal and must be
-  //    rejected at the generation boundary before entering the normalization pipeline.
+  // 4. verification coupling: accept either a non-empty verification_commands array
+  //    OR a non-empty verification string. normalizePlanFromTask() can synthesize
+  //    verification_commands from verification, so rejecting on missing array alone
+  //    would block otherwise recoverable packets.
   const cmds = rawPlan.verification_commands;
   const hasValidCmds =
     Array.isArray(cmds) &&
     cmds.length > 0 &&
     cmds.some(c => typeof c === "string" && String(c).trim().length > 0);
-  if (!hasValidCmds) {
+  const hasVerificationText = String(rawPlan.verification || "").trim().length > 0;
+  if (!hasValidCmds && !hasVerificationText) {
     reasons.push(PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING);
   }
 
