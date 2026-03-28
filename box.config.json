@@ -154,7 +154,9 @@
     "enforceCoreModuleGuard": true,
     "coreProtectedModules": [
       "src/core/orchestrator.ts",
-      "src/core/policy_engine.ts"
+      "src/core/policy_engine.ts",
+      "src/core/catastrophe_detector.ts",
+      "src/core/guardrail_executor.ts"
     ],
     "knowledgeMemoryEnabled": true,
     "experimentEngineEnabled": true,
@@ -447,5 +449,12 @@
     "maxDeviationScore": 0.25,
     "fixturesDir": "tests/fixtures/calibration",
     "stateFile": "state/athena_calibration_run.json"
+  },
+  "catastropheDetector": {
+    "staleCriticalStateAgeMs": 28800000,
+    "sloCascadingBreachConsecutive": 5
+  },
+  "workerPool": {
+    "minLanes": 1
   }
 }

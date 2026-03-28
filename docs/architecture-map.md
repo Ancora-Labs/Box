@@ -50,9 +50,9 @@ Key output:
 
 Files:
 - `src/core/project_scanner.ts`
-- `src/core/roadmap_engine.ts`
-- `src/core/task_planner.ts`
-- `src/core/task_queue.ts`
+- `src/core/prometheus.ts`
+- `src/core/prometheus.ts`
+- `src/core/orchestrator.ts`
 
 Responsibilities:
 - Generate repository summary and domain signals.
@@ -77,10 +77,10 @@ Responsibilities:
 ### Layer E: Policy, Review, Escalation
 
 Files:
-- `src/core/gates.ts`
+- `src/core/verification_gate.ts`
 - `src/providers/reviewer/copilot_reviewer.ts`
 - `src/providers/reviewer/claude_reviewer.ts`
-- `src/core/escalation_policy.ts`
+- `src/core/escalation_queue.ts`
 - `src/core/policy_engine.ts`
 
 Responsibilities:
@@ -94,7 +94,7 @@ Responsibilities:
 Files:
 - `src/core/state_tracker.ts`
 - `src/core/checkpoint_engine.ts`
-- `src/core/worker_activity.ts`
+- `src/core/live_log.ts`
 - `src/dashboard/live_dashboard.ts`
 - `src/core/daemon_control.ts`
 
@@ -106,7 +106,7 @@ Responsibilities:
 ### Layer G: Self-Improvement Control Layer
 
 Files:
-- `src/core/self_improvement_engine.ts`
+- `src/core/self_improvement.ts`
 
 Responsibilities:
 - Run cycle-end self-analysis and produce `SelfAnalysisReport` metrics.
@@ -135,7 +135,7 @@ Current named roles:
 - Scanner B: `Ezra`
 
 Routing owner by task kind is enforced in:
-- `src/core/task_routing.ts`
+- `src/core/capability_pool.ts`
 
 Examples:
 - `production` tasks map to security/devops ownership.
@@ -177,7 +177,7 @@ State file used:
 ## 6) Escalation Chain and User Visibility
 
 Policy engine:
-- `src/core/escalation_policy.ts`
+- `src/core/escalation_queue.ts`
 
 Escalation levels:
 - `L1-self-heal`
@@ -219,7 +219,7 @@ Primary runtime files under `state/`:
 ## 8) Gates and Exit Codes
 
 Gate evaluation file:
-- `src/core/gates.ts`
+- `src/core/verification_gate.ts`
 
 Worker gate markers parsed by:
 - `src/core/worker_runner.ts`
@@ -349,9 +349,9 @@ interface QueueTask {
 
 #### Integration Points - Task Contract Schema
 
-- `src/core/task_planner.ts`: must always produce normalized `TaskContract`.
+- `src/core/prometheus.ts`: must always produce normalized `TaskContract`.
 - `src/core/orchestrator.ts`: validates contract before dispatch.
-- `src/core/task_queue.ts`: stores `semanticKey`, `attempt`, and lineage.
+- `src/core/orchestrator.ts`: stores `semanticKey`, `attempt`, and lineage.
 
 #### Failure Prevention Logic - Task Contract Schema
 
@@ -419,7 +419,7 @@ Worker and orchestrator communication must be machine-parseable and stage-aware.
 
 - `src/workers/run_task.ts`: emits protocol JSON lines in stdout.
 - `src/core/worker_runner.ts`: parses protocol events before fallback text parsing.
-- `src/core/worker_activity.ts`: updates phase based on event stream.
+- `src/core/live_log.ts`: updates phase based on event stream.
 
 #### Failure Prevention Logic - Worker Communication Protocol
 
@@ -449,7 +449,7 @@ const AllowedTransitions: Record<TaskState, TaskState[]> = {
 
 #### Integration Points - Task State Machine
 
-- `src/core/task_queue.ts`: enforce transition map in `markTask` and requeue helpers.
+- `src/core/orchestrator.ts`: enforce transition map in `markTask` and requeue helpers.
 - `src/core/orchestrator.ts`: disallow direct `queued -> passed` or `running -> queued` shortcuts.
 - `state/tasks.json`: include `lastTransition`, `lastTransitionAt`, and `transitionBy`.
 
@@ -488,7 +488,7 @@ interface SemanticFailureIndex {
 
 #### Integration Points - Loop Prevention Mechanism
 
-- `src/core/task_queue.ts`: existing semantic suppression extends to descendant depth checks.
+- `src/core/orchestrator.ts`: existing semantic suppression extends to descendant depth checks.
 - `src/core/orchestrator.ts`: stop creating split tasks when `maxDescendantDepth` exceeded.
 - `state/tasks.json`: keep `splitDepth` and `lineageRootTaskId`.
 
@@ -522,7 +522,7 @@ interface IssueIntakeRecord {
 #### Integration Points - Issue Intake Filtering Policy
 
 - `src/core/orchestrator.ts`: before `createHandoffIssue` and before releasing blocked tasks.
-- `src/core/task_queue.ts`: check `semanticKey` against active or recently failed tasks.
+- `src/core/orchestrator.ts`: check `semanticKey` against active or recently failed tasks.
 - New file: `state/issue_intake.json`.
 
 #### Failure Prevention Logic - Issue Intake Filtering Policy
@@ -671,8 +671,8 @@ interface StrategicPlan {
 
 #### Integration Points - Strategic Planning Schema
 
-- `src/core/roadmap_engine.ts`: generate normalized complexity roof.
-- `src/core/task_planner.ts`: produce contracts and semantic keys.
+- `src/core/prometheus.ts`: generate normalized complexity roof.
+- `src/core/prometheus.ts`: produce contracts and semantic keys.
 - `state/roadmap.json` and `state/strategic_cycle.json`: persist plan metadata.
 
 #### Failure Prevention Logic - Strategic Planning Schema
@@ -707,7 +707,7 @@ type CapabilityRegistry = Record<string, WorkerCapabilityProfile>;
 #### Integration Points - Worker Capability Profiles
 
 - `box.config.json`: add `capabilityProfiles`.
-- `src/core/task_routing.ts`: route by capability intersection first, then fallback by kind map.
+- `src/core/capability_pool.ts`: route by capability intersection first, then fallback by kind map.
 - `src/providers/coder/copilot_cli_provider.ts`: consume profile model pool.
 
 #### Failure Prevention Logic - Worker Capability Profiles
@@ -751,7 +751,7 @@ interface RepositoryKnowledgeGraph {
 
 - `src/core/project_scanner.ts`: generate graph incrementally.
 - New state file: `state/knowledge_graph.json`.
-- `src/core/task_planner.ts`: prefer tasks touching high-centrality unresolved nodes.
+- `src/core/prometheus.ts`: prefer tasks touching high-centrality unresolved nodes.
 
 #### Failure Prevention Logic - Repository Knowledge Graph Schema
 
@@ -789,7 +789,7 @@ interface RecoveryStrategy {
 #### Integration Points - Recovery Strategy System
 
 - `src/core/orchestrator.ts`: replace ad hoc recovery branching with strategy map.
-- `src/core/task_queue.ts`: annotate each follow-up with `recoveryClass`.
+- `src/core/orchestrator.ts`: annotate each follow-up with `recoveryClass`.
 - `state/checkpoint-*.json`: write selected recovery strategy.
 
 #### Failure Prevention Logic - Recovery Strategy System
@@ -826,7 +826,7 @@ interface CoordinationPlan {
 #### Integration Points - Worker Coordination Model
 
 - `src/core/orchestrator.ts`: acquire lock before dispatch.
-- `src/core/task_queue.ts`: block tasks that collide on lock key.
+- `src/core/orchestrator.ts`: block tasks that collide on lock key.
 - `state/worker_activity.json`: include lock ownership metadata.
 
 #### Failure Prevention Logic - Worker Coordination Model
@@ -947,44 +947,44 @@ The following additions were introduced to close remaining loop and runtime stab
 
 - Tracks task fingerprint generation history and blocks repeated strategic regeneration after cap.
 - Prevents `strategic -> regenerate same task -> fail -> strategic -> same task` loops.
-- Schema: `PlannerGenerationRecord` in `src/core/loop_guard.ts`.
+- Schema: `PlannerGenerationRecord` in `src/core/orchestrator.ts`.
 
 ### 15.2 Context Drift Guard
 
 - Retry requires meaningful context change, not just another attempt.
 - Context seed combines repository structure, lockfile, issue/log signals, and commit reference.
 - Retry rule: identical failure signature + unchanged context revision => retry forbidden.
-- Functions: `computeContextRevisionSeed`, `deriveContextRevision`, `shouldAllowRetryForContext` in `src/core/loop_guard.ts`.
+- Functions: `computeContextRevisionSeed`, `deriveContextRevision`, `shouldAllowRetryForContext` in `src/core/orchestrator.ts`.
 
 ### 15.3 Split Explosion Guard
 
 - Split is limited by depth and total split count per lineage root.
 - Stops recursive split storms and parks lineage once budget is exhausted.
-- Function: `evaluateSplitControl` in `src/core/loop_guard.ts`.
+- Function: `evaluateSplitControl` in `src/core/orchestrator.ts`.
 
 ### 15.4 Semantic Duplicate Guard
 
 - Adds deterministic semantic similarity check for near-duplicate tasks with different phrasing.
 - Uses normalized token Jaccard scoring with threshold support.
-- Functions: `semanticSimilarity`, `isSemanticDuplicate` in `src/core/loop_guard.ts`.
+- Functions: `semanticSimilarity`, `isSemanticDuplicate` in `src/core/orchestrator.ts`.
 
 ### 15.5 Tactical Drift Guard
 
 - Forces strategic mode when tactical cycles exceed threshold or unresolved failure/blocker pressure persists.
 - Prevents indefinite tactical lock-in.
-- Function: `shouldForceStrategicMode` in `src/core/loop_guard.ts`.
+- Function: `shouldForceStrategicMode` in `src/core/orchestrator.ts`.
 
 ### 15.6 Dependency Deadlock Guard
 
 - Detects dependency graph cycles before enqueue/dispatch.
 - Rejects cyclic task dependencies to avoid blocked deadlocks.
-- Function: `detectDependencyCycle` in `src/core/loop_guard.ts`.
+- Function: `detectDependencyCycle` in `src/core/orchestrator.ts`.
 
 ### 15.7 Runtime Safety Budget Guard
 
 - Adds non-financial runtime limits: max tasks per cycle, worker spawns per cycle, splits per cycle.
 - Prevents task storms, spawn storms, and split storms.
-- Extended in `src/core/budget_guard.ts`.
+- Extended in `src/core/budget_controller.ts`.
 
 ### 15.8 Worker Action Guard
 
@@ -1008,7 +1008,7 @@ The following additions were introduced to close remaining loop and runtime stab
   - cooldownUntil
   - lineageRootTaskId
   - splitDepth / splitCount
-- Implemented in `src/core/task_schema.ts`.
+- Implemented in `src/core/schema_registry.ts`.
 
 ## 16) Self-Analysis and Upgrade Protocol
 
@@ -1020,7 +1020,7 @@ BOX now executes a dedicated post-cycle self-improvement sequence:
 4. Tasks are enqueued through the normal queue path and routed by ownership rules.
 5. `Self-Upgrade Guard` blocks self-improvement tasks from editing protected core modules:
 	- `src/core/orchestrator.ts`
-	- `src/core/task_queue.ts`
+	- `src/core/orchestrator.ts`
 	- `src/core/policy_engine.ts`
 
 Auto-improvable areas remain intentionally bounded:

@@ -1,6 +1,6 @@
 # Failure Taxonomy — BOX v1.0.0
 
-**File**: `src/core/failure_classifier.js`  
+**File**: `src/core/failure_classifier.ts`  
 **Schema version**: `FAILURE_CLASSIFIER_SCHEMA_VERSION = 1`  
 **Taxonomy version**: `CLASSIFIER_TAXONOMY_VERSION = "1.0.0"`
 
@@ -74,7 +74,7 @@ Low tier-3 results are always `flagged: true` since they lack strong evidence.
 
 ## Intervention Prioritization Integration
 
-`applyClassificationToSuccessProbability(successProbability, classification)` in `failure_classifier.js` adjusts a task's `successProbability` before the intervention optimizer ranks it:
+`applyClassificationToSuccessProbability(successProbability, classification)` in `failure_classifier.ts` adjusts a task's `successProbability` before the intervention optimizer ranks it:
 
 | Class | Adjustment | Formula |
 |---|---|---|
@@ -116,7 +116,7 @@ state/failure_classifications.json
 }
 ```
 
-`appendFailureClassification(config, classification)` in `state_tracker.js` performs the write.  Write failures return `{ ok: false, reason }` — never thrown.
+`appendFailureClassification(config, classification)` in `state_tracker.ts` performs the write.  Write failures return `{ ok: false, reason }` — never thrown.
 
 ---
 

@@ -21,11 +21,11 @@ Bu kural pratikte su anlama gelir:
 
 ## 3. Katmanlar
 
-1. Orchestration Layer: `src/core/orchestrator.js`
-2. Intelligence Layer: `src/core/task_planner.js`, `src/providers/reviewer/claude_reviewer.js`
-3. Worker Layer: `src/core/worker_runner.js`, `src/workers/run_task.js`
-4. State Layer: `state/*.json`, `src/core/state_tracker.js`
-5. Policy/Budget Layer: `src/core/policy_engine.js`, `src/core/budget_controller.js`
+1. Orchestration Layer: `src/core/orchestrator.ts`
+2. Intelligence Layer: `src/core/prometheus.ts`, `src/providers/reviewer/copilot_reviewer.ts`
+3. Worker Layer: `src/core/worker_runner.ts`, `src/workers/run_task.ts`
+4. State Layer: `state/*.json`, `src/core/state_tracker.ts`
+5. Policy/Budget Layer: `src/core/policy_engine.ts`, `src/core/budget_controller.ts`
 
 ## 4. 7/24 Otonom Dongu
 

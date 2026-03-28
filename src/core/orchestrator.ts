@@ -1642,7 +1642,7 @@ async function runSingleCycle(config) {
       let diversityBlocked = false;
       let diversityMsg = "";
       try {
-        const diversityPool = capabilityPoolResult || { activeLaneCount: 0, assignments: [] };
+        const diversityPool = capabilityPoolResult || { activeLaneCount: plans.length, assignments: [] };
         const diversityResult = enforceLaneDiversity(diversityPool, { minLanes: diversityMinLanes });
         if (!diversityResult.meetsMinimum) {
           diversityBlocked = true;
@@ -2048,7 +2048,8 @@ async function runSingleCycle(config) {
       hadSloBreach:            hadSloBreachThisCycle,
     };
 
-    const catastropheResult = await runCatastropheDetection(config, cycleData);
+    const catastropheOpts = config?.catastropheDetector || {};
+    const catastropheResult = await runCatastropheDetection(config, cycleData, catastropheOpts);
     if (catastropheResult.detections.length > 0) {
       await appendProgress(config,
         `[CATASTROPHE] ${catastropheResult.detections.length} scenario(s) detected: ${catastropheResult.detections.map(d => d.scenarioId).join(", ")}`

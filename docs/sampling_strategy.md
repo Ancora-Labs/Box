@@ -11,7 +11,7 @@
 This document defines when, how, and at what rate BOX emits observability events.
 It is the authoritative reference for log aggregators, dashboards, and future sampling
 configuration. All emitted events conform to the schema defined in
-`src/core/event_schema.js`.
+`src/core/event_schema.ts`.
 
 ---
 
@@ -56,7 +56,7 @@ orchestration cycle:
 
 ## 4. Sensitive Field Handling
 
-The `SENSITIVE_FIELD_DENYLIST` in `src/core/event_schema.js` defines all field names
+The `SENSITIVE_FIELD_DENYLIST` in `src/core/event_schema.ts` defines all field names
 that are **always redacted** before event emission. The sentinel value `[REDACTED]`
 replaces any matching field value.
 
@@ -71,7 +71,7 @@ Current denylist (see source for authoritative list):
 - `anthropic_api_key`, `claude_api_key`, `openai_api_key`
 
 Adding new sensitive fields: edit `SENSITIVE_FIELD_DENYLIST` in
-`src/core/event_schema.js` and add a corresponding test in
+`src/core/event_schema.ts` and add a corresponding test in
 `tests/core/event_schema.test.ts`.
 
 ---

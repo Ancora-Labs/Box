@@ -31,15 +31,15 @@ flowchart LR
   end
 
   subgraph L3[3) Orkestrasyon Cekirdegi]
-    O[orchestrator.js]
-    Q[task_queue.js]
-    P[task_planner.js]
-    S[project_scanner.js]
+    O[orchestrator.ts]
+    Q[orchestrator.ts]
+    P[prometheus.ts]
+    S[project_scanner.ts]
     O --> S --> P --> Q
   end
 
   subgraph L4[4) Calistirma ve Isci Katmani]
-    R[worker_runner.js]
+    R[worker_runner.ts]
     W1[Worker Backend]
     W2[Worker Frontend]
     W3[Worker QA]
