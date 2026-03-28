@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { canUseClaude, chargeBudget, loadBudget } from "../../src/core/budget_controller.js";
+import { canUseClaude, chargeBudget, loadBudget, reconcileBudgetEligibility, BUDGET_THRESHOLD_USD } from "../../src/core/budget_controller.js";
 
 describe("budget_controller", () => {
   let tmpDir: string;
@@ -38,6 +38,71 @@ describe("budget_controller", () => {
   it("negative path: blocks claude usage when remaining budget is too low", () => {
     assert.equal(canUseClaude({ remainingUsd: 0.2 }), false);
     assert.equal(canUseClaude({ remainingUsd: 0.1 }), false);
+  });
+});
+
+describe("reconcileBudgetEligibility", () => {
+  let tmpDir: string;
+  let budgetFile: string;
+  let config: any;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-budget-elig-"));
+    budgetFile = path.join(tmpDir, "budget.json");
+    config = { paths: { budgetFile }, env: { budgetUsd: 5 } };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns eligible contract when remaining budget exceeds threshold", async () => {
+    await fs.writeFile(budgetFile, JSON.stringify({ initialUsd: 5, remainingUsd: 3.0, claudeCalls: 0, workerRuns: 0, updatedAt: new Date().toISOString() }), "utf8");
+    const contract = await reconcileBudgetEligibility(config);
+    assert.equal(contract.eligible, true);
+    assert.equal(contract.remainingUsd, 3.0);
+    assert.equal(contract.thresholdUsd, BUDGET_THRESHOLD_USD);
+    assert.equal(contract.reason, null);
+    assert.equal(contract.configured, true);
+    assert.ok(contract.checkedAt, "checkedAt must be populated");
+  });
+
+  it("returns ineligible contract when remaining budget is at threshold boundary", async () => {
+    await fs.writeFile(budgetFile, JSON.stringify({ initialUsd: 5, remainingUsd: 0.2, claudeCalls: 0, workerRuns: 0, updatedAt: new Date().toISOString() }), "utf8");
+    const contract = await reconcileBudgetEligibility(config);
+    assert.equal(contract.eligible, false);
+    assert.equal(contract.remainingUsd, 0.2);
+    assert.ok(contract.reason?.startsWith("budget_exhausted:"), `reason must reflect exhaustion; got: ${contract.reason}`);
+    assert.ok(contract.reason?.includes("remainingUsd=0.2"), `reason must include amount; got: ${contract.reason}`);
+    assert.equal(contract.configured, true);
+  });
+
+  it("returns ineligible contract when remaining budget is below threshold", async () => {
+    await fs.writeFile(budgetFile, JSON.stringify({ initialUsd: 5, remainingUsd: 0.05, claudeCalls: 10, workerRuns: 5, updatedAt: new Date().toISOString() }), "utf8");
+    const contract = await reconcileBudgetEligibility(config);
+    assert.equal(contract.eligible, false);
+    assert.ok(contract.reason?.includes("remainingUsd=0.05"));
+  });
+
+  it("returns eligible unconfigured contract when no budgetFile path is set", async () => {
+    const cfgNoPath = { paths: { stateDir: tmpDir }, env: { budgetUsd: 5 } };
+    const contract = await reconcileBudgetEligibility(cfgNoPath);
+    assert.equal(contract.eligible, true);
+    assert.equal(contract.configured, false);
+    assert.equal(contract.remainingUsd, null);
+    assert.equal(contract.reason, null);
+    assert.equal(contract.thresholdUsd, BUDGET_THRESHOLD_USD);
+  });
+
+  it("negative path: fails open with eligible=true when budget file does not exist", async () => {
+    // readJson returns the default budget (env.budgetUsd) on ENOENT, so the gate
+    // stays open — there is no "read error" from the contract's perspective.
+    const missingConfig = { paths: { budgetFile: path.join(tmpDir, "nonexistent.json") }, env: { budgetUsd: 5 } };
+    const contract = await reconcileBudgetEligibility(missingConfig);
+    assert.equal(contract.eligible, true, "must fail open when budget file does not exist");
+    assert.equal(contract.configured, true);
+    // readJson fell back to default (budgetUsd=5), so reason is null (budget is fine)
+    assert.equal(contract.reason, null, "a missing file is not an error — readJson provides the default budget");
   });
 });
 

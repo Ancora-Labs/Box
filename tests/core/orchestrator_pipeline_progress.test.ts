@@ -1026,6 +1026,11 @@ describe("budget reconciliation gate — pre-dispatch governance gate integratio
     assert.equal(result.blocked, false,
       "dispatch must proceed when remaining budget exceeds the Claude usage threshold");
     assert.equal(result.reason, null);
+    // budgetEligibility contract is always emitted
+    assert.equal(result.budgetEligibility.eligible, true, "contract must reflect eligible budget");
+    assert.equal(result.budgetEligibility.remainingUsd, 3.0);
+    assert.equal(result.budgetEligibility.configured, true);
+    assert.equal(result.budgetEligibility.reason, null);
   });
 
   it("blocks dispatch when remaining budget is at or below the Claude usage threshold", async () => {
@@ -1051,6 +1056,11 @@ describe("budget reconciliation gate — pre-dispatch governance gate integratio
       result.reason?.includes("remainingUsd=0.15"),
       `reason must include the remaining amount for observability; got: ${result.reason}`
     );
+    // budgetEligibility contract mirrors the gate decision
+    assert.equal(result.budgetEligibility.eligible, false, "contract must reflect ineligible budget");
+    assert.equal(result.budgetEligibility.remainingUsd, 0.15);
+    assert.equal(result.budgetEligibility.configured, true);
+    assert.ok(result.budgetEligibility.reason?.startsWith("budget_exhausted:"));
   });
 
   it("negative path: blocks when remaining budget is exactly 0.2 (boundary — not above threshold)", async () => {
@@ -1066,6 +1076,7 @@ describe("budget reconciliation gate — pre-dispatch governance gate integratio
 
     assert.equal(result.blocked, true,
       "remaining budget of exactly 0.2 must block dispatch (threshold requires strictly greater than 0.2)");
+    assert.equal(result.budgetEligibility.eligible, false, "contract must reflect ineligible at boundary");
   });
 
   it("fails open (allows dispatch) when budget file path is not configured", async () => {
@@ -1080,6 +1091,10 @@ describe("budget reconciliation gate — pre-dispatch governance gate integratio
 
     assert.equal(result.blocked, false,
       "unconfigured budgetFile path must skip the budget gate and allow dispatch");
+    // Contract always present — reports unconfigured state
+    assert.equal(result.budgetEligibility.eligible, true);
+    assert.equal(result.budgetEligibility.configured, false);
+    assert.equal(result.budgetEligibility.remainingUsd, null);
   });
 });
 
