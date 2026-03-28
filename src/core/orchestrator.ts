@@ -72,7 +72,7 @@ import {
   shouldBlockOnDebt,
   autoCloseVerifiedDebt,
 } from "./carry_forward_ledger.js";
-import { loadBudget, canUseClaude } from "./budget_controller.js";
+import { reconcileBudgetEligibility } from "./budget_controller.js";
 import {
   runInterventionOptimizer,
   buildInterventionsFromPlan,
@@ -250,6 +250,13 @@ export async function writeOrchestratorHealth(stateDir, status, reason, details 
 export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycleId = "") {
   const stateDir = config?.paths?.stateDir || "state";
 
+  // ── Budget reconciliation — resolved upfront so every dispatch decision
+  // carries a uniform BudgetEligibilityContract regardless of which gate fires.
+  const budgetEligibility = await reconcileBudgetEligibility(config);
+  if (budgetEligibility.configured && budgetEligibility.reason?.startsWith("budget_read_error")) {
+    warn(`[orchestrator] budget gate failed (non-fatal): ${budgetEligibility.reason}`);
+  }
+
   if (config?.systemGuardian?.enabled !== false) {
     try {
       const pauseActive = await isGuardrailActive(config, GUARDRAIL_ACTION.PAUSE_WORKERS);
@@ -259,7 +266,8 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
           reason: "guardrail_pause_workers_active",
           action: undefined,
           graphResult: null,
-          cycleId
+          cycleId,
+          budgetEligibility
         };
       }
     } catch (err) {
@@ -274,7 +282,8 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       reason: `governance_freeze_active:${freezeStatus.reason}`,
       action: undefined,
       graphResult: null,
-      cycleId
+      cycleId,
+      budgetEligibility
     };
   }
 
@@ -293,7 +302,8 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       reason: `lineage_cycle_detected:${graphResult.reasonCode}`,
       action: undefined,
       graphResult,
-      cycleId
+      cycleId,
+      budgetEligibility
     };
   }
 
@@ -326,7 +336,8 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       action: "rollback",
       graphResult,
       rollbackResult,
-      cycleId
+      cycleId,
+      budgetEligibility
     };
   }
 
@@ -346,32 +357,25 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
         action: undefined,
         graphResult,
         cycleId,
+        budgetEligibility,
       };
     }
   } catch (err) {
     warn(`[orchestrator] carry-forward debt gate failed (non-fatal): ${String(err?.message || err)}`);
   }
 
-  // ── Budget reconciliation gate ────────────────────────────────────────────
-  // Block dispatch when the remaining budget falls below the Claude usage
-  // threshold.  Only evaluated when config.paths.budgetFile is configured —
-  // unconfigured budget paths are treated as "unlimited" (fail-open).
-  // Fail-open on any budget read error so a corrupt file never halts work.
-  if (config?.paths?.budgetFile) {
-    try {
-      const budget = await loadBudget(config);
-      if (!canUseClaude(budget)) {
-        return {
-          blocked: true,
-          reason: `budget_exhausted:remainingUsd=${budget.remainingUsd}`,
-          action: undefined,
-          graphResult,
-          cycleId,
-        };
-      }
-    } catch (err) {
-      warn(`[orchestrator] budget gate failed (non-fatal): ${String(err?.message || err)}`);
-    }
+  // ── Budget eligibility gate ───────────────────────────────────────────────
+  // Block dispatch when the budget contract indicates ineligibility.
+  // reconcileBudgetEligibility already ran above; we simply act on its result.
+  if (!budgetEligibility.eligible) {
+    return {
+      blocked: true,
+      reason: budgetEligibility.reason,
+      action: undefined,
+      graphResult,
+      cycleId,
+      budgetEligibility,
+    };
   }
 
   return {
@@ -379,7 +383,8 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
     reason: null,
     action: undefined,
     graphResult,
-    cycleId
+    cycleId,
+    budgetEligibility
   };
 }
 
