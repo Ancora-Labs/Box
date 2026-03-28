@@ -101,7 +101,9 @@
       "maxSplitsPerCycle": 8
     },
     "interBatchDelayMs": 90000,
-    "workerContextTokenLimit": 100000
+    "workerContextTokenLimit": 100000,
+    "trustBoundaryMode": "warn",
+    "planQualityMinScore": 0
   },
   "roadmap": {
     "strategy": "roadmap-first",

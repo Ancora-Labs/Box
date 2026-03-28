@@ -1292,15 +1292,18 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   const plans = Array.isArray(prometheusAnalysis.plans) ? prometheusAnalysis.plans : [];
 
   // ── Deterministic plan quality pre-gate ────────────────────────────────────
+  const qualityMinScore = typeof config?.runtime?.planQualityMinScore === "number"
+    ? config.runtime.planQualityMinScore
+    : PLAN_QUALITY_MIN_SCORE;
   const qualityFailures = [];
   for (let i = 0; i < plans.length; i++) {
     const { score, issues } = scorePlanQuality(plans[i]);
-    if (score < PLAN_QUALITY_MIN_SCORE) {
+    if (score < qualityMinScore) {
       qualityFailures.push(`plan[${i}] "${plans[i]?.task || plans[i]?.role || "?"}": score=${score} — ${issues.join("; ")}`);
     }
   }
   if (qualityFailures.length > 0) {
-    const message = `${qualityFailures.length} plan(s) below quality threshold (${PLAN_QUALITY_MIN_SCORE})`;
+    const message = `${qualityFailures.length} plan(s) below quality threshold (${qualityMinScore})`;
     await appendProgress(config, `[ATHENA] Plan quality pre-gate FAILED — ${message}`);
     chatLog(stateDir, athenaName, `Plan quality pre-gate failed: ${message}`);
     return {
