@@ -36,6 +36,8 @@ import {
   DEFAULT_COHORT_ALGORITHM,
   DEFAULT_MEASUREMENT_WINDOW_CYCLES,
   DEFAULT_BREACH_ACTION,
+  GOVERNANCE_AUDIT_STATE_PATH,
+  GOVERNANCE_AUDIT_STATE_RECENT_LIMIT,
   assignCohort,
   buildGovernanceCanaryId,
   getGovernanceCanaryConfig,
@@ -934,5 +936,134 @@ describe("appendGovernanceAuditLog — audit-write-failed status", () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Dual-track write: compressed state artifact ───────────────────────────────
+
+describe("appendGovernanceAuditLog — dual-track write (compressed state)", () => {
+  it("writes governance_canary_audit_state.json alongside the JSONL log", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-dual-track-"));
+    try {
+      await appendGovernanceAuditLog(tmpDir, {
+        event:     GOVERNANCE_AUDIT_EVENT.CANARY_STARTED,
+        canaryId:  "govcanary-dual-001",
+        timestamp: "2026-01-01T00:00:00Z",
+        cohort:    "canary",
+        metrics:   { falseBlockRate: 0.01, safetyScore: 0.99 }
+      });
+
+      const statePath = path.join(tmpDir, "governance_canary_audit_state.json");
+      const raw = await fs.readFile(statePath, "utf8");
+      const state = JSON.parse(raw);
+
+      assert.equal(state.schemaVersion, 1, "schemaVersion must be 1");
+      assert.equal(state.totalEntries, 1, "totalEntries must reflect one write");
+      assert.ok(typeof state.eventCounts === "object", "eventCounts must be an object");
+      assert.equal(state.eventCounts[GOVERNANCE_AUDIT_EVENT.CANARY_STARTED], 1);
+      assert.equal(state.latestTimestamp, "2026-01-01T00:00:00Z");
+      assert.ok(Array.isArray(state.recentSummary), "recentSummary must be an array");
+      assert.equal(state.recentSummary.length, 1);
+
+      // Metrics must NOT be present in the compressed summary (context-efficiency)
+      assert.ok(!("metrics" in state.recentSummary[0]), "metrics must be stripped from recentSummary");
+      assert.equal(state.recentSummary[0].canaryId, "govcanary-dual-001");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accumulates eventCounts and increments totalEntries across multiple appends", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-dual-accum-"));
+    try {
+      for (let i = 0; i < 3; i++) {
+        await appendGovernanceAuditLog(tmpDir, {
+          event:     GOVERNANCE_AUDIT_EVENT.METRICS_RECORDED,
+          canaryId:  `govcanary-accum-${i}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+      await appendGovernanceAuditLog(tmpDir, {
+        event:     GOVERNANCE_AUDIT_EVENT.CANARY_PROMOTED,
+        canaryId:  "govcanary-accum-final",
+        timestamp: new Date().toISOString()
+      });
+
+      const statePath = path.join(tmpDir, "governance_canary_audit_state.json");
+      const state = JSON.parse(await fs.readFile(statePath, "utf8"));
+
+      assert.equal(state.totalEntries, 4, "totalEntries must be 4");
+      assert.equal(state.eventCounts[GOVERNANCE_AUDIT_EVENT.METRICS_RECORDED], 3);
+      assert.equal(state.eventCounts[GOVERNANCE_AUDIT_EVENT.CANARY_PROMOTED], 1);
+      // recentSummary is newest-first
+      assert.equal(state.recentSummary[0].canaryId, "govcanary-accum-final");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caps recentSummary at GOVERNANCE_AUDIT_STATE_RECENT_LIMIT entries", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-dual-cap-"));
+    try {
+      const writeCount = GOVERNANCE_AUDIT_STATE_RECENT_LIMIT + 5;
+      for (let i = 0; i < writeCount; i++) {
+        await appendGovernanceAuditLog(tmpDir, {
+          event:     GOVERNANCE_AUDIT_EVENT.CYCLE_ASSIGNED,
+          canaryId:  `govcanary-cap-${i}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      const statePath = path.join(tmpDir, "governance_canary_audit_state.json");
+      const state = JSON.parse(await fs.readFile(statePath, "utf8"));
+
+      assert.ok(
+        state.recentSummary.length <= GOVERNANCE_AUDIT_STATE_RECENT_LIMIT,
+        `recentSummary must not exceed ${GOVERNANCE_AUDIT_STATE_RECENT_LIMIT} entries`
+      );
+      assert.equal(state.totalEntries, writeCount, "totalEntries must still count all entries");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("negative path: full JSONL log is still written when compressed state is unwritable", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-dual-neg-"));
+    try {
+      // Block compressed state write by placing a directory at its path
+      const statePath = path.join(tmpDir, "governance_canary_audit_state.json");
+      await fs.mkdir(statePath, { recursive: true });
+
+      const result = await appendGovernanceAuditLog(tmpDir, {
+        event:     GOVERNANCE_AUDIT_EVENT.CANARY_STARTED,
+        canaryId:  "govcanary-neg-001",
+        timestamp: new Date().toISOString()
+      });
+
+      // The full JSONL write must still succeed
+      assert.equal(result.ok, true, "JSONL write must succeed even when compressed state write fails");
+
+      const lines = await readAuditLog(tmpDir);
+      assert.equal(lines.length, 1, "JSONL log must still contain the entry");
+      assert.equal(lines[0].canaryId, "govcanary-neg-001");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Dual-track path constants ─────────────────────────────────────────────────
+
+describe("GOVERNANCE_AUDIT_STATE_PATH constant", () => {
+  it("is exported and points to the expected state file", () => {
+    assert.equal(GOVERNANCE_AUDIT_STATE_PATH, "state/governance_canary_audit_state.json");
+  });
+});
+
+describe("GOVERNANCE_AUDIT_STATE_RECENT_LIMIT constant", () => {
+  it("is a positive integer", () => {
+    assert.ok(typeof GOVERNANCE_AUDIT_STATE_RECENT_LIMIT === "number");
+    assert.ok(GOVERNANCE_AUDIT_STATE_RECENT_LIMIT > 0);
+    assert.ok(Number.isInteger(GOVERNANCE_AUDIT_STATE_RECENT_LIMIT));
   });
 });

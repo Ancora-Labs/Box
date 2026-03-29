@@ -86,6 +86,10 @@ import { readJson, writeJson } from "./fs_utils.js";
 
 export const GOVERNANCE_LEDGER_PATH    = "state/governance_canary_ledger.json";
 export const GOVERNANCE_AUDIT_LOG_PATH = "state/governance_canary_audit.jsonl";
+/** Compressed summary artifact written alongside the full JSONL log. */
+export const GOVERNANCE_AUDIT_STATE_PATH = "state/governance_canary_audit_state.json";
+/** Maximum number of recent events kept in the compressed summary. */
+export const GOVERNANCE_AUDIT_STATE_RECENT_LIMIT = 20;
 
 // ── Cohort enum (AC1) ─────────────────────────────────────────────────────────
 
@@ -479,6 +483,14 @@ export async function saveGovernanceLedger(stateDir, ledger) {
 /**
  * Append a structured governance canary audit event (AC5).
  *
+ * Dual-track write strategy:
+ *   Track 1 — Full JSONL log (governance_canary_audit.jsonl):
+ *     Every record appended verbatim. Preserved as-is for full reproducibility.
+ *   Track 2 — Compressed state artifact (governance_canary_audit_state.json):
+ *     Rolling summary: event counts, latest timestamp, and the most recent
+ *     GOVERNANCE_AUDIT_STATE_RECENT_LIMIT event stubs (event, canaryId, timestamp,
+ *     cohort — no metrics) for context-efficient querying without replaying the full log.
+ *
  * Required fields: event, canaryId, timestamp
  * Optional: experimentId, cycleId, cohort, metrics, reason
  *
@@ -486,7 +498,7 @@ export async function saveGovernanceLedger(stateDir, ledger) {
  *
  * @param {string} stateDir
  * @param {object} entry
- * @returns {Promise<void>}
+ * @returns {Promise<{ ok: boolean, status: string }>}
  */
 export async function appendGovernanceAuditLog(stateDir, entry) {
   const missingFields = GOVERNANCE_AUDIT_REQUIRED_FIELDS.filter(
@@ -510,14 +522,97 @@ export async function appendGovernanceAuditLog(stateDir, entry) {
   const logPath = path.join(stateDir, "governance_canary_audit.jsonl");
   try {
     await fs.mkdir(stateDir, { recursive: true });
+    // Track 1: append full record to JSONL log (reproducibility)
     await fs.appendFile(logPath, JSON.stringify(record) + "\n", "utf8");
-    return { ok: true, status: "written" };
   } catch {
     // Audit log write failure must not crash the main path.
     // The missing entry is observable via the absent log line.
     // Return explicit non-fatal failure signal so callers can observe the gap.
     return { ok: false, status: "audit-write-failed" };
   }
+
+  // Track 2: update compressed state artifact (context-efficiency).
+  // Failure here is non-fatal — full log is already written above.
+  try {
+    await _updateAuditStateSummary(stateDir, record);
+  } catch { /* best-effort; full log is the source of truth */ }
+
+  return { ok: true, status: "written" };
+}
+
+/**
+ * Read or initialise the compressed audit state summary, merge the new record,
+ * and write it back atomically.
+ *
+ * Summary schema:
+ *   {
+ *     schemaVersion: 1,
+ *     updatedAt:     ISO string,
+ *     totalEntries:  number,
+ *     eventCounts:   Record<string, number>,
+ *     latestTimestamp: string | null,
+ *     recentSummary: Array<{ event, canaryId, timestamp, cohort }>
+ *   }
+ *
+ * The `recentSummary` array is capped at GOVERNANCE_AUDIT_STATE_RECENT_LIMIT entries
+ * (most-recent first) to bound file size.  Metrics are deliberately excluded from
+ * the summary — the full JSONL log is the authoritative source for metric replay.
+ */
+async function _updateAuditStateSummary(stateDir, record) {
+  const statePath = path.join(stateDir, "governance_canary_audit_state.json");
+
+  let state;
+  try {
+    const raw = await fs.readFile(statePath, "utf8");
+    state = JSON.parse(raw);
+  } catch {
+    state = null;
+  }
+
+  if (!state || typeof state !== "object" || state.schemaVersion !== 1) {
+    state = {
+      schemaVersion:   1,
+      updatedAt:       new Date().toISOString(),
+      totalEntries:    0,
+      eventCounts:     {},
+      latestTimestamp: null,
+      recentSummary:   []
+    };
+  }
+
+  // Increment total count
+  state.totalEntries = (Number(state.totalEntries) || 0) + 1;
+
+  // Increment event-type counter
+  const evtKey = String(record.event || "unknown");
+  state.eventCounts[evtKey] = (Number(state.eventCounts[evtKey]) || 0) + 1;
+
+  // Track latest timestamp
+  if (record.timestamp) {
+    if (!state.latestTimestamp || record.timestamp > state.latestTimestamp) {
+      state.latestTimestamp = record.timestamp;
+    }
+  }
+
+  // Prepend stripped stub to recentSummary and cap length
+  const stub = {
+    event:     record.event     ?? null,
+    canaryId:  record.canaryId  ?? null,
+    timestamp: record.timestamp ?? null,
+    cohort:    record.cohort    ?? null
+  };
+  if (!Array.isArray(state.recentSummary)) {
+    state.recentSummary = [];
+  }
+  state.recentSummary.unshift(stub);
+  if (state.recentSummary.length > GOVERNANCE_AUDIT_STATE_RECENT_LIMIT) {
+    state.recentSummary = state.recentSummary.slice(0, GOVERNANCE_AUDIT_STATE_RECENT_LIMIT);
+  }
+
+  state.updatedAt = new Date().toISOString();
+
+  // Write compressed state (plain writeFile; failures are non-fatal at call site)
+  await fs.writeFile(statePath, JSON.stringify(state, null, 2) + "\n", "utf8");
 }
 
 // ── State machine ─────────────────────────────────────────────────────────────
