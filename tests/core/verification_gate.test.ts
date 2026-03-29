@@ -832,3 +832,146 @@ describe("verification_gate — security role done-path artifact enforcement (Ta
     );
   });
 });
+
+// ── Task: ARTIFACT_GAP_CODE machine-readable reason codes ───────────────────
+
+import {
+  ARTIFACT_GAP_CODE,
+  buildArtifactAuditEntry,
+} from "../../src/core/verification_gate.js";
+
+describe("verification_gate — ARTIFACT_GAP_CODE machine-readable codes", () => {
+  it("exports ARTIFACT_GAP_CODE with three canonical codes", () => {
+    assert.ok(ARTIFACT_GAP_CODE, "ARTIFACT_GAP_CODE must be exported");
+    assert.equal(typeof ARTIFACT_GAP_CODE.UNFILLED_PLACEHOLDER, "string");
+    assert.equal(typeof ARTIFACT_GAP_CODE.MISSING_SHA, "string");
+    assert.equal(typeof ARTIFACT_GAP_CODE.MISSING_TEST_OUTPUT, "string");
+  });
+
+  it("ARTIFACT_GAP_CODE values are prefixed with artifact-gate/", () => {
+    assert.ok(ARTIFACT_GAP_CODE.UNFILLED_PLACEHOLDER.startsWith("artifact-gate/"));
+    assert.ok(ARTIFACT_GAP_CODE.MISSING_SHA.startsWith("artifact-gate/"));
+    assert.ok(ARTIFACT_GAP_CODE.MISSING_TEST_OUTPUT.startsWith("artifact-gate/"));
+  });
+
+  it("ARTIFACT_GAP_CODE is frozen (immutable)", () => {
+    assert.ok(Object.isFrozen(ARTIFACT_GAP_CODE), "ARTIFACT_GAP_CODE must be frozen");
+  });
+
+  it("ARTIFACT_GAP_CODE codes are distinct", () => {
+    const codes = [
+      ARTIFACT_GAP_CODE.UNFILLED_PLACEHOLDER,
+      ARTIFACT_GAP_CODE.MISSING_SHA,
+      ARTIFACT_GAP_CODE.MISSING_TEST_OUTPUT,
+    ];
+    const unique = new Set(codes);
+    assert.equal(unique.size, codes.length, "all codes must be distinct");
+  });
+});
+
+describe("verification_gate — buildArtifactAuditEntry structured audit record", () => {
+  const fullArtifact = {
+    hasSha: true,
+    hasTestOutput: true,
+    hasUnfilledPlaceholder: false,
+    hasArtifact: true,
+    hasExplicitShaMarker: true,
+    hasExplicitTestBlock: false,
+    mergedSha: "abc1234f",
+  };
+
+  const missingArtifact = {
+    hasSha: false,
+    hasTestOutput: false,
+    hasUnfilledPlaceholder: true,
+    hasArtifact: false,
+    hasExplicitShaMarker: false,
+    hasExplicitTestBlock: false,
+    mergedSha: null,
+  };
+
+  it("returns a structured entry with gateSource and all required fields", () => {
+    const gaps = collectArtifactGaps(missingArtifact);
+    const entry = buildArtifactAuditEntry(missingArtifact, gaps, {
+      gateSource: "hard-block",
+      workerKind: "backend",
+      roleName: "KingDavid",
+      taskId: "T-001",
+      taskSnippet: "Fix auth bug",
+    });
+    assert.equal(entry.gateSource, "hard-block");
+    assert.equal(entry.workerKind, "backend");
+    assert.equal(entry.roleName, "KingDavid");
+    assert.equal(entry.taskId, "T-001");
+    assert.equal(entry.taskSnippet, "Fix auth bug");
+    assert.equal(entry.passed, false);
+    assert.equal(Array.isArray(entry.gaps), true);
+    assert.equal(Array.isArray(entry.reasonCodes), true);
+    assert.ok(typeof entry.auditedAt === "string" && entry.auditedAt.length > 0);
+  });
+
+  it("reasonCodes correspond to ARTIFACT_GAP_CODE for each gap", () => {
+    const gaps = collectArtifactGaps(missingArtifact);
+    const entry = buildArtifactAuditEntry(missingArtifact, gaps, { gateSource: "hard-block" });
+    assert.ok(entry.reasonCodes.includes(ARTIFACT_GAP_CODE.UNFILLED_PLACEHOLDER));
+    assert.ok(entry.reasonCodes.includes(ARTIFACT_GAP_CODE.MISSING_SHA));
+    assert.ok(entry.reasonCodes.includes(ARTIFACT_GAP_CODE.MISSING_TEST_OUTPUT));
+  });
+
+  it("reasonCodes length matches gaps length", () => {
+    const gaps = collectArtifactGaps(missingArtifact);
+    const entry = buildArtifactAuditEntry(missingArtifact, gaps, { gateSource: "evolution-gate" });
+    assert.equal(entry.reasonCodes.length, gaps.length);
+  });
+
+  it("artifactDetail captures explicit marker flags and mergedSha", () => {
+    const entry = buildArtifactAuditEntry(fullArtifact, [], {
+      gateSource: "hard-block",
+    });
+    assert.equal(entry.artifactDetail.hasSha, true);
+    assert.equal(entry.artifactDetail.hasTestOutput, true);
+    assert.equal(entry.artifactDetail.hasExplicitShaMarker, true);
+    assert.equal(entry.artifactDetail.hasExplicitTestBlock, false);
+    assert.equal(entry.artifactDetail.mergedSha, "abc1234f");
+  });
+
+  it("passed=true when gaps array is empty", () => {
+    const entry = buildArtifactAuditEntry(fullArtifact, [], { gateSource: "hard-block" });
+    assert.equal(entry.passed, true);
+  });
+
+  it("defaults workerKind and roleName to 'unknown' when not provided", () => {
+    const entry = buildArtifactAuditEntry(fullArtifact, [], { gateSource: "evolution-gate" });
+    assert.equal(entry.workerKind, "unknown");
+    assert.equal(entry.roleName, "unknown");
+  });
+
+  it("taskId defaults to null when not provided", () => {
+    const entry = buildArtifactAuditEntry(fullArtifact, [], { gateSource: "evolution-gate" });
+    assert.equal(entry.taskId, null);
+  });
+
+  it("taskSnippet is truncated to 100 characters", () => {
+    const longSnippet = "A".repeat(200);
+    const entry = buildArtifactAuditEntry(fullArtifact, [], {
+      gateSource: "hard-block",
+      taskSnippet: longSnippet,
+    });
+    assert.ok(entry.taskSnippet !== null && entry.taskSnippet.length <= 100,
+      `taskSnippet must be at most 100 chars; got ${entry.taskSnippet?.length}`);
+  });
+
+  it("negative path: reasonCodes contains UNKNOWN for unrecognized gap string", () => {
+    const entry = buildArtifactAuditEntry(fullArtifact, ["some-unrecognized-gap"], {
+      gateSource: "hard-block",
+    });
+    assert.ok(entry.reasonCodes.includes(ARTIFACT_GAP_CODE.UNKNOWN),
+      `unrecognized gap must map to UNKNOWN code; got: [${entry.reasonCodes.join("; ")}]`
+    );
+  });
+
+  it("evolution-gate gateSource is preserved in the entry", () => {
+    const entry = buildArtifactAuditEntry(fullArtifact, [], { gateSource: "evolution-gate" });
+    assert.equal(entry.gateSource, "evolution-gate");
+  });
+});

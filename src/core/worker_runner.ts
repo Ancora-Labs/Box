@@ -22,7 +22,7 @@ import { appendProgress, appendLineageEntry, appendFailureClassification } from 
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { getVerificationCommands } from "./verification_command_registry.js";
-import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired, extractMergedSha } from "./verification_gate.js";
+import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired, extractMergedSha, buildArtifactAuditEntry } from "./verification_gate.js";
 import { enforceModelPolicy, routeModelWithUncertainty, classifyComplexityTier, COMPLEXITY_TIER } from "./model_policy.js";
 import { deriveRoutingAdjustments, buildPromptHardConstraints } from "./learning_policy_compiler.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
@@ -112,6 +112,14 @@ type VerificationEvidence = {
   validatedAt: string;
   roleName: string;
   taskSnippet: string;
+  artifactDetail?: {
+    hasSha: boolean;
+    hasTestOutput: boolean;
+    hasUnfilledPlaceholder: boolean;
+    hasExplicitShaMarker: boolean;
+    hasExplicitTestBlock: boolean;
+    mergedSha: string | null;
+  } | null;
 };
 
 type ParsedWorkerResponse = ReturnType<typeof parseWorkerResponse> & {
@@ -888,6 +896,29 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       const artifactGaps = collectArtifactGaps(artifact);
       parsed.status = "blocked";
       parsed.summary = `[ARTIFACT GATE] done hard-blocked — ${artifactGaps.join("; ")}\n${parsed.summary}`;
+
+      // Write structured audit entry so hard-blocked attempts are traceable
+      // in verification_audit.json alongside the soft-verify path entries.
+      try {
+        const auditPath = path.join(config.paths?.stateDir || "state", "verification_audit.json");
+        let audit: unknown[] = [];
+        try {
+          if (existsSync(auditPath)) {
+            const raw = readFileSync(auditPath, "utf8");
+            const parsed2 = JSON.parse(raw);
+            if (Array.isArray(parsed2)) audit = parsed2;
+          }
+        } catch { audit = []; }
+        audit.push(buildArtifactAuditEntry(artifact, artifactGaps, {
+          gateSource: "hard-block",
+          workerKind: workerKind ?? "unknown",
+          roleName: String(roleName),
+          taskId: instruction.taskId || null,
+          taskSnippet: String(instruction.task || "").slice(0, 100),
+        }));
+        if (audit.length > 200) audit = audit.slice(-200);
+        writeFileSync(auditPath, JSON.stringify(audit, null, 2), "utf8");
+      } catch { /* non-critical */ }
     }
   }
 
@@ -912,6 +943,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     }, { taskKind: instruction.taskKind });
 
     // Evidence snapshot for audit (AC#4 defined schema)
+    const postMergeArtifact = validationResult.evidence?.postMergeArtifact as ReturnType<typeof checkPostMergeArtifact> | undefined;
     const verificationEvidence: VerificationEvidence = {
       profile: String(validationResult.evidence?.profile || effectiveKind),
       hasReport: Boolean(validationResult.evidence?.hasReport),
@@ -923,7 +955,15 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       attempt: currentAttempt,
       validatedAt: new Date().toISOString(),
       roleName: String(roleName),
-      taskSnippet: String(instruction.task || "").slice(0, 100)
+      taskSnippet: String(instruction.task || "").slice(0, 100),
+      artifactDetail: postMergeArtifact ? {
+        hasSha: postMergeArtifact.hasSha,
+        hasTestOutput: postMergeArtifact.hasTestOutput,
+        hasUnfilledPlaceholder: postMergeArtifact.hasUnfilledPlaceholder,
+        hasExplicitShaMarker: postMergeArtifact.hasExplicitShaMarker,
+        hasExplicitTestBlock: postMergeArtifact.hasExplicitTestBlock,
+        mergedSha: postMergeArtifact.mergedSha ?? null,
+      } : null,
     };
 
     // Persist evidence snapshot for audit trail (non-critical, keep last 200 entries)

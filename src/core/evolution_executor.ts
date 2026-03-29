@@ -27,7 +27,7 @@ import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { checkPostMergeArtifact, collectArtifactGaps, ARTIFACT_GATE_ERROR_PREFIX, isArtifactGateRequired } from "./verification_gate.js";
+import { checkPostMergeArtifact, collectArtifactGaps, ARTIFACT_GATE_ERROR_PREFIX, isArtifactGateRequired, buildArtifactAuditEntry } from "./verification_gate.js";
 import { VERIFICATION_DEFAULTS, rewriteVerificationCommand, checkForbiddenCommands } from "./verification_command_registry.js";
 import { isNonSpecificVerification } from "./plan_contract_validator.js";
 
@@ -1082,6 +1082,23 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
           taskState.status = "rework";
           taskState.error = `${ARTIFACT_GATE_ERROR_PREFIX}: ${gaps.join("; ")}`;
           await appendProgress(config, `[EVO] ${task.task_id} — artifact gate failed: ${gaps.join("; ")}`);
+
+          // Write structured audit entry to verification_audit.json for traceability.
+          try {
+            const auditPath = path.join(stateDir, "verification_audit.json");
+            const existing = await readJson(auditPath, []);
+            const auditLog = Array.isArray(existing) ? existing : [];
+            auditLog.push(buildArtifactAuditEntry(artifact, gaps, {
+              gateSource: "evolution-gate",
+              workerKind: evolutionWorkerKind,
+              roleName: "evolution-worker",
+              taskId: task.task_id ?? null,
+              taskSnippet: String(task.title || task.scope || "").slice(0, 100),
+            }));
+            const trimmed = auditLog.length > 200 ? auditLog.slice(-200) : auditLog;
+            await writeJson(auditPath, trimmed);
+          } catch { /* non-critical */ }
+
           await saveProgress(stateDir, progress);
           console.warn(`[evolution] Artifact gate failed — scheduling rework (${gaps.join(", ")})`);
           continue;
