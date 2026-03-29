@@ -60,6 +60,19 @@ export const ARTIFACT_GAP = Object.freeze({
 export const ARTIFACT_GATE_ERROR_PREFIX = "artifact-gate";
 
 /**
+ * Machine-readable reason codes for artifact gate gaps.
+ * These structured codes complement the human-readable ARTIFACT_GAP messages
+ * and can be matched programmatically (e.g., for dashboards, policy filters,
+ * or downstream escalation routing).
+ */
+export const ARTIFACT_GAP_CODE = Object.freeze({
+  UNFILLED_PLACEHOLDER: "artifact-gate/unfilled-placeholder",
+  MISSING_SHA:          "artifact-gate/missing-sha",
+  MISSING_TEST_OUTPUT:  "artifact-gate/missing-test-output",
+  UNKNOWN:              "artifact-gate/unknown",
+});
+
+/**
  * Check if worker output contains the required post-merge verification artifact.
  * The artifact is: a git SHA + raw npm test stdout block.
  *
@@ -129,8 +142,79 @@ export function collectArtifactGaps(artifact: { hasSha: boolean; hasTestOutput: 
   return gaps;
 }
 
+/** Shape of an artifact gate audit entry written to verification_audit.json. */
+export interface ArtifactAuditEntry {
+  gateSource: "hard-block" | "evolution-gate";
+  workerKind: string;
+  roleName: string;
+  taskId: string | number | null;
+  taskSnippet: string | null;
+  passed: boolean;
+  gaps: string[];
+  reasonCodes: string[];
+  artifactDetail: {
+    hasSha: boolean;
+    hasTestOutput: boolean;
+    hasUnfilledPlaceholder: boolean;
+    hasExplicitShaMarker: boolean;
+    hasExplicitTestBlock: boolean;
+    mergedSha: string | null;
+  };
+  auditedAt: string;
+}
+
 /**
- * Apply config-based gate overrides to a verification profile.
+ * Build a structured audit entry for an artifact gate check.
+ *
+ * Centralises audit record construction so worker_runner and evolution_executor
+ * emit identical schemas regardless of which finalization path fires the gate.
+ * The entry is suitable for appending to verification_audit.json.
+ *
+ * @param artifact — result of {@link checkPostMergeArtifact}
+ * @param gaps     — result of {@link collectArtifactGaps}
+ * @param meta     — contextual metadata from the calling finalization path
+ * @returns structured {@link ArtifactAuditEntry}
+ */
+export function buildArtifactAuditEntry(
+  artifact: ReturnType<typeof checkPostMergeArtifact>,
+  gaps: string[],
+  meta: {
+    gateSource: "hard-block" | "evolution-gate";
+    taskId?: string | number | null;
+    workerKind?: string;
+    roleName?: string;
+    taskSnippet?: string;
+  }
+): ArtifactAuditEntry {
+  const reasonCodes = gaps.map(g => {
+    if (g === ARTIFACT_GAP.UNFILLED_PLACEHOLDER) return ARTIFACT_GAP_CODE.UNFILLED_PLACEHOLDER;
+    if (g === ARTIFACT_GAP.MISSING_SHA)          return ARTIFACT_GAP_CODE.MISSING_SHA;
+    if (g === ARTIFACT_GAP.MISSING_TEST_OUTPUT)  return ARTIFACT_GAP_CODE.MISSING_TEST_OUTPUT;
+    return ARTIFACT_GAP_CODE.UNKNOWN;
+  });
+
+  return {
+    gateSource: meta.gateSource,
+    workerKind: meta.workerKind || "unknown",
+    roleName: meta.roleName || "unknown",
+    taskId: meta.taskId ?? null,
+    taskSnippet: meta.taskSnippet ? String(meta.taskSnippet).slice(0, 100) : null,
+    passed: gaps.length === 0,
+    gaps,
+    reasonCodes,
+    artifactDetail: {
+      hasSha: artifact.hasSha,
+      hasTestOutput: artifact.hasTestOutput,
+      hasUnfilledPlaceholder: artifact.hasUnfilledPlaceholder,
+      hasExplicitShaMarker: artifact.hasExplicitShaMarker,
+      hasExplicitTestBlock: artifact.hasExplicitTestBlock,
+      mergedSha: artifact.mergedSha ?? null,
+    },
+    auditedAt: new Date().toISOString(),
+  };
+}
+
+/**
  * Gates config can upgrade optional evidence fields to required.
  *
  * Mapping:
