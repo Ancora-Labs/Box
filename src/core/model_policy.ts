@@ -529,6 +529,69 @@ export function routeModelByCost(
   };
 }
 
+// ── Completion-yield ROI-adjusted routing ─────────────────────────────────────
+//
+// Adjusts the quality floor based on historical tier ROI so that
+// model selection optimises for completion yield:
+//   - High-ROI tiers → relax floor slightly → cheaper model passes (cost saving)
+//   - Low-ROI tiers  → tighten floor        → better model required (quality uplift)
+//   - No history     → use floor as-is      → deterministic baseline behaviour
+
+const ROI_HIGH_THRESHOLD   = 0.8;   // Above this: tier is productive; allow relaxation
+const ROI_LOW_THRESHOLD    = 0.3;   // Below this (and > 0): tier is under-performing; tighten
+const FLOOR_RELAX_AMOUNT   = 0.05;  // Floor reduction when ROI is high
+const FLOOR_TIGHTEN_AMOUNT = 0.10;  // Floor increase when ROI is low
+const MIN_QUALITY_FLOOR    = 0.50;  // Absolute minimum — always route to something
+const MAX_QUALITY_FLOOR    = 0.99;  // Absolute maximum — preserve a model selection path
+
+/**
+ * Route to the cheapest model that satisfies a quality floor adjusted by
+ * the tier's historical completion-yield ROI.
+ *
+ * The effective floor is derived from `qualityFloor` and `tierROI`:
+ *   - tierROI > ROI_HIGH_THRESHOLD → floor − FLOOR_RELAX_AMOUNT (productive tier; cheaper ok)
+ *   - 0 < tierROI < ROI_LOW_THRESHOLD → floor + FLOOR_TIGHTEN_AMOUNT (under-performing; tighten)
+ *   - otherwise (no history or medium) → floor unchanged
+ * The floor is always clamped to [MIN_QUALITY_FLOOR, MAX_QUALITY_FLOOR].
+ *
+ * Quality contract is preserved: when no model meets the effective floor the
+ * strongest available model is returned with `meetsQualityFloor: false`.
+ *
+ * @param taskHints    — task scope for complexity-tier derivation
+ * @param modelOptions — model pool; efficientModel / defaultModel / strongModel
+ *                       and optional qualityByModel score overrides
+ * @param qualityFloor — caller-supplied minimum quality score (default 0.7)
+ * @param tierROI      — recent average ROI for this tier (0 = no data; see computeRecentROIForTier)
+ */
+export function routeModelWithCompletionROI(
+  taskHints: TaskHints = {},
+  modelOptions: ModelOptions & { qualityByModel?: Record<string, number> } = {},
+  qualityFloor = 0.7,
+  tierROI = 0,
+): { model: string; tier: string; reason: string; meetsQualityFloor: boolean; effectiveFloor: number; roiAdjustment: string } {
+  let effectiveFloor = qualityFloor;
+  let roiAdjustment = "none";
+
+  if (tierROI > ROI_HIGH_THRESHOLD) {
+    effectiveFloor = qualityFloor - FLOOR_RELAX_AMOUNT;
+    roiAdjustment = `relaxed (tierROI=${tierROI} > ${ROI_HIGH_THRESHOLD})`;
+  } else if (tierROI > 0 && tierROI < ROI_LOW_THRESHOLD) {
+    effectiveFloor = qualityFloor + FLOOR_TIGHTEN_AMOUNT;
+    roiAdjustment = `tightened (tierROI=${tierROI} < ${ROI_LOW_THRESHOLD})`;
+  }
+
+  effectiveFloor = Math.max(MIN_QUALITY_FLOOR, Math.min(MAX_QUALITY_FLOOR, effectiveFloor));
+  effectiveFloor = Math.round(effectiveFloor * 1000) / 1000;
+
+  const base = routeModelByCost(taskHints, modelOptions, effectiveFloor);
+  return {
+    ...base,
+    effectiveFloor,
+    roiAdjustment,
+    reason: `roi-adjusted(${roiAdjustment}): ${base.reason}`,
+  };
+}
+
 /**
  * Compute the average realized ROI for a complexity tier from the ledger.
  *

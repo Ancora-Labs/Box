@@ -857,3 +857,123 @@ describe("Integration: artifact evidence coupling + plan-validation at dispatch 
     );
   });
 });
+
+// ── 9. Fit-scored dispatch with bounded fallback promotion ────────────────────
+
+import {
+  scoreWorkerTaskFit,
+  selectWorkerByFitScore,
+  recordLaneOutcome,
+} from "../../src/core/capability_pool.js";
+
+describe("Integration: fit-scored dispatch with bounded fallback promotion", () => {
+  it("specialist worker wins decisively for specialist tasks (governance)", () => {
+    // governance-worker has single capability ["state-governance"] + specialist bonus
+    const result = selectWorkerByFitScore({ task: "Update governance freeze policy rules" });
+    assert.equal(result.role, "governance-worker",
+      "governance-worker must be selected for governance tasks (single-capability specialist)"
+    );
+    assert.ok(result.fitScore > 0.5, `fitScore (${result.fitScore}) must exceed 0.5 for a capability match`);
+  });
+
+  it("specialist worker wins decisively for specialist tasks (infrastructure)", () => {
+    const result = selectWorkerByFitScore({ task: "Update Docker CI pipeline configuration" });
+    assert.equal(result.role, "infrastructure-worker",
+      "infrastructure-worker must be selected for infrastructure tasks"
+    );
+    assert.ok(result.fitScore > 0.5);
+  });
+
+  it("quality-worker wins for test-infra tasks over all generalists", () => {
+    const plan = { task: "Add test coverage for the dag_scheduler wave ordering" };
+    const qualityScore = scoreWorkerTaskFit("quality-worker",    plan);
+    const evolvScore   = scoreWorkerTaskFit("Evolution Worker",  plan);
+    const govScore     = scoreWorkerTaskFit("governance-worker", plan);
+    assert.ok(qualityScore > evolvScore,
+      `quality-worker (${qualityScore}) must outscore Evolution Worker (${evolvScore})`
+    );
+    assert.ok(qualityScore > govScore,
+      `quality-worker (${qualityScore}) must outscore governance-worker (${govScore})`
+    );
+  });
+
+  it("fit-scored dispatch is deterministic: same plan always produces same worker", () => {
+    const plan = { task: "Add observation metrics to the dashboard service endpoint" };
+    const r1 = selectWorkerByFitScore(plan);
+    const r2 = selectWorkerByFitScore(plan);
+    const r3 = selectWorkerByFitScore(plan);
+    assert.equal(r1.role, r2.role, "first and second call must produce same worker");
+    assert.equal(r2.role, r3.role, "second and third call must produce same worker");
+    assert.equal(r1.fitScore, r2.fitScore, "fit scores must be identical across calls");
+  });
+
+  it("worker starvation prevention: unknown task type still produces a valid worker", () => {
+    // Tasks with no recognized capability keywords fall back to runtime-refactor
+    const plan = { task: "something completely unrecognized xyzzy qwerty blorp" };
+    const result = selectWorkerByFitScore(plan);
+    assert.ok(result.role, "must always return a non-empty role (no starvation)");
+    assert.ok(typeof result.fitScore === "number" && result.fitScore >= 0,
+      "fitScore must be a non-negative number (bounded fallback)"
+    );
+  });
+
+  it("worker starvation prevention: degraded lane does not prevent worker assignment", () => {
+    // Simulate a severely degraded quality lane (20 consecutive failures)
+    let ledger = {};
+    for (let i = 0; i < 20; i++) {
+      ledger = recordLaneOutcome(ledger, "quality", { success: false, durationMs: 100 });
+    }
+    const plan = { task: "Add test coverage for the parser module" }; // → quality lane
+    const result = selectWorkerByFitScore(plan, undefined, ledger);
+    // With degraded quality lane, capability match still contributes 50% to fit score
+    assert.ok(result.role, "degraded lane must not produce null worker (starvation prevention)");
+    assert.ok(result.fitScore >= 0, "fit score must be non-negative even for degraded lane");
+    // Capability match contributes 0.5 even when performance is low
+    assert.ok(result.fitScore > 0, "quality-worker has capability match and must still score > 0");
+  });
+
+  it("fit score bounds: all workers score in [0, 1] for any plan", () => {
+    const plans = [
+      { task: "Add test coverage for the dag_scheduler module" },
+      { task: "Update governance freeze policy rules" },
+      { task: "Fix Docker CI pipeline configuration" },
+      { task: "Wire integration between scheduler and orchestrator dispatch" },
+    ];
+    const workerNames = ["quality-worker", "governance-worker", "Evolution Worker", "infrastructure-worker", "integration-worker", "observation-worker"];
+    for (const plan of plans) {
+      for (const workerName of workerNames) {
+        const score = scoreWorkerTaskFit(workerName, plan);
+        assert.ok(
+          score >= 0 && score <= 1,
+          `score ${score} out of [0,1] for worker=${workerName}, plan="${plan.task}"`
+        );
+      }
+    }
+  });
+
+  it("negative path: worker with zero capability overlap still scores >= 0 (floor prevents starvation)", () => {
+    // governance-worker has only ["state-governance"]; test-infra task gives capMatch=0
+    // Expected: capMatch=0 → 0, laneScore=0.5 → 0.5*0.4=0.2, specialistBonus=0 → raw=0.2
+    const score = scoreWorkerTaskFit(
+      "governance-worker",
+      { task: "Add test coverage for the parser module" }
+    );
+    assert.ok(score >= 0, "score must never be negative (bounded fallback floor)");
+    assert.ok(score < 0.5, "worker with no capability match must score below 0.5");
+  });
+
+  it("performance history raises fit score for the matching specialist lane", () => {
+    // A healthy quality lane should increase quality-worker's fit score vs no history
+    let ledger = {};
+    for (let i = 0; i < 10; i++) {
+      ledger = recordLaneOutcome(ledger, "quality", { success: true, durationMs: 200 });
+    }
+    const plan = { task: "Add test coverage for the carry_forward_ledger module" };
+    const scoreWithHistory    = scoreWorkerTaskFit("quality-worker", plan, ledger);
+    const scoreWithoutHistory = scoreWorkerTaskFit("quality-worker", plan);
+    assert.ok(
+      scoreWithHistory >= scoreWithoutHistory,
+      `healthy ledger (${scoreWithHistory}) must not decrease fit score vs no history (${scoreWithoutHistory})`
+    );
+  });
+});

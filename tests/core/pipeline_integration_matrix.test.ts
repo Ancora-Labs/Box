@@ -676,3 +676,179 @@ describe("pipeline matrix — lane diversity (expanded)", () => {
     assert.ok(typeof result.diversityCheck.meetsMinimum === "boolean");
   });
 });
+
+// ── Full pipeline composition ─────────────────────────────────────────────────
+// Tests for evaluatePreDispatchGovernanceGate covering full pipeline success
+// and per-gate block scenarios.  All scenarios are deterministic and file-safe:
+// the stateDir is set to a non-existent path so readJson calls return defaults
+// rather than loading real data.
+
+import {
+  evaluatePreDispatchGovernanceGate,
+  GATE_PRECEDENCE,
+  BLOCK_REASON,
+} from "../../src/core/orchestrator.js";
+
+/** Minimal config that passes ALL gates. */
+function makePipelinePassConfig(overrides: Record<string, unknown> = {}) {
+  return {
+    systemGuardian: { enabled: false },
+    // isFreezeActive reads config.governanceFreeze; disabled here so December runs don't trigger
+    governanceFreeze: { enabled: false },
+    carryForward: { maxCriticalOverdue: 999 },
+    canary: { governance: { enabled: false } },
+    paths: { stateDir: "/nonexistent/box-pipeline-test-state" },
+    runtime: {},
+    ...overrides,
+  };
+}
+
+/** Minimal valid plan that passes the evidence coupling gate. */
+function makeValidPlan(id: string, deps: string[] = []) {
+  return {
+    id,
+    task: `Task ${id}`,
+    dependsOn: deps,
+    verification_commands: ["npm test"],
+    acceptance_criteria: [`${id} tests pass`],
+  };
+}
+
+describe("pipeline matrix — full composition (success scenario)", () => {
+  it("all gates pass when plans are valid and no blocks are active", async () => {
+    const config = makePipelinePassConfig();
+    const plans = [
+      makeValidPlan("T-A"),
+      makeValidPlan("T-B"),
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "cycle-1");
+    assert.equal(result.blocked, false, "pipeline must not be blocked when all gates pass");
+    assert.equal(result.reason, null, "reason must be null on success");
+    assert.equal(result.gateIndex, undefined, "gateIndex must be absent on success");
+    assert.ok(result.budgetEligibility, "budgetEligibility must always be present");
+  });
+
+  it("success result always carries budgetEligibility with eligible=true", async () => {
+    const result = await evaluatePreDispatchGovernanceGate(
+      makePipelinePassConfig(),
+      [makeValidPlan("T-X")],
+      "cycle-budget-check"
+    );
+    assert.equal(result.blocked, false);
+    assert.equal(result.budgetEligibility.eligible, true);
+  });
+
+  it("empty plans set passes all gates (no evidence coupling targets)", async () => {
+    const result = await evaluatePreDispatchGovernanceGate(
+      makePipelinePassConfig(),
+      [],
+      "cycle-empty"
+    );
+    assert.equal(result.blocked, false, "empty plans set must not trigger evidence coupling gate");
+  });
+});
+
+describe("pipeline matrix — full composition (block scenarios)", () => {
+  it("governance freeze blocks at gate 3 (GOVERNANCE_FREEZE)", async () => {
+    // isFreezeActive checks config.governanceFreeze.manualOverrideActive (not config.governance.freeze)
+    const config = makePipelinePassConfig({
+      governanceFreeze: { manualOverrideActive: true },
+    });
+    const result = await evaluatePreDispatchGovernanceGate(config, [makeValidPlan("T-1")], "cycle-freeze");
+    assert.equal(result.blocked, true, "governance freeze must block dispatch");
+    assert.ok(
+      result.reason?.startsWith(BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE),
+      `reason must start with ${BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE}, got: ${result.reason}`
+    );
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.GOVERNANCE_FREEZE, "gateIndex must match GOVERNANCE_FREEZE precedence");
+  });
+
+  it("lineage cycle blocks at gate 4 (LINEAGE_CYCLE_DETECTED)", async () => {
+    const config = makePipelinePassConfig();
+    const cyclicPlans = [
+      { id: "T-A", task: "task A", dependsOn: ["T-B"], verification_commands: ["npm test"], acceptance_criteria: ["pass"] },
+      { id: "T-B", task: "task B", dependsOn: ["T-A"], verification_commands: ["npm test"], acceptance_criteria: ["pass"] },
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, cyclicPlans, "cycle-dag");
+    assert.equal(result.blocked, true, "cyclic dependency must block dispatch");
+    assert.ok(
+      result.reason?.startsWith(BLOCK_REASON.LINEAGE_CYCLE_DETECTED),
+      `reason must start with ${BLOCK_REASON.LINEAGE_CYCLE_DETECTED}`
+    );
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.LINEAGE_CYCLE);
+  });
+
+  it("mandatory drift debt blocks at gate 7 (MANDATORY_DRIFT_DEBT_UNRESOLVED)", async () => {
+    const config = makePipelinePassConfig();
+    const driftReport = {
+      scannedDocs:          ["docs/arch.md"],
+      presentCount:         0,
+      staleCount:           1,
+      staleReferences:      [{ docPath: "docs/arch.md", referencedPath: "src/core/ghost.ts", line: 1 }],
+      deprecatedTokenCount: 0,
+      deprecatedTokenRefs:  [],
+    };
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "cycle-drift", driftReport as any);
+    assert.equal(result.blocked, true, "high-priority drift debt must block dispatch");
+    assert.ok(
+      result.reason?.startsWith(BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED),
+      `reason must start with ${BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED}`
+    );
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.MANDATORY_DRIFT_DEBT);
+    assert.ok(Array.isArray(result.mandatoryDriftPaths), "mandatoryDriftPaths must be present on drift block");
+    assert.ok(result.mandatoryDriftPaths!.includes("src/core/ghost.ts"), "ghost path must be in mandatoryDriftPaths");
+  });
+
+  it("plan evidence coupling blocks at gate 8 (PLAN_EVIDENCE_COUPLING_INVALID)", async () => {
+    const config = makePipelinePassConfig();
+    const plans = [
+      { id: "T-NoEvidence", task: "some task", dependsOn: [] }, // missing verification_commands and acceptance_criteria
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "cycle-evidence");
+    assert.equal(result.blocked, true, "plan missing evidence coupling must block dispatch");
+    assert.ok(
+      result.reason?.startsWith(BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID),
+      `reason must start with ${BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID}`
+    );
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.PLAN_EVIDENCE_COUPLING);
+  });
+
+  it("higher-precedence gate fires before lower-precedence gate (freeze before evidence coupling)", async () => {
+    // Governance freeze fires at gate 3; plan evidence coupling would fire at gate 8.
+    // With both conditions active, only the freeze gate must fire.
+    // isFreezeActive checks config.governanceFreeze.manualOverrideActive
+    const config = makePipelinePassConfig({
+      governanceFreeze: { manualOverrideActive: true },
+    });
+    const plans = [
+      { id: "T-MissingEvidence", task: "no evidence here", dependsOn: [] },
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "cycle-precedence");
+    assert.equal(result.blocked, true);
+    assert.equal(
+      result.gateIndex,
+      GATE_PRECEDENCE.GOVERNANCE_FREEZE,
+      "freeze (gate 3) must fire before evidence coupling (gate 8)"
+    );
+    assert.ok(result.reason?.startsWith(BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE));
+  });
+
+  it("negative path: drift gate is skipped when disableDriftDebtGate=true even with stale refs", async () => {
+    const config = makePipelinePassConfig({ runtime: { disableDriftDebtGate: true } });
+    const driftReport = {
+      scannedDocs:          ["docs/arch.md"],
+      presentCount:         0,
+      staleCount:           1,
+      staleReferences:      [{ docPath: "docs/arch.md", referencedPath: "src/core/ghost.ts", line: 1 }],
+      deprecatedTokenCount: 0,
+      deprecatedTokenRefs:  [],
+    };
+    const result = await evaluatePreDispatchGovernanceGate(
+      config,
+      [makeValidPlan("T-DriftDisabled")],
+      "cycle-drift-disabled",
+      driftReport as any
+    );
+    assert.equal(result.blocked, false, "drift gate must be skipped when disableDriftDebtGate=true");
+  });
+});
