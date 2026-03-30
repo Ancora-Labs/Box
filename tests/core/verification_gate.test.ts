@@ -13,6 +13,8 @@ import {
   checkNamedTestProof,
   NAMED_TEST_PROOF_GAP,
   NAMED_TEST_PROOF_PATTERN,
+  normalizeReportValue,
+  CANONICAL_REPORT_VALUES,
 } from "../../src/core/verification_gate.js";
 
 describe("verification_gate parse helpers", () => {
@@ -1477,3 +1479,252 @@ describe("verification_gate — packet-named verification proof gate (Task 1)", 
   });
 });
 
+// ── Profile-aware evidence matching: normalizeReportValue + canonical values ──
+
+describe("verification_gate — normalizeReportValue canonical normalization", () => {
+  it("exports CANONICAL_REPORT_VALUES as a frozen Set with pass/fail/n/a", () => {
+    assert.ok(CANONICAL_REPORT_VALUES instanceof Set, "CANONICAL_REPORT_VALUES must be a Set");
+    assert.ok(Object.isFrozen(CANONICAL_REPORT_VALUES), "CANONICAL_REPORT_VALUES must be frozen");
+    assert.ok(CANONICAL_REPORT_VALUES.has("pass"));
+    assert.ok(CANONICAL_REPORT_VALUES.has("fail"));
+    assert.ok(CANONICAL_REPORT_VALUES.has("n/a"));
+  });
+
+  it("pass synonyms are normalized to 'pass'", () => {
+    assert.equal(normalizeReportValue("passing"), "pass");
+    assert.equal(normalizeReportValue("passed"), "pass");
+    assert.equal(normalizeReportValue("ok"), "pass");
+    assert.equal(normalizeReportValue("yes"), "pass");
+    assert.equal(normalizeReportValue("true"), "pass");
+  });
+
+  it("fail synonyms are normalized to 'fail'", () => {
+    assert.equal(normalizeReportValue("failing"), "fail");
+    assert.equal(normalizeReportValue("failed"), "fail");
+    assert.equal(normalizeReportValue("no"), "fail");
+    assert.equal(normalizeReportValue("false"), "fail");
+    assert.equal(normalizeReportValue("error"), "fail");
+  });
+
+  it("n/a synonyms are normalized to 'n/a'", () => {
+    assert.equal(normalizeReportValue("na"), "n/a");
+    assert.equal(normalizeReportValue("not-applicable"), "n/a");
+    assert.equal(normalizeReportValue("skip"), "n/a");
+    assert.equal(normalizeReportValue("skipped"), "n/a");
+    assert.equal(normalizeReportValue("exempt"), "n/a");
+  });
+
+  it("canonical values are returned unchanged", () => {
+    assert.equal(normalizeReportValue("pass"), "pass");
+    assert.equal(normalizeReportValue("fail"), "fail");
+    assert.equal(normalizeReportValue("n/a"), "n/a");
+  });
+
+  it("truly unknown values are returned as-is (not coerced)", () => {
+    assert.equal(normalizeReportValue("xyz"), "xyz");
+    assert.equal(normalizeReportValue("green"), "green");
+    assert.equal(normalizeReportValue(""), "");
+  });
+
+  it("parseVerificationReport normalizes 'passing' and 'passed' to canonical values", () => {
+    const report = parseVerificationReport(
+      "VERIFICATION_REPORT: BUILD=passing; TESTS=passed; EDGE_CASES=ok"
+    );
+    assert.equal(report?.build, "pass", "'passing' must be normalized to 'pass'");
+    assert.equal(report?.tests, "pass", "'passed' must be normalized to 'pass'");
+    assert.equal(report?.edgeCases, "pass", "'ok' must be normalized to 'pass'");
+  });
+
+  it("parseVerificationReport normalizes 'failing' and 'failed' to 'fail'", () => {
+    const report = parseVerificationReport(
+      "VERIFICATION_REPORT: BUILD=failing; TESTS=failed"
+    );
+    assert.equal(report?.build, "fail", "'failing' must be normalized to 'fail'");
+    assert.equal(report?.tests, "fail", "'failed' must be normalized to 'fail'");
+  });
+
+  it("parseVerificationReport normalizes 'na' and 'skipped' to 'n/a'", () => {
+    const report = parseVerificationReport(
+      "VERIFICATION_REPORT: RESPONSIVE=na; API=skipped"
+    );
+    assert.equal(report?.responsive, "n/a", "'na' must be normalized to 'n/a'");
+    assert.equal(report?.api, "n/a", "'skipped' must be normalized to 'n/a'");
+  });
+});
+
+// ── Profile-aware: non-canonical required field values raise gaps ──────────────
+
+describe("verification_gate — non-canonical required field value gaps", () => {
+  it("non-canonical value 'xyz' on a required field raises a gap (false-negative prevention)", () => {
+    // A worker that writes BUILD=xyz would slip past fail/n/a checks without
+    // this guard.  The gate must reject it as non-canonical.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        // Sneaks in a non-canonical value that isn't caught by n/a or fail checks
+        "VERIFICATION_REPORT: BUILD=xyz; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    assert.equal(result.passed, false,
+      "non-canonical required field value must fail the gate"
+    );
+    const nonCanonicalGap = result.gaps.find((g: string) => /non-canonical/i.test(g));
+    assert.ok(nonCanonicalGap,
+      `expected a non-canonical gap for BUILD=xyz; got: [${result.gaps.join("; ")}]`
+    );
+    assert.ok(nonCanonicalGap!.includes("BUILD"),
+      "gap message must name the offending field"
+    );
+    assert.ok(nonCanonicalGap!.includes("xyz"),
+      "gap message must include the non-canonical value"
+    );
+  });
+
+  it("canonical 'pass' value on a required field does NOT raise a non-canonical gap", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    const nonCanonicalGap = result.gaps.find((g: string) => /non-canonical/i.test(g));
+    assert.equal(nonCanonicalGap, undefined,
+      `canonical 'pass' must not raise a non-canonical gap; got: ${nonCanonicalGap}`
+    );
+  });
+
+  it("normalized synonym 'passing' (→ 'pass') does NOT raise a non-canonical gap after normalization", () => {
+    // 'passing' is normalized to 'pass' in parseVerificationReport, so by the
+    // time validateWorkerContract sees the report the value is already canonical.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=passing; TESTS=passed; EDGE_CASES=ok; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    const nonCanonicalGap = result.gaps.find((g: string) => /non-canonical/i.test(g));
+    assert.equal(nonCanonicalGap, undefined,
+      "synonym 'passing' is pre-normalized; no non-canonical gap expected"
+    );
+  });
+
+  it("negative path: non-canonical value on optional field does NOT raise a gap (optional → not enforced)", () => {
+    // Optional fields are never checked for canonical values — only tracked.
+    // Using 'security' (optional for backend) with a weird value must not block.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=dunno; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    const nonCanonicalGap = result.gaps.find((g: string) => /non-canonical/i.test(g));
+    assert.equal(nonCanonicalGap, undefined,
+      "non-canonical value on optional field must not raise a gap"
+    );
+  });
+});
+
+// ── Profile-aware: optional field failure tracking ────────────────────────────
+
+describe("verification_gate — optional field failure tracking in evidence", () => {
+  it("evidence.optionalFieldFailures is an empty array when no optional fields fail", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=pass; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    const optFails = (result.evidence as any).optionalFieldFailures;
+    assert.ok(Array.isArray(optFails), "optionalFieldFailures must be an array");
+    assert.equal(optFails.length, 0, "no optional field failures expected");
+  });
+
+  it("evidence.optionalFieldFailures includes 'security' when optional security=fail for backend", () => {
+    // For backend: security is optional. A fail value must be tracked but NOT block.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=fail; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    // Gate must still PASS (security is optional for backend)
+    assert.equal(result.passed, true,
+      "optional security=fail must not block backend gate"
+    );
+    const optFails = (result.evidence as any).optionalFieldFailures as string[];
+    assert.ok(Array.isArray(optFails), "optionalFieldFailures must be an array");
+    assert.ok(optFails.includes("security"),
+      `'security' must appear in optionalFieldFailures; got: [${optFails.join(", ")}]`
+    );
+  });
+
+  it("required field failures remain in gaps, not in optionalFieldFailures", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=fail; TESTS=pass; EDGE_CASES=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    assert.equal(result.passed, false, "required BUILD=fail must still block gate");
+    assert.ok(result.gaps.some(g => /BUILD.*FAIL/i.test(g)), "BUILD fail must be in gaps");
+    const optFails = (result.evidence as any).optionalFieldFailures as string[];
+    assert.ok(!optFails.includes("build"),
+      "required field 'build' must NOT appear in optionalFieldFailures"
+    );
+  });
+
+  it("optionalFieldFailures is empty array when VERIFICATION_REPORT is missing", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: "BOX_MERGED_SHA=abc1234\n# tests 5 pass 5"
+    });
+    const optFails = (result.evidence as any).optionalFieldFailures;
+    assert.ok(Array.isArray(optFails), "optionalFieldFailures must be an array even with no report");
+    assert.equal(optFails.length, 0);
+  });
+
+  it("negative path: multiple optional field failures are all tracked", () => {
+    // For backend: security and api are optional.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234",
+        "# tests 5 pass 5",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=fail; API=fail; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1",
+      ].join("\n"),
+    });
+    // Gate still passes (both failing fields are optional for backend)
+    assert.equal(result.passed, true,
+      "optional security+api fail must not block backend gate"
+    );
+    const optFails = (result.evidence as any).optionalFieldFailures as string[];
+    assert.ok(optFails.includes("security"),
+      `'security' must be in optionalFieldFailures; got: [${optFails.join(", ")}]`
+    );
+    assert.ok(optFails.includes("api"),
+      `'api' must be in optionalFieldFailures; got: [${optFails.join(", ")}]`
+    );
+  });
+});

@@ -324,8 +324,37 @@ export function applyConfigOverrides(profile, gatesConfig) {
 }
 
 /**
+ * The canonical set of accepted VERIFICATION_REPORT field values.
+ * Workers must use one of these values; anything else is non-canonical.
+ */
+export const CANONICAL_REPORT_VALUES = Object.freeze(new Set(["pass", "fail", "n/a"]));
+
+/**
+ * Normalize a raw VERIFICATION_REPORT field value to its canonical form.
+ *
+ * Common "pass" synonyms (passing, passed, ok, yes, true) → "pass"
+ * Common "fail" synonyms (failing, failed, no, false, error) → "fail"
+ * Common "n/a" synonyms (na, not-applicable, skip, skipped, exempt) → "n/a"
+ * Already-canonical values are returned unchanged.
+ * Truly unknown values are returned as-is so the gate can flag them.
+ *
+ * @param raw — raw lowercased value string from the report line
+ * @returns canonical value string
+ */
+export function normalizeReportValue(raw: string): string {
+  const v = String(raw || "").trim().toLowerCase();
+  if (v === "passing" || v === "passed" || v === "ok" || v === "yes" || v === "true") return "pass";
+  if (v === "failing" || v === "failed" || v === "no" || v === "false" || v === "error") return "fail";
+  if (v === "na" || v === "not-applicable" || v === "skip" || v === "skipped" || v === "exempt") return "n/a";
+  return v;
+}
+
+/**
  * Parse VERIFICATION_REPORT from worker output.
  * Expected format: VERIFICATION_REPORT: BUILD=pass; TESTS=fail; RESPONSIVE=n/a; ...
+ *
+ * Values are normalized via normalizeReportValue before storage so common
+ * synonyms (passing/passed/ok → pass) are canonicalized at parse time.
  */
 export function parseVerificationReport(output) {
   const text = String(output || "");
@@ -338,7 +367,7 @@ export function parseVerificationReport(output) {
     const eqIdx = pair.indexOf("=");
     if (eqIdx < 0) continue;
     const key = pair.slice(0, eqIdx).trim().toLowerCase().replace(/[_\s]+/g, "");
-    const value = pair.slice(eqIdx + 1).trim().toLowerCase();
+    const rawValue = pair.slice(eqIdx + 1).trim().toLowerCase();
     // Normalize key names
     const keyMap = {
       build: "build",
@@ -353,7 +382,7 @@ export function parseVerificationReport(output) {
     };
     const normalizedKey = keyMap[key];
     if (normalizedKey) {
-      report[normalizedKey] = value; // "pass", "fail", "n/a"
+      report[normalizedKey] = normalizeReportValue(rawValue);
     }
   }
   return report;
@@ -466,7 +495,8 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
     report: report || {},
     responsiveMatrix: responsiveMatrix || {},
     prUrl: prUrl || null,
-    profile: profile.kind
+    profile: profile.kind,
+    optionalFieldFailures: [] as string[]
   };
 
   // If worker reported skipped (already-merged), pass immediately
@@ -521,6 +551,19 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
     return { passed: false, gaps, evidence, reason: "no verification report" };
   }
 
+  // ── Profile-aware optional field failure tracking ───────────────────────
+  // Optional fields that appear in the report with "fail" are tracked in
+  // evidence for false-negative proxy calibration, but do NOT cause a gap.
+  if (report) {
+    for (const [field, requirement] of Object.entries(profile.evidence)) {
+      if (requirement !== "optional") continue;
+      if (field === "prUrl") continue;
+      if (report[field] === "fail") {
+        (evidence.optionalFieldFailures as string[]).push(field);
+      }
+    }
+  }
+
   // Check each required field (except prUrl — handled separately below)
   for (const [field, requirement] of Object.entries(profile.evidence)) {
     if (requirement !== "required") continue;
@@ -531,6 +574,10 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
       gaps.push(`${field.toUpperCase()} is required but was ${value || "missing"}`);
     } else if (value === "fail") {
       gaps.push(`${field.toUpperCase()} reported as FAIL — worker must fix before done`);
+    } else if (!CANONICAL_REPORT_VALUES.has(value)) {
+      // Non-canonical value — prevents false negatives from values like "xyz"
+      // that slip past the fail/n-a checks.  Workers must use pass/fail/n/a.
+      gaps.push(`${field.toUpperCase()} has non-canonical value "${value}" — use pass, fail, or n/a`);
     }
   }
 
