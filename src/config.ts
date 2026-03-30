@@ -84,6 +84,8 @@ export async function loadConfig(): Promise<Config> {
     environmentBlockerCooldownMinutes: process.env.BOX_ENVIRONMENT_BLOCKER_COOLDOWN_MINUTES?.trim() || null,
     workerTimeoutMinutes: process.env.BOX_WORKER_TIMEOUT_MINUTES?.trim() || null,
     interBatchDelayMs: process.env.BOX_INTER_BATCH_DELAY_MS?.trim() || null,
+    maxCapacityMode: process.env.BOX_MAX_CAPACITY_MODE?.trim() || null,
+    maxPlansPerDependencyBatch: process.env.BOX_MAX_PLANS_PER_DEPENDENCY_BATCH?.trim() || null,
     // Dashboard bearer token — required for POST mutation endpoints on the live dashboard.
     // Must be a long random string. If unset, mutation endpoints return 403.
     dashboardToken: process.env.BOX_DASHBOARD_TOKEN?.trim() || null
@@ -215,6 +217,12 @@ export async function loadConfig(): Promise<Config> {
     interBatchDelayMs: env.interBatchDelayMs
       ? Number(env.interBatchDelayMs)
       : Number(fileConfig?.runtime?.interBatchDelayMs ?? 90000),
+    maxCapacityMode: env.maxCapacityMode
+      ? ["1", "true", "yes", "on"].includes(env.maxCapacityMode.toLowerCase())
+      : Boolean(fileConfig?.runtime?.maxCapacityMode ?? false),
+    maxPlansPerDependencyBatch: env.maxPlansPerDependencyBatch
+      ? Number(env.maxPlansPerDependencyBatch)
+      : Number(fileConfig?.runtime?.maxPlansPerDependencyBatch ?? 6),
     workerForbiddenPathPrefixes: Array.isArray(fileConfig?.runtime?.workerForbiddenPathPrefixes)
       ? fileConfig.runtime.workerForbiddenPathPrefixes.map((item) => String(item))
       : []
@@ -260,12 +268,13 @@ export async function loadConfig(): Promise<Config> {
     useReviewerForPlanning: runtime.reviewerProvider === "copilot"
       ? Boolean(fileConfig?.planner?.useReviewerForPlanning ?? true)
       : Boolean(fileConfig?.planner?.useReviewerForPlanning ?? true),
-    maxTasks: Number(fileConfig?.planner?.maxTasks ?? 5),
+    maxTasks: Number(fileConfig?.planner?.maxTasks ?? 0),
     enforceTrumpExecutionStrategy: Boolean(fileConfig?.planner?.enforceTrumpExecutionStrategy ?? true),
     defaultMaxWorkersPerWave: Number(fileConfig?.planner?.defaultMaxWorkersPerWave ?? 3),
     preferFewestWorkers: Boolean(fileConfig?.planner?.preferFewestWorkers ?? true),
     allowSameCycleFollowUps: Boolean(fileConfig?.planner?.allowSameCycleFollowUps ?? false),
-    requireDependencyAwareWaves: Boolean(fileConfig?.planner?.requireDependencyAwareWaves ?? true)
+    requireDependencyAwareWaves: Boolean(fileConfig?.planner?.requireDependencyAwareWaves ?? true),
+    splitConflictingPlansAcrossBatches: Boolean(fileConfig?.planner?.splitConflictingPlansAcrossBatches ?? false)
   };
 
   const selfImprovement = {

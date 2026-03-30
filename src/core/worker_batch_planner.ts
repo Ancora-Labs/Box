@@ -13,9 +13,10 @@ const DEFAULT_CONTEXT_RESERVE_TOKENS = 12000;
  * plans must be kept small so a worker can reason about the full dependency chain
  * without hitting context limits or missing inter-plan ordering constraints.
  *
- * Configurable via config.runtime.maxPlansPerDependencyBatch (default: 3).
+ * Configurable via config.runtime.maxPlansPerDependencyBatch (default: 6).
  */
-export const MAX_PLANS_PER_DEPENDENCY_BATCH = 3;
+export const MAX_PLANS_PER_DEPENDENCY_BATCH = 6;
+const SPLIT_CONFLICTING_PLANS_DEFAULT = false;
 const KNOWN_MODEL_CONTEXT_WINDOWS = [
   { pattern: /gpt\s*[- ]?5\.[123]\s*[- ]?codex/i, tokens: 400000 },
   { pattern: /claude\s+sonnet\s+4\.6/i, tokens: 160000 },
@@ -30,6 +31,25 @@ function normalizePositiveNumber(value, fallback) {
 function normalizeNonNegativeNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function normalizeDependencyBatchLimit(value, fallback = MAX_PLANS_PER_DEPENDENCY_BATCH) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(20, Math.floor(parsed)));
+}
+
+function shouldSplitConflictingPlansAcrossBatches(config: any): boolean {
+  const configured = (config as any)?.planner?.splitConflictingPlansAcrossBatches;
+  if (configured === undefined || configured === null) return SPLIT_CONFLICTING_PLANS_DEFAULT;
+  return configured === true;
+}
+
+function hasExplicitDependencies(plan) {
+  return (
+    (Array.isArray(plan?.dependsOn) && plan.dependsOn.length > 0)
+    || (Array.isArray(plan?.dependencies) && plan.dependencies.length > 0)
+  );
 }
 
 function slugify(text) {
@@ -138,12 +158,34 @@ export function estimatePlanTokens(plan) {
     plan?.after_state,
     plan?.beforeState,
     plan?.afterState,
+    plan?.description,
+    plan?.premortem ? JSON.stringify(plan.premortem) : "",
     Array.isArray(plan?.target_files) ? plan.target_files.join("\n") : "",
     Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria.join("\n") : "",
     JSON.stringify(Array.isArray(plan?.dependencies) ? plan.dependencies : []),
   ].filter(Boolean).join("\n");
 
-  return Math.max(1, Math.ceil(payload.length / CHARS_PER_TOKEN) + 300);
+  // Base: payload text / 4 chars per token + per-plan overhead (prompt framing, formatting)
+  const payloadTokens = Math.ceil(payload.length / CHARS_PER_TOKEN);
+  // Estimate worker reasoning overhead: more complex tasks need more reasoning tokens
+  const fileCount = Array.isArray(plan?.target_files) ? plan.target_files.length : 0;
+  const riskMultiplier = String(plan?.riskLevel || "").toLowerCase() === "high" ? 1.5
+    : String(plan?.riskLevel || "").toLowerCase() === "medium" ? 1.2
+    : 1.0;
+  const baseOverhead = 300;
+  const fileReadOverhead = fileCount * 150; // estimated tokens per file the worker will read
+  const reasoningOverhead = Math.ceil(payloadTokens * 0.3 * riskMultiplier); // model reasoning space
+
+  return Math.max(1, payloadTokens + baseOverhead + fileReadOverhead + reasoningOverhead);
+}
+
+/**
+ * Estimate the total token budget a plan will consume during worker execution,
+ * including prompt framing, file reads, and model reasoning. Used by the batch
+ * planner to pack tasks into model context windows.
+ */
+export function estimatePlanExecutionTokens(plan) {
+  return estimatePlanTokens(plan);
 }
 
 export function estimateBatchTokens(plans = []) {
@@ -353,9 +395,35 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
   const microwaveMax = Number.isFinite(Number(rawMicrowaveMax)) && Number(rawMicrowaveMax) > 0
     ? Math.floor(Number(rawMicrowaveMax))
     : 0; // 0 = disabled
-  const inputPlans = microwaveMax > 0
+  let inputPlans = microwaveMax > 0
     ? splitWavesIntoMicrowaves(plans as any[], microwaveMax)
     : (plans as any[]);
+  const enforceDependencyAwareWaves = (config as any)?.planner?.requireDependencyAwareWaves !== false;
+  const splitConflictingPlansAcrossBatches = shouldSplitConflictingPlansAcrossBatches(config);
+
+  if (enforceDependencyAwareWaves) {
+    const hasDependenciesDeclared = (inputPlans as any[]).some((plan) => hasExplicitDependencies(plan));
+    if (!hasDependenciesDeclared) {
+      inputPlans = (inputPlans as any[]).map((plan) => {
+        if (plan && typeof plan === "object") {
+          const mutable = plan as any;
+          const explicitWave = Number(mutable.wave);
+          if (!Number.isFinite(explicitWave) || explicitWave <= 0) {
+            mutable.wave = 1;
+          }
+          if (!Array.isArray(mutable.waveDepends)) {
+            mutable.waveDepends = [];
+          }
+          return mutable;
+        }
+
+        const explicitWave = Number(plan?.wave);
+        const normalizedWave = Number.isFinite(explicitWave) && explicitWave > 0 ? explicitWave : 1;
+        const waveDepends = Array.isArray(plan?.waveDepends) ? plan.waveDepends : [];
+        return { ...plan, wave: normalizedWave, waveDepends };
+      });
+    }
+  }
 
   // ── Dependency graph resolution ───────────────────────────────────────────
   // When any plan carries explicit dependency or file-scope hints, resolve the
@@ -406,12 +474,28 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     }
   }
 
+  function resolvePlanWave(plan: any) {
+    const explicitWave = Number(plan?.wave);
+    if (Number.isFinite(explicitWave) && explicitWave > 0) {
+      return explicitWave;
+    }
+
+    const planId = String(plan?.task_id || plan?.task || plan?.role || "");
+    if (enforceDependencyAwareWaves) {
+      const graphWave = graphWaveByPlanId.get(planId);
+      if (Number.isFinite(Number(graphWave)) && Number(graphWave) > 0) {
+        return Number(graphWave);
+      }
+    }
+    return 1;
+  }
+
   const sortedPlans = [...(inputPlans as any[])].sort((a, b) => {
     const idA   = String(a?.task_id || a?.task || a?.role || "");
     const idB   = String(b?.task_id || b?.task || b?.role || "");
     // Use graph-derived wave when the plan lacks an explicit wave field
-    const waveA = Number(a?.wave ?? graphWaveByPlanId.get(idA) ?? 0);
-    const waveB = Number(b?.wave ?? graphWaveByPlanId.get(idB) ?? 0);
+    const waveA = resolvePlanWave(a);
+    const waveB = resolvePlanWave(b);
     const waveDelta = waveA - waveB;
     if (waveDelta !== 0) return waveDelta;
     // Within the same wave, dispatch critical-path tasks first.
@@ -429,7 +513,7 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
   // share target files within the same lane must not be co-batched.
   // Build a conflict adjacency set: "planIndex_a:planIndex_b" → true
   const conflictedPairs = new Set();
-  if (capabilityPoolResult?.assignments) {
+  if (splitConflictingPlansAcrossBatches && capabilityPoolResult?.assignments) {
     const assignments = capabilityPoolResult.assignments;
     const laneMap = new Map();
     for (let i = 0; i < assignments.length; i++) {
@@ -463,7 +547,7 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
 
   // Build a lookup from plan object identity → original assignment index
   const planToAssignmentIndex = new Map();
-  if (capabilityPoolResult?.assignments) {
+  if (splitConflictingPlansAcrossBatches && capabilityPoolResult?.assignments) {
     capabilityPoolResult.assignments.forEach((a, i) => {
       if (a?.plan) planToAssignmentIndex.set(a.plan, i);
     });
@@ -472,9 +556,11 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
   // Build a plan-ID-based conflict set from the dependency graph resolution.
   // This supplements lane-based conflicts and covers cases where capabilityPoolResult is absent.
   const graphConflictIdPairs = new Set<string>();
-  for (const [taskA, taskB] of graphConflictList) {
-    graphConflictIdPairs.add(`${taskA}:${taskB}`);
-    graphConflictIdPairs.add(`${taskB}:${taskA}`);
+  if (splitConflictingPlansAcrossBatches) {
+    for (const [taskA, taskB] of graphConflictList) {
+      graphConflictIdPairs.add(`${taskA}:${taskB}`);
+      graphConflictIdPairs.add(`${taskB}:${taskA}`);
+    }
   }
 
   /**
@@ -483,6 +569,7 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
    *  (b) file-scope conflict detected by the dependency graph resolver.
    */
   function arePlansConflicting(planA: any, planB: any) {
+    if (!splitConflictingPlansAcrossBatches) return false;
     const idxA = planToAssignmentIndex.get(planA) ?? -1;
     const idxB = planToAssignmentIndex.get(planB) ?? -1;
     // Lane-based conflict (assignment index pair)
@@ -509,30 +596,31 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     const sharedBranch = buildSharedBranchName(roleName, rolePlans);
 
     // ── Conflict-aware sub-grouping within a role bucket ──────────────────
-    // Greedily pack plans into sub-groups such that no two conflicting plans
-    // share a sub-group.  This is a greedy graph-coloring approach: each
-    // sub-group is a color, and conflicts are edges.
+    // Default behavior keeps potentially conflicting plans in the same role
+    // batch so the worker can execute them in deterministic order. When
+    // planner.splitConflictingPlansAcrossBatches=true, fallback to greedy
+    // conflict coloring to isolate conflicting plans into separate sub-groups.
     const subGroups: Array<typeof rolePlans> = [];
-    const assignedGroup = new Array(rolePlans.length).fill(-1);
+    if (splitConflictingPlansAcrossBatches) {
+      for (let i = 0; i < rolePlans.length; i++) {
+        const plan = rolePlans[i];
 
-    for (let i = 0; i < rolePlans.length; i++) {
-      const plan = rolePlans[i];
-
-      // Find the first group that has no conflict with this plan
-      let placed = false;
-      for (let g = 0; g < subGroups.length; g++) {
-        const hasConflict = subGroups[g].some((existing) => arePlansConflicting(plan, existing));
-        if (!hasConflict) {
-          subGroups[g].push(plan);
-          assignedGroup[i] = g;
-          placed = true;
-          break;
+        // Find the first group that has no conflict with this plan
+        let placed = false;
+        for (let g = 0; g < subGroups.length; g++) {
+          const hasConflict = subGroups[g].some((existing) => arePlansConflicting(plan, existing));
+          if (!hasConflict) {
+            subGroups[g].push(plan);
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          subGroups.push([plan]);
         }
       }
-      if (!placed) {
-        subGroups.push([plan]);
-        assignedGroup[i] = subGroups.length - 1;
-      }
+    } else {
+      subGroups.push(rolePlans);
     }
 
     // ── Wave-boundary enforcement ─────────────────────────────────────────
@@ -547,8 +635,7 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     for (const subGroupPlans of subGroups) {
       const plansByWave = new Map<number, typeof subGroupPlans>();
       for (const plan of subGroupPlans) {
-        const planId = String((plan as any)?.task_id || (plan as any)?.task || (plan as any)?.role || "");
-        const waveNum = Number((plan as any)?.wave ?? graphWaveByPlanId.get(planId) ?? 0);
+        const waveNum = resolvePlanWave(plan);
         if (!plansByWave.has(waveNum)) plansByWave.set(waveNum, []);
         plansByWave.get(waveNum)!.push(plan);
       }
@@ -563,16 +650,14 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
         // declarations, split oversized batches to MAX_PLANS_PER_DEPENDENCY_BATCH
         // plans each.  This prevents a worker from receiving a large context
         // bundle where dependency ordering can be silently ignored.
-        const maxDepBatch = Number(
-          (config as any)?.runtime?.maxPlansPerDependencyBatch ?? MAX_PLANS_PER_DEPENDENCY_BATCH
+        const maxDepBatch = normalizeDependencyBatchLimit(
+          (config as any)?.runtime?.maxPlansPerDependencyBatch,
+          MAX_PLANS_PER_DEPENDENCY_BATCH
         );
         const splitBatches: Array<{ plans: unknown[]; estimatedTokens: number }> = [];
         for (const batch of selection.batches) {
           const batchPlans = batch.plans as any[];
-          const hasDeps = batchPlans.some(p =>
-            (Array.isArray(p.dependsOn)    && p.dependsOn.length    > 0) ||
-            (Array.isArray(p.dependencies) && p.dependencies.length > 0)
-          );
+          const hasDeps = batchPlans.some((p) => hasExplicitDependencies(p));
           if (hasDeps && batchPlans.length > maxDepBatch) {
             // Chunk into groups of maxDepBatch; distribute estimated tokens proportionally
             for (let offset = 0; offset < batchPlans.length; offset += maxDepBatch) {
@@ -587,7 +672,51 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
           }
         }
 
-        splitBatches.forEach((batch, index) => {
+        const compactedBatches: Array<{ plans: unknown[]; estimatedTokens: number }> = [];
+        for (const batch of splitBatches) {
+          const currentPlans = batch.plans as any[];
+          if (compactedBatches.length === 0) {
+            compactedBatches.push(batch);
+            continue;
+          }
+
+          // Best-fit packing: try to fit into the existing batch with the most
+          // remaining capacity (fewest wasted tokens). This maximizes context
+          // utilization per worker invocation.
+          let bestFitIndex = -1;
+          let bestFitRemaining = Infinity;
+          for (let ci = 0; ci < compactedBatches.length; ci++) {
+            const candidate = compactedBatches[ci];
+            const candidatePlans = candidate.plans as any[];
+            const mergedPlans = [...candidatePlans, ...currentPlans];
+            const mergedTokens = estimateBatchTokens(mergedPlans);
+            const mergedHasDeps = mergedPlans.some((p) => hasExplicitDependencies(p));
+            const withinDepLimit = !mergedHasDeps || mergedPlans.length <= maxDepBatch;
+            const withinContextLimit = mergedTokens <= selection.usableContextTokens;
+
+            if (withinDepLimit && withinContextLimit) {
+              const remaining = selection.usableContextTokens - mergedTokens;
+              if (remaining < bestFitRemaining) {
+                bestFitIndex = ci;
+                bestFitRemaining = remaining;
+              }
+            }
+          }
+
+          if (bestFitIndex >= 0) {
+            const target = compactedBatches[bestFitIndex];
+            const merged = [...(target.plans as any[]), ...currentPlans];
+            target.plans = merged;
+            target.estimatedTokens = estimateBatchTokens(merged);
+          } else {
+            compactedBatches.push(batch);
+          }
+        }
+
+        compactedBatches.forEach((batch, index) => {
+          const utilization = selection.usableContextTokens > 0
+            ? Math.round((batch.estimatedTokens / selection.usableContextTokens) * 100)
+            : 0;
           flattened.push({
             role: roleName,
             plans: batch.plans,
@@ -595,12 +724,13 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
             contextWindowTokens: selection.contextWindowTokens,
             usableContextTokens: selection.usableContextTokens,
             estimatedTokens: batch.estimatedTokens,
+            contextUtilizationPercent: utilization,
             taskKind,
             sharedBranch,
             wave: waveNum,
             roleBatchIndex: index + 1,
-            roleBatchTotal: splitBatches.length,
-            githubFinalizer: index === splitBatches.length - 1,
+            roleBatchTotal: compactedBatches.length,
+            githubFinalizer: index === compactedBatches.length - 1,
           });
         });
       }

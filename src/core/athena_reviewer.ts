@@ -1375,12 +1375,14 @@ Prometheus has produced a plan. Your job is to validate it AND FIX any issues yo
 2. Is there a clear success criterion? (what does "done" look like?)
 3. Is the verification method concrete? (a test, a command, a check — not "verify it works")
 4. Are file paths and scope specified?
-5. Are dependencies between plans correct? (two plans modifying the same file must NOT be in the same wave — add a dependency to serialize them)
+5. Are dependencies between plans correct? (if two plans touch the same file, prefer explicit ordering dependencies first; only split into different waves when cross-role parallel execution would create a write race)
 6. Do acceptance_criteria contain measurable numeric thresholds where applicable?
 7. For HIGH-RISK plans (riskLevel=high): does the pre-mortem cover failure paths, mitigations, and guardrails?
 
 **COMMON FIXES you should apply directly:**
-- Two plans touching the same file in the same wave → add dependency from the later plan to the earlier one, increment its wave number
+- Two plans touching the same file in the same wave:
+  - if same role and safely orderable, keep same wave and add dependency from later plan to earlier plan
+  - if different roles or true parallel race risk, move later plan to next wave and add dependency
 - Vague acceptance criteria → rewrite with numeric threshold (e.g., "fallback rate < 5%")
 - Missing verification → add a concrete test command
 - Missing scope → fill from target_files

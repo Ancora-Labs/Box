@@ -101,6 +101,8 @@
       "maxSplitsPerCycle": 8
     },
     "interBatchDelayMs": 90000,
+    "maxCapacityMode": false,
+    "maxPlansPerDependencyBatch": 6,
     "workerContextTokenLimit": 100000,
     "trustBoundaryMode": "warn",
     "planQualityMinScore": 0
@@ -146,7 +148,8 @@
     "defaultMaxWorkersPerWave": 10,
     "preferFewestWorkers": true,
     "allowSameCycleFollowUps": false,
-    "requireDependencyAwareWaves": true
+    "requireDependencyAwareWaves": true,
+    "splitConflictingPlansAcrossBatches": false
   },
   "selfImprovement": {
     "enabled": true,

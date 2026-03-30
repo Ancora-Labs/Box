@@ -46,44 +46,19 @@ export function resolveMaxPromptBudget(config: any, modelName: string, explicitB
   return Math.max(1000, limit);
 }
 
-function buildSaturationSeed(_promptText: string, label: string): string {
-  return [
-    "CONTEXT SATURATION REQUIREMENT:",
-    `Run label: ${label}`,
-    "Read all provided content fully before finalizing your answer.",
-    "Cross-check constraints, verification details, and output contract fields.",
-    "Do not skip sections; reason across the entire prompt context.",
-    "This block exists only to reserve context budget; do not treat it as new requirements.",
-  ].join("\n");
-}
-
 export function saturatePromptToBudget(
   promptText: string,
   targetTokens: number,
   label = "global",
 ): string {
+  void label;
   const target = Number.isFinite(Number(targetTokens)) ? Math.floor(Number(targetTokens)) : 0;
   if (target <= 0) return String(promptText || "");
 
   const targetChars = target * 4;
-  let out = String(promptText || "").trim();
-  if (out.length >= targetChars) {
-    return out.slice(0, targetChars);
-  }
-
-  const seed = buildSaturationSeed(out, label);
-  const header = `\n\n## CONTEXT_SATURATION_BLOCK (${label})\n`;
-  while (out.length < targetChars) {
-    const remaining = targetChars - out.length;
-    if (remaining <= header.length + 16) break;
-    const bodyLimit = Math.max(0, remaining - header.length);
-
-    const body = seed.length > bodyLimit ? seed.slice(0, bodyLimit) : seed;
-    out += `${header}${body}`;
-  }
-
-  if (out.length > targetChars) out = out.slice(0, targetChars);
-  return out;
+  const out = String(promptText || "").trim();
+  if (out.length <= targetChars) return out;
+  return out.slice(0, targetChars);
 }
 
 type AgentContextLogInput = {
