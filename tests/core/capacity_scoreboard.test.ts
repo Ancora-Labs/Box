@@ -75,6 +75,35 @@ describe("capacity_scoreboard", () => {
       const slow = computeCapacityIndex({ cycleDurationMinutes: 20, targetDurationMinutes: 10 });
       assert.ok(fast.dimensions.speed >= slow.dimensions.speed);
     });
+
+    it("avgTierROI overrides premiumEfficiency for modelTaskFit when positive", () => {
+      const result = computeCapacityIndex({ avgTierROI: 0.9, premiumEfficiency: 0.3 });
+      assert.ok(
+        Math.abs(result.dimensions.modelTaskFit - 0.9) < 0.01,
+        `modelTaskFit should use avgTierROI (0.9), got ${result.dimensions.modelTaskFit}`
+      );
+    });
+
+    it("avgTierROI=0 falls back to premiumEfficiency for modelTaskFit (no history)", () => {
+      const result = computeCapacityIndex({ avgTierROI: 0, premiumEfficiency: 0.7 });
+      assert.ok(
+        Math.abs(result.dimensions.modelTaskFit - 0.7) < 0.01,
+        `modelTaskFit should fall back to premiumEfficiency (0.7) when avgTierROI=0, got ${result.dimensions.modelTaskFit}`
+      );
+    });
+
+    it("avgTierROI above 1.0 is clamped to 1.0 in modelTaskFit", () => {
+      const result = computeCapacityIndex({ avgTierROI: 2.5 });
+      assert.equal(result.dimensions.modelTaskFit, 1.0, "modelTaskFit must be clamped at 1.0 for high ROI");
+    });
+
+    it("avgTierROI absent falls back to premiumEfficiency (backward-compatible)", () => {
+      const result = computeCapacityIndex({ premiumEfficiency: 0.6 });
+      assert.ok(
+        Math.abs(result.dimensions.modelTaskFit - 0.6) < 0.01,
+        `without avgTierROI, modelTaskFit must use premiumEfficiency (0.6), got ${result.dimensions.modelTaskFit}`
+      );
+    });
   });
 
   describe("parser trend tracking — independent from contextual penalties", () => {

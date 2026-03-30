@@ -491,3 +491,24 @@ export function selectWorkerByFitScore(
     fitScore: best.score,
   };
 }
+
+/**
+ * Convert a completion-yield ROI value to a Laplace-compatible lane performance
+ * score in [0, 1].
+ *
+ * This lets callers translate tier-level ROI data (from computeRecentROIForTier)
+ * into a score that can be used directly in `scoreWorkerTaskFit` performance
+ * comparisons without requiring accumulated lane outcome counts.
+ *
+ * Mapping:
+ *   roi <= 0   → 0.5  (no history, or invalid — matches getLaneScore default for unseen lanes)
+ *   roi in (0, 2] → roi / 2  (linear scale; ROI=1 → 0.5, ROI=2 → 1.0)
+ *   roi > 2    → 1.0  (capped at excellent)
+ *
+ * @param roi — completion-yield ROI (0-∞); 0 means no realized history
+ * @returns score in [0, 1]
+ */
+export function roiToLaneScore(roi: number): number {
+  if (!Number.isFinite(roi) || roi <= 0) return 0.5;
+  return Math.min(1.0, Math.round((roi / 2) * 1000) / 1000);
+}

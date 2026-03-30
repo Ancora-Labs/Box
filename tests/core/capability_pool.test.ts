@@ -619,3 +619,60 @@ describe("capability_pool — worker-task fit scoring", () => {
     });
   });
 });
+
+// ── roiToLaneScore — ROI-to-performance-score conversion ─────────────────────
+
+import { roiToLaneScore } from "../../src/core/capability_pool.js";
+
+describe("capability_pool — roiToLaneScore", () => {
+  it("returns neutral 0.5 for roi=0 (no history — matches getLaneScore default for unseen lanes)", () => {
+    assert.equal(roiToLaneScore(0), 0.5);
+  });
+
+  it("returns neutral 0.5 for negative roi (invalid input)", () => {
+    assert.equal(roiToLaneScore(-1), 0.5);
+    assert.equal(roiToLaneScore(-100), 0.5);
+  });
+
+  it("returns neutral 0.5 for non-finite roi (NaN, Infinity)", () => {
+    assert.equal(roiToLaneScore(NaN), 0.5);
+    assert.equal(roiToLaneScore(Infinity), 0.5);
+  });
+
+  it("maps roi=2.0 to score=1.0 (excellent performance ceiling)", () => {
+    assert.equal(roiToLaneScore(2.0), 1.0);
+  });
+
+  it("maps roi=1.0 to score=0.5 (midpoint — average performance)", () => {
+    assert.equal(roiToLaneScore(1.0), 0.5);
+  });
+
+  it("output is always in [0, 1] for any non-negative input", () => {
+    for (const roi of [0, 0.1, 0.5, 1.0, 1.5, 2.0, 5.0, 100]) {
+      const score = roiToLaneScore(roi);
+      assert.ok(score >= 0 && score <= 1, `score ${score} out of [0,1] for roi=${roi}`);
+    }
+  });
+
+  it("roi above 2.0 is capped at 1.0", () => {
+    assert.equal(roiToLaneScore(5.0),  1.0, "roi=5 → score=1");
+    assert.equal(roiToLaneScore(100),  1.0, "roi=100 → score=1");
+  });
+
+  it("negative path: very low positive roi (0.1) maps to a score below 0.1", () => {
+    // roi=0.1 → 0.1/2 = 0.05 < 0.1
+    const score = roiToLaneScore(0.1);
+    assert.ok(score < 0.1, `expected score < 0.1 for roi=0.1; got ${score}`);
+  });
+
+  it("score is monotonically non-decreasing as roi increases from 0 to 2", () => {
+    const rois = [0.01, 0.3, 0.6, 0.9, 1.2, 1.6, 2.0];
+    const scores = rois.map(roiToLaneScore);
+    for (let i = 1; i < scores.length; i++) {
+      assert.ok(
+        scores[i] >= scores[i - 1],
+        `roiToLaneScore must be non-decreasing: roi=${rois[i - 1]}→${scores[i - 1]}, roi=${rois[i]}→${scores[i]}`
+      );
+    }
+  });
+});

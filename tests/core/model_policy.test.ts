@@ -20,6 +20,7 @@ import {
   computeRecentROIForTier,
   MAX_LEDGER_SIZE,
   routeModelByCost,
+  routeModelWithCompletionROI,
 } from "../../src/core/model_policy.js";
 
 describe("model_policy — complexity tiers", () => {
@@ -435,5 +436,101 @@ describe("routeModelByCost — quality-floor routing", () => {
       0.8
     );
     assert.ok(result.model);
+  });
+});
+
+// ── routeModelWithCompletionROI — ROI-adjusted quality floor routing ──────────
+
+describe("routeModelWithCompletionROI — completion-yield ROI routing", () => {
+  const modelOptions = {
+    efficientModel: "Claude Haiku 4",
+    defaultModel:   "Claude Sonnet 4.6",
+    strongModel:    "Claude Opus 4.6",
+    qualityByModel: {
+      "Claude Haiku 4":    0.70,
+      "Claude Sonnet 4.6": 0.85,
+      "Claude Opus 4.6":   0.95,
+    },
+  };
+
+  it("zero tierROI (no history) uses base quality floor unchanged", () => {
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.65, 0);
+    assert.equal(result.effectiveFloor, 0.65);
+    assert.equal(result.roiAdjustment, "none");
+    // Haiku (0.70) meets floor 0.65 → cheapest option selected
+    assert.equal(result.model, "Claude Haiku 4", "Haiku must be selected when floor is 0.65 and no ROI history");
+    assert.equal(result.meetsQualityFloor, true);
+  });
+
+  it("high tierROI (> 0.8) relaxes the floor so a cheaper model is selected", () => {
+    // base floor = 0.72 → Haiku (0.70) would NOT meet it
+    // after relaxation (0.72 - 0.05 = 0.67) → Haiku (0.70) meets 0.67
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.72, 1.2);
+    assert.ok(result.effectiveFloor < 0.72, "floor must be relaxed when tierROI is high");
+    assert.equal(result.model, "Claude Haiku 4", "relaxed floor should allow cheaper Haiku");
+    assert.equal(result.meetsQualityFloor, true);
+    assert.ok(result.roiAdjustment.includes("relaxed"), "adjustment reason must mention relaxed");
+  });
+
+  it("low tierROI (< 0.3, > 0) tightens the floor, forcing a better model", () => {
+    // base floor = 0.65 → Haiku (0.70) would meet it
+    // after tightening (0.65 + 0.10 = 0.75) → Haiku (0.70) no longer meets it → Sonnet selected
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.65, 0.1);
+    assert.ok(result.effectiveFloor > 0.65, "floor must be tightened when tierROI is low");
+    assert.notEqual(result.model, "Claude Haiku 4", "tightened floor must reject Haiku (0.70)");
+    assert.equal(result.model, "Claude Sonnet 4.6", "Sonnet must be selected after floor tightening");
+    assert.ok(result.roiAdjustment.includes("tightened"), "adjustment reason must mention tightened");
+  });
+
+  it("low tierROI with moderate floor forces Opus when Sonnet no longer qualifies", () => {
+    // base floor = 0.80, tierROI = 0.1 → tightened: 0.80 + 0.10 = 0.90
+    // Haiku (0.70 < 0.90) no, Sonnet (0.85 < 0.90) no, Opus (0.95 >= 0.90) yes
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.80, 0.1);
+    assert.equal(result.model, "Claude Opus 4.6", "Opus must be selected when floor tightens past Sonnet");
+    assert.equal(result.meetsQualityFloor, true);
+  });
+
+  it("effective floor is clamped to MIN_QUALITY_FLOOR (0.50) even with high ROI + very low base floor", () => {
+    // base floor = 0.1, tierROI = 2.0 (high) → relaxation: 0.1 - 0.05 = 0.05 → clamped to 0.50
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.1, 2.0);
+    assert.ok(result.effectiveFloor >= 0.50, `effectiveFloor (${result.effectiveFloor}) must not go below 0.50`);
+  });
+
+  it("effective floor is clamped to MAX_QUALITY_FLOOR (0.99) even with low ROI + very high base floor", () => {
+    // base floor = 0.95, tierROI = 0.1 (low) → tightening: 0.95 + 0.10 = 1.05 → clamped to 0.99
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.95, 0.1);
+    assert.ok(result.effectiveFloor <= 0.99, `effectiveFloor (${result.effectiveFloor}) must not exceed 0.99`);
+  });
+
+  it("quality floor contract: result always includes meetsQualityFloor boolean", () => {
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.99, 0);
+    assert.equal(result.meetsQualityFloor, false, "no model meets floor 0.99 exactly");
+    assert.ok(result.model, "must still return a model (strongest fallback)");
+    assert.equal(result.model, "Claude Opus 4.6", "strongest model used as fallback");
+  });
+
+  it("result includes tier from complexity classification", () => {
+    const result = routeModelWithCompletionROI({ complexity: "critical" }, modelOptions, 0.7, 0);
+    assert.ok(result.tier, "result must include tier");
+    assert.ok(result.reason.includes("roi-adjusted"), "reason must reference roi-adjusted");
+  });
+
+  it("reason string includes roiAdjustment and base routing details", () => {
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.65, 1.5);
+    assert.ok(result.reason.includes("roi-adjusted"), "reason must start with roi-adjusted");
+    assert.ok(result.reason.includes("relaxed"), "reason must mention the relaxation");
+  });
+
+  it("negative path: no model options falls back to default model", () => {
+    const result = routeModelWithCompletionROI({}, {}, 0.5, 0);
+    assert.ok(result.model, "must return a model even with empty options");
+    assert.ok(typeof result.meetsQualityFloor === "boolean");
+  });
+
+  it("negative path: medium ROI (between thresholds) does not adjust floor", () => {
+    // tierROI = 0.5 (between 0.3 and 0.8 → no adjustment)
+    const result = routeModelWithCompletionROI({}, modelOptions, 0.65, 0.5);
+    assert.equal(result.effectiveFloor, 0.65, "medium ROI must leave floor unchanged");
+    assert.equal(result.roiAdjustment, "none");
   });
 });

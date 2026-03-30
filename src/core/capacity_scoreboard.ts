@@ -123,6 +123,8 @@ export function computeTrend(entries, field) {
  * @param {number} [cycleData.securityScore] — 0-1
  * @param {number} [cycleData.cycleDurationMinutes] — actual duration
  * @param {number} [cycleData.targetDurationMinutes] — target duration
+ * @param {number} [cycleData.avgTierROI] — average realized ROI for the current tier (0 = no data);
+ *   when positive, this replaces premiumEfficiency as the modelTaskFit signal for higher fidelity
  * @returns {{ dimensions: CapacityIndex, composite: number, deltas: Record<string, number>|null }}
  */
 export function computeCapacityIndex(cycleData: any = {}, previousIndex = null) {
@@ -138,7 +140,14 @@ export function computeCapacityIndex(cycleData: any = {}, previousIndex = null) 
     // or architectureDrift.  Falls back to parserConfidence for backward compatibility.
     parserQuality: clamp(cycleData.parserCoreConfidence ?? cycleData.parserConfidence ?? 0.5),
     workerSpecialization: clamp(cycleData.diversityIndex ?? 0),
-    modelTaskFit: clamp(cycleData.premiumEfficiency ?? 0.5),
+    // avgTierROI (from computeRecentROIForTier) provides a higher-fidelity routing
+    // accuracy signal than premiumEfficiency when tier-level ROI history is available.
+    // Values > 1.0 are clamped so the dimension stays within [0, 1].
+    modelTaskFit: clamp(
+      (cycleData.avgTierROI != null && cycleData.avgTierROI > 0)
+        ? Math.min(1, cycleData.avgTierROI)
+        : (cycleData.premiumEfficiency ?? 0.5)
+    ),
     learningLoop: clamp(cycleData.recurrenceClosureRate ?? 0),
     costEfficiency: clamp(cycleData.premiumEfficiency ?? 0.5),
     security: clamp(cycleData.securityScore ?? 0.7),
