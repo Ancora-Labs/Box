@@ -113,6 +113,8 @@ type VerificationEvidence = {
   validatedAt: string;
   roleName: string;
   taskSnippet: string;
+  /** Optional-field failures from the VERIFICATION_REPORT (tracked for calibration, not blocking). */
+  optionalFieldFailures: string[];
   artifactDetail?: {
     hasSha: boolean;
     hasTestOutput: boolean;
@@ -1029,6 +1031,9 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       validatedAt: new Date().toISOString(),
       roleName: String(roleName),
       taskSnippet: String(instruction.task || "").slice(0, 100),
+      optionalFieldFailures: Array.isArray(validationResult.evidence?.optionalFieldFailures)
+        ? (validationResult.evidence.optionalFieldFailures as string[])
+        : [],
       artifactDetail: postMergeArtifact ? {
         hasSha: postMergeArtifact.hasSha,
         hasTestOutput: postMergeArtifact.hasTestOutput,
