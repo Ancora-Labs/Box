@@ -72,6 +72,129 @@ export function buildPrometheusPlanningPolicy(config) {
   };
 }
 
+function sanitizePromptLine(value: unknown, maxLen = 220): string {
+  const compact = String(value || "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) return "";
+  return compact.length > maxLen ? `${compact.slice(0, maxLen - 3)}...` : compact;
+}
+
+function normalizeResearchTopic(value: unknown): string {
+  const text = sanitizePromptLine(value, 180)
+    .replace(/^[-*\u2022\u25cf\u25cb\u00b7\s]+/, "")
+    .trim();
+  if (!text) return "";
+  if (/^read\s+/i.test(text)) return "";
+  if (/^prompt[_-]/i.test(text)) return "";
+  if (/^state[\\/]/i.test(text)) return "";
+  return text;
+}
+
+function extractResearchTopics(synthesis: unknown, scout: unknown): string[] {
+  const topics: string[] = [];
+  const seen = new Set<string>();
+  const synthesisObj = (synthesis && typeof synthesis === "object") ? synthesis as Record<string, unknown> : {};
+  const scoutObj = (scout && typeof scout === "object") ? scout as Record<string, unknown> : {};
+
+  const pushTopic = (raw: unknown) => {
+    const normalized = normalizeResearchTopic(raw);
+    if (!normalized) return;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    topics.push(normalized);
+  };
+
+  const synthesisTopics = Array.isArray(synthesisObj.topics) ? synthesisObj.topics : [];
+  for (const topic of synthesisTopics) {
+    const topicObj = (topic && typeof topic === "object") ? topic as Record<string, unknown> : {};
+    pushTopic(topicObj.topic);
+  }
+
+  const scoutSources = Array.isArray(scoutObj.sources) ? scoutObj.sources : [];
+  for (const source of scoutSources) {
+    const sourceObj = (source && typeof source === "object") ? source as Record<string, unknown> : {};
+    const tags = Array.isArray(sourceObj.topicTags) ? sourceObj.topicTags : [];
+    for (const tag of tags) pushTopic(tag);
+    pushTopic(sourceObj.title);
+  }
+
+  return topics;
+}
+
+function computeResearchCoverageTarget(topicCount: number, sourceCount: number, maxTasks: number): number {
+  const topics = Number.isFinite(topicCount) ? Math.max(0, Math.floor(topicCount)) : 0;
+  const sources = Number.isFinite(sourceCount) ? Math.max(0, Math.floor(sourceCount)) : 0;
+  if (topics === 0 && sources === 0) return 0;
+
+  const signal = Math.max(topics, Math.ceil(sources / 2));
+  const dynamicTarget = Math.max(3, Math.ceil(signal * 0.45));
+  const boundedByResearch = Math.min(12, dynamicTarget);
+  if (Number.isFinite(maxTasks) && maxTasks > 0) {
+    return Math.max(1, Math.min(Math.floor(maxTasks), boundedByResearch));
+  }
+  return boundedByResearch;
+}
+
+function buildResearchPromptSection(
+  synthesis: unknown,
+  scout: unknown,
+  planningPolicy: { maxTasks?: number } | Record<string, unknown>
+): {
+  sectionText: string;
+  topicCount: number;
+  sourceCount: number;
+  coverageTarget: number;
+} {
+  const synthesisObj = (synthesis && typeof synthesis === "object") ? synthesis as Record<string, unknown> : {};
+  const scoutObj = (scout && typeof scout === "object") ? scout as Record<string, unknown> : {};
+  const topics = extractResearchTopics(synthesis, scout);
+  const topicCount = topics.length;
+  const sourceCount = Number.isFinite(Number(synthesisObj.scoutSourceCount))
+    ? Number(synthesisObj.scoutSourceCount)
+    : Number.isFinite(Number(scoutObj.sourceCount))
+      ? Number(scoutObj.sourceCount)
+      : 0;
+  const coverageTarget = computeResearchCoverageTarget(topicCount, sourceCount, Number(planningPolicy?.maxTasks || 0));
+
+  if (topicCount === 0 && sourceCount === 0) {
+    return { sectionText: "", topicCount: 0, sourceCount: 0, coverageTarget: 0 };
+  }
+
+  const topicLines = topics.slice(0, 10).map((topic, i) => `${i + 1}. ${topic}`).join("\n");
+  const sourceSignals = (Array.isArray(scoutObj.sources) ? scoutObj.sources : [])
+    .slice(0, 6)
+    .map((source, i: number) => {
+      const sourceObj = (source && typeof source === "object") ? source as Record<string, unknown> : {};
+      const title = sanitizePromptLine(sourceObj.title || "Untitled source", 120);
+      const why = sanitizePromptLine(sourceObj.whyImportant || "", 160);
+      return `${i + 1}. ${title}${why ? ` — ${why}` : ""}`;
+    })
+    .join("\n");
+  const gapsPreview = sanitizePromptLine(synthesisObj.researchGaps || "", 420);
+
+  const sectionText = `\n\n## EXTERNAL RESEARCH INTELLIGENCE\nResearch signal available for this cycle: ${topicCount} topic(s), ${sourceCount} source(s).\n\nResearch coverage target: ${coverageTarget > 0 ? coverageTarget : "AUTO"} research-backed packet(s) when materially applicable.\nDo NOT ignore this section. For each high-confidence unresolved topic, either:\n1) produce an actionable packet with concrete target_files and verification, or\n2) state that it is already implemented and cite exact file evidence in before_state/after_state.\n\nTop topics:\n${topicLines || "(none)"}${sourceSignals ? `\n\nSource signals:\n${sourceSignals}` : ""}${gapsPreview ? `\n\nResearch gaps to consider:\n${gapsPreview}` : ""}`;
+
+  return { sectionText, topicCount, sourceCount, coverageTarget };
+}
+
+async function getLatestResearchArtifactUpdatedAtMs(stateDir: string): Promise<number> {
+  const files = ["research_scout_output.json", "research_synthesis.json"];
+  let latest = 0;
+  for (const file of files) {
+    try {
+      const stat = await fs.stat(path.join(stateDir, file));
+      const ms = Number(stat?.mtimeMs || 0);
+      if (Number.isFinite(ms) && ms > latest) latest = ms;
+    } catch {
+      // Optional artifact; ignore missing file.
+    }
+  }
+  return latest;
+}
+
 /**
  * Maximum tokens for the carry-forward payload in the planning prompt.
  * Prevents unbounded growth when many follow-up tasks accumulate across cycles.
@@ -82,6 +205,201 @@ export const CARRY_FORWARD_MAX_TOKENS = 2000;
  * Maximum tokens for the behavior-patterns payload in the planning prompt.
  */
 export const BEHAVIOR_PATTERNS_MAX_TOKENS = 1500;
+
+/**
+ * Maximum tokens for the topic memory section in the planning prompt.
+ * Active topics get full knowledge fragments; completed topics get only summaries.
+ */
+export const TOPIC_MEMORY_MAX_TOKENS = 4000;
+
+// ── Topic Memory System ─────────────────────────────────────────────────────
+// Accumulates knowledge per research topic across multiple Prometheus runs.
+// Active topics retain full knowledge fragments until marked "completed",
+// at which point a concise summary replaces the fragments.
+
+export interface TopicKnowledge {
+  status: "active" | "completed";
+  runCount: number;
+  firstSeenAt: string;
+  lastUpdatedAt: string;
+  knowledgeFragments: string[];
+  completedSummary: string | null;
+}
+
+export interface TopicMemoryState {
+  topics: Record<string, TopicKnowledge>;
+}
+
+const TOPIC_MEMORY_FILE = "prometheus_topic_memory.json";
+
+export async function loadTopicMemory(stateDir: string): Promise<TopicMemoryState> {
+  try {
+    const data = await readJson(path.join(stateDir, TOPIC_MEMORY_FILE), null);
+    if (data && typeof data === "object" && data.topics && typeof data.topics === "object") {
+      return data as TopicMemoryState;
+    }
+  } catch { /* first run — no memory yet */ }
+  return { topics: {} };
+}
+
+export async function saveTopicMemory(stateDir: string, memory: TopicMemoryState): Promise<void> {
+  await writeJson(path.join(stateDir, TOPIC_MEMORY_FILE), memory);
+}
+
+function topicKey(topic: string): string {
+  return topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+}
+
+/**
+ * Update topic memory with new knowledge from this run's research and plans.
+ * For each active research topic, adds new knowledge fragments extracted from
+ * the research synthesis and generated plans.
+ */
+export function updateTopicKnowledge(
+  memory: TopicMemoryState,
+  researchTopics: string[],
+  plans: any[],
+  synthesis: unknown
+): TopicMemoryState {
+  const now = new Date().toISOString();
+  const synthesisObj = (synthesis && typeof synthesis === "object") ? synthesis as Record<string, unknown> : {};
+  const synthTopics = Array.isArray(synthesisObj.topics) ? synthesisObj.topics : [];
+
+  for (const rawTopic of researchTopics) {
+    const key = topicKey(rawTopic);
+    if (!key) continue;
+
+    if (!memory.topics[key]) {
+      memory.topics[key] = {
+        status: "active",
+        runCount: 0,
+        firstSeenAt: now,
+        lastUpdatedAt: now,
+        knowledgeFragments: [],
+        completedSummary: null,
+      };
+    }
+
+    const entry = memory.topics[key];
+    if (entry.status === "completed") continue; // skip already-completed topics
+
+    entry.runCount++;
+    entry.lastUpdatedAt = now;
+
+    // Extract knowledge from synthesis for this topic
+    for (const st of synthTopics) {
+      const stObj = (st && typeof st === "object") ? st as Record<string, unknown> : {};
+      const stName = String(stObj.topic || "").toLowerCase();
+      if (stName.includes(key.replace(/-/g, " ")) || key.includes(stName.replace(/\s+/g, "-"))) {
+        const findings = String(stObj.findings || stObj.keyFindings || stObj.summary || "").trim();
+        if (findings && findings.length > 10 && !entry.knowledgeFragments.includes(findings)) {
+          entry.knowledgeFragments.push(findings.slice(0, 500));
+        }
+      }
+    }
+
+    // Extract knowledge from plans that reference this topic
+    for (const plan of (plans || [])) {
+      const task = String(plan?.task || plan?.title || "").toLowerCase();
+      const topicWords = rawTopic.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+      const matches = topicWords.some(w => task.includes(w));
+      if (matches) {
+        const fragment = `Plan: ${String(plan?.task || plan?.title || "").slice(0, 120)} | scope=${String(plan?.scope || "?").slice(0, 60)}`;
+        if (!entry.knowledgeFragments.includes(fragment)) {
+          entry.knowledgeFragments.push(fragment);
+        }
+      }
+    }
+
+    // Keep fragments bounded to prevent unbounded growth
+    if (entry.knowledgeFragments.length > 30) {
+      entry.knowledgeFragments = entry.knowledgeFragments.slice(-30);
+    }
+  }
+
+  return memory;
+}
+
+/**
+ * Detect topics that have been fully planned (all research topics have corresponding
+ * plans with concrete target_files and verification). Mark them completed and generate
+ * a concise summary from accumulated knowledge.
+ */
+export function detectAndCompleteTopics(
+  memory: TopicMemoryState,
+  researchTopics: string[],
+  plans: any[]
+): { memory: TopicMemoryState; completedThisRun: string[] } {
+  const completedThisRun: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const rawTopic of researchTopics) {
+    const key = topicKey(rawTopic);
+    if (!key || !memory.topics[key]) continue;
+    const entry = memory.topics[key];
+    if (entry.status === "completed") continue;
+
+    // A topic is "complete" when:
+    // 1. It has been seen across at least 2 runs (enough accumulation time)
+    // 2. At least one plan has concrete target_files and verification referencing it
+    const topicWords = rawTopic.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+    const matchingPlans = (plans || []).filter(plan => {
+      const task = String(plan?.task || plan?.title || "").toLowerCase();
+      const hasFiles = Array.isArray(plan?.target_files) && plan.target_files.length > 0;
+      const hasVerification = Boolean(plan?.verification);
+      return topicWords.some(w => task.includes(w)) && hasFiles && hasVerification;
+    });
+
+    if (entry.runCount >= 2 && matchingPlans.length > 0) {
+      // Generate concise summary from accumulated knowledge
+      const fragmentSummary = entry.knowledgeFragments.slice(-5).join("; ");
+      const planSummary = matchingPlans.slice(0, 3).map(p => String(p?.task || p?.title || "")).join("; ");
+      entry.status = "completed";
+      entry.lastUpdatedAt = now;
+      entry.completedSummary = `Topic researched over ${entry.runCount} runs. Key findings: ${fragmentSummary.slice(0, 300)}. Plans produced: ${planSummary.slice(0, 200)}`;
+      // Clear fragments to save space — summary replaces them
+      entry.knowledgeFragments = [];
+      completedThisRun.push(key);
+    }
+  }
+
+  return { memory, completedThisRun };
+}
+
+/**
+ * Build a prompt section from accumulated topic memory.
+ * Active topics include full knowledge fragments; completed topics include only summaries.
+ */
+export function buildTopicMemoryPromptSection(memory: TopicMemoryState): string {
+  const activeTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "active");
+  const completedTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "completed");
+
+  if (activeTopics.length === 0 && completedTopics.length === 0) return "";
+
+  const lines: string[] = [];
+  lines.push("\n\n## ACCUMULATED TOPIC KNOWLEDGE (cross-run memory)");
+  lines.push("This knowledge has been accumulated across multiple Prometheus runs.");
+  lines.push("Use it to produce deeper, more informed plans. Do NOT re-research completed topics.");
+
+  if (activeTopics.length > 0) {
+    lines.push("\n### ACTIVE TOPICS (still being researched — use accumulated knowledge)");
+    for (const [key, topic] of activeTopics.slice(0, 15)) {
+      lines.push(`\n**${key}** (${topic.runCount} run(s), since ${topic.firstSeenAt.slice(0, 10)}):`);
+      for (const frag of topic.knowledgeFragments.slice(-8)) {
+        lines.push(`  - ${frag.slice(0, 200)}`);
+      }
+    }
+  }
+
+  if (completedTopics.length > 0) {
+    lines.push("\n### COMPLETED TOPICS (fully researched — summaries only)");
+    for (const [key, topic] of completedTopics.slice(0, 20)) {
+      lines.push(`- **${key}**: ${(topic.completedSummary || "No summary").slice(0, 250)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
 
 /**
  * Reason codes emitted by checkPacketCompleteness for unrecoverable conditions.
@@ -664,6 +982,67 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
       ? Number(src.requestROI)
       : 1.0,
   };
+}
+
+function compactWavesForDependencyAwarePlanning(plans = []) {
+  if (!Array.isArray(plans) || plans.length === 0) return [];
+
+  const normalized = plans.map((plan, index) => {
+    const id = String(plan?.task_id || plan?.id || plan?.task || `task-${index + 1}`).trim() || `task-${index + 1}`;
+    const depsRaw = [
+      ...(Array.isArray(plan?.dependsOn) ? plan.dependsOn : []),
+      ...(Array.isArray(plan?.dependencies) ? plan.dependencies : []),
+    ];
+    const deps = [...new Set(depsRaw.map((v) => String(v || "").trim()).filter(Boolean))];
+    return { id, deps };
+  });
+
+  const knownIds = new Set(normalized.map((item) => item.id));
+  for (const item of normalized) {
+    item.deps = item.deps.filter((dep) => dep !== item.id && knownIds.has(dep));
+  }
+
+  const hasAnyDependencies = normalized.some((item) => item.deps.length > 0);
+  if (!hasAnyDependencies) {
+    return plans.map((plan) => ({ ...plan, wave: 1, waveDepends: [] }));
+  }
+
+  try {
+    const graph = resolveDependencyGraph(
+      normalized.map((item) => ({ id: item.id, dependsOn: item.deps, filesInScope: [] }))
+    );
+    if (graph.status !== GRAPH_STATUS.OK || !Array.isArray(graph.waves) || graph.waves.length === 0) {
+      return plans;
+    }
+
+    const waveById = new Map<string, number>();
+    for (const wave of graph.waves) {
+      const waveNum = Number(wave?.wave || 1);
+      for (const taskId of Array.isArray(wave?.taskIds) ? wave.taskIds : []) {
+        waveById.set(String(taskId), waveNum);
+      }
+    }
+
+    return plans.map((plan, index) => {
+      const current = normalized[index];
+      const wave = Number(waveById.get(current.id) || plan?.wave || 1);
+      const waveDepends = [...new Set(
+        current.deps
+          .map((depId) => Number(waveById.get(depId) || 0))
+          .filter((depWave) => Number.isFinite(depWave) && depWave > 0 && depWave < wave)
+      )].sort((a, b) => a - b);
+
+      return {
+        ...plan,
+        wave,
+        waveDepends,
+        dependencies: current.deps,
+        dependsOn: current.deps,
+      };
+    });
+  } catch {
+    return plans;
+  }
 }
 
 function buildPlansFromAlternativeShape(input: any = {}) {
@@ -1717,8 +2096,11 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
     try {
       const existing = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
       if (existing?.analyzedAt) {
-        const ageMs = Date.now() - new Date(existing.analyzedAt).getTime();
-        if (ageMs < freshnessMins * 60_000) {
+        const analyzedAtMs = new Date(existing.analyzedAt).getTime();
+        const ageMs = Date.now() - analyzedAtMs;
+        const latestResearchArtifactMs = await getLatestResearchArtifactUpdatedAtMs(stateDir);
+        const researchUpdatedAfterAnalysis = latestResearchArtifactMs > analyzedAtMs;
+        if (ageMs < freshnessMins * 60_000 && !researchUpdatedAfterAnalysis) {
           // If cached file already has plans, re-normalise them so enrichment
           // functions (target_files, scope, acceptance_criteria) always run.
           if (Array.isArray(existing.plans) && existing.plans.length > 0) {
@@ -1758,6 +2140,8 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
           }
           // Cache exists but normalization also produced no plans — re-run
           await appendProgress(config, `[PROMETHEUS] Cached analysis has no actionable plans (${Math.round(ageMs / 60_000)}m old) — re-running`);
+        } else if (ageMs < freshnessMins * 60_000 && researchUpdatedAfterAnalysis) {
+          await appendProgress(config, `[PROMETHEUS] Fresh cache skipped — research artifacts are newer than cached analysis`);
         }
       }
     } catch { /* no cached analysis — proceed normally */ }
@@ -1779,6 +2163,49 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
   await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Awakening — direct Copilot CLI scan starting...`);
 
   const planningPolicy = buildPrometheusPlanningPolicy(config);
+  let researchSectionText = "";
+  let researchTopicCount = 0;
+  let researchSourceCount = 0;
+  let researchCoverageTarget = 0;
+  let researchTopicsList: string[] = [];
+  let researchSynthesisData: unknown = null;
+  try {
+    const [researchSynthesis, researchScout] = await Promise.all([
+      readJson(path.join(stateDir, "research_synthesis.json"), null),
+      readJson(path.join(stateDir, "research_scout_output.json"), null),
+    ]);
+    researchSynthesisData = researchSynthesis;
+    researchTopicsList = extractResearchTopics(researchSynthesis, researchScout);
+    const researchContext = buildResearchPromptSection(researchSynthesis, researchScout, planningPolicy);
+    researchSectionText = researchContext.sectionText;
+    researchTopicCount = researchContext.topicCount;
+    researchSourceCount = researchContext.sourceCount;
+    researchCoverageTarget = researchContext.coverageTarget;
+    if (researchSectionText) {
+      await appendProgress(
+        config,
+        `[PROMETHEUS] Injecting research synthesis: ${researchTopicCount} topic(s) from ${researchSourceCount} source(s)`
+      );
+    }
+  } catch {
+    // Optional signal; continue without research injection.
+  }
+
+  // ── Load accumulated topic memory ─────────────────────────────────────────
+  let topicMemory = await loadTopicMemory(stateDir);
+  let topicMemorySection = "";
+  try {
+    topicMemorySection = buildTopicMemoryPromptSection(topicMemory);
+    const activeCount = Object.values(topicMemory.topics).filter(t => t.status === "active").length;
+    const completedCount = Object.values(topicMemory.topics).filter(t => t.status === "completed").length;
+    if (activeCount > 0 || completedCount > 0) {
+      await appendProgress(config,
+        `[PROMETHEUS] Topic memory loaded: ${activeCount} active, ${completedCount} completed topic(s)`
+      );
+    }
+  } catch {
+    // Non-fatal — proceed without topic memory.
+  }
 
   // ── Extract behavior patterns from postmortems ────────────────────────────
   let behaviorPatternsSection = "";
@@ -1941,12 +2368,22 @@ Consider whether the root causes are:
     section("behavior-patterns", behaviorPatternsSection),
     { maxTokens: BEHAVIOR_PATTERNS_MAX_TOKENS }
   );
+  const researchSection = Object.assign(
+    section("research-intelligence", researchSectionText),
+    { maxTokens: Number(config?.runtime?.prometheusResearchSectionMaxTokens ?? 2500) }
+  );
+  const topicMemSection = Object.assign(
+    section("topic-memory", topicMemorySection),
+    { maxTokens: TOPIC_MEMORY_MAX_TOKENS }
+  );
   const contextPrompt = compilePrompt([
     section("context", `TARGET REPO: ${config.env?.targetRepo || "unknown"}\nREPO PATH: ${repoRoot}\n\n## OPERATOR OBJECTIVE\n${userPrompt}`),
     PROMETHEUS_STATIC_SECTIONS.evolutionDirective,
     PROMETHEUS_STATIC_SECTIONS.mandatorySelfCritique,
     PROMETHEUS_STATIC_SECTIONS.mandatoryOperatorQuestions,
-    section("planning-policy", `## PLANNING POLICY\n- maxTasks: ${planningPolicy.maxTasks > 0 ? planningPolicy.maxTasks : "UNLIMITED"}\n- maxWorkersPerWave: ${planningPolicy.maxWorkersPerWave}\n- preferFewestWorkers: ${planningPolicy.preferFewestWorkers}\n- requireDependencyAwareWaves: ${planningPolicy.requireDependencyAwareWaves}\n- If maxTasks is UNLIMITED, include ALL materially distinct actionable tasks you find.`),
+    section("planning-policy", `## PLANNING POLICY\n- maxTasks: ${planningPolicy.maxTasks > 0 ? planningPolicy.maxTasks : "UNLIMITED — FILL YOUR ENTIRE CONTEXT WINDOW"}\n- maxWorkersPerWave: ${planningPolicy.maxWorkersPerWave}\n- preferFewestWorkers: ${planningPolicy.preferFewestWorkers}\n- requireDependencyAwareWaves: ${planningPolicy.requireDependencyAwareWaves}\n- researchCoverageTarget: ${researchCoverageTarget > 0 ? researchCoverageTarget : "AUTO(0 when no research artifacts)"}\n- Do NOT create extra waves without explicit task-level dependsOn/dependencies evidence.\n- Avoid single-task waves unless dependency constraints force them.\n- CRITICAL: You MUST use your FULL model capacity. Do NOT stop early. Produce as many materially distinct actionable improvement packets as you can find. Keep generating plans until you have exhausted all meaningful improvement opportunities across ALL dimensions. There is NO plan count limit.\n- If EXTERNAL RESEARCH INTELLIGENCE is present, convert unresolved high-confidence topics into actionable packets (with concrete target_files + verification), not vague notes.\n- If ACCUMULATED TOPIC KNOWLEDGE is present, leverage all accumulated knowledge from previous runs to produce deeper, more informed plans. Do NOT re-research topics marked as completed.`),
+    researchSection,
+    topicMemSection,
     behaviorSection,
     carryFwdSection,
     section("repo-file-listing", repoFileListingSection),
@@ -2068,6 +2505,27 @@ Consider whether the root causes are:
     rawParsedInput,
     { ...aiResult, raw }
   );
+
+  if (planningPolicy.requireDependencyAwareWaves && Array.isArray(parsedForValidation.plans) && parsedForValidation.plans.length > 0) {
+    const uniqueWaveCountBefore = new Set(
+      parsedForValidation.plans.map((plan) => Number(plan?.wave || 1))
+    ).size;
+    parsedForValidation.plans = compactWavesForDependencyAwarePlanning(parsedForValidation.plans);
+    const uniqueWaveCountAfter = new Set(
+      parsedForValidation.plans.map((plan) => Number(plan?.wave || 1))
+    ).size;
+    if (uniqueWaveCountAfter < uniqueWaveCountBefore) {
+      await appendProgress(
+        config,
+        `[PROMETHEUS][WAVE_COMPACTION] Reduced waves ${uniqueWaveCountBefore} -> ${uniqueWaveCountAfter} using explicit dependency graph`
+      );
+    }
+    parsedForValidation.executionStrategy = buildExecutionStrategyFromPlans(parsedForValidation.plans);
+    parsedForValidation.requestBudget = {
+      ...buildDeterministicRequestBudget(parsedForValidation.plans, parsedForValidation.executionStrategy || {}),
+      _fallback: false,
+    };
+  }
 
   // ── Schema v2 plan validation ─────────────────────────────────────────────
   // Validate each plan has the required schema fields. Non-conforming plans are
@@ -2310,7 +2768,13 @@ Consider whether the root causes are:
     analyzedAt: new Date().toISOString(),
     model: prometheusModel,
     repo: config.env?.targetRepo,
-    requestedBy
+    requestedBy,
+    researchContext: {
+      injected: Boolean(researchSectionText),
+      topicCount: researchTopicCount,
+      sourceCount: researchSourceCount,
+      coverageTarget: researchCoverageTarget,
+    },
   };
 
   await writeJson(path.join(stateDir, "prometheus_analysis.json"), addSchemaVersion(analysis, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS));
@@ -2318,6 +2782,28 @@ Consider whether the root causes are:
   const planCount = Array.isArray(analysis.plans) ? analysis.plans.length : 0;
   await appendProgress(config, `[PROMETHEUS] Analysis complete — ${planCount} work items | health=${analysis.projectHealth}`);
   await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Analysis ready: ${planCount} plans | health=${analysis.projectHealth}`);
+
+  // ── Update topic memory with knowledge from this run ──────────────────────
+  try {
+    if (researchTopicsList.length > 0 && Array.isArray(analysis.plans)) {
+      topicMemory = updateTopicKnowledge(topicMemory, researchTopicsList, analysis.plans, researchSynthesisData);
+      const completion = detectAndCompleteTopics(topicMemory, researchTopicsList, analysis.plans);
+      topicMemory = completion.memory;
+      await saveTopicMemory(stateDir, topicMemory);
+
+      if (completion.completedThisRun.length > 0) {
+        await appendProgress(config,
+          `[PROMETHEUS][TOPIC_MEMORY] Completed ${completion.completedThisRun.length} topic(s): ${completion.completedThisRun.join(", ")}`
+        );
+      }
+      const activeCount = Object.values(topicMemory.topics).filter(t => t.status === "active").length;
+      await appendProgress(config,
+        `[PROMETHEUS][TOPIC_MEMORY] Updated: ${activeCount} active topic(s), ${Object.keys(topicMemory.topics).length} total`
+      );
+    }
+  } catch (tmErr) {
+    await appendProgress(config, `[PROMETHEUS][WARN] Topic memory update failed (non-fatal): ${String(tmErr?.message || tmErr)}`).catch(() => {});
+  }
 
   // ── Budget-aware intervention optimizer (non-blocking) ────────────────────
   if (config?.interventionOptimizer?.enabled !== false && Array.isArray(analysis.plans) && analysis.plans.length > 0) {

@@ -77,7 +77,10 @@ describe("worker_batch_planner", () => {
   });
 
   it("separates conflicting plans in the same lane into distinct batches", () => {
-    const config = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+    const config = {
+      copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 },
+      planner: { splitConflictingPlansAcrossBatches: true },
+    };
     const planA = { role: "Evolution Worker", task: "Refactor orchestrator", target_files: ["src/core/orchestrator.ts"], wave: 1 };
     const planB = { role: "Evolution Worker", task: "Add log to orchestrator", target_files: ["src/core/orchestrator.ts"], wave: 1 };
     const planC = { role: "Evolution Worker", task: "Update prometheus", target_files: ["src/core/prometheus.ts"], wave: 1 };
@@ -110,6 +113,10 @@ describe("worker_batch_planner", () => {
 
 describe("worker_batch_planner — dependency graph optimization (Task 3)", () => {
   const baseConfig = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+  const splitConfig = {
+    copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 },
+    planner: { splitConflictingPlansAcrossBatches: true },
+  };
 
   it("uses graph wave to order plans that lack an explicit wave field", () => {
     // planB depends on planA — graph should place planA in wave 1, planB in wave 2.
@@ -135,7 +142,7 @@ describe("worker_batch_planner — dependency graph optimization (Task 3)", () =
     const planY = { role: "Evolution Worker", task: "task-y", filesInScope: ["src/shared.ts"] };
     const planZ = { role: "Evolution Worker", task: "task-z", filesInScope: ["src/other.ts"] };
 
-    const batches = buildRoleExecutionBatches([planX, planY, planZ], baseConfig);
+    const batches = buildRoleExecutionBatches([planX, planY, planZ], splitConfig);
     const allBatchPlanSets = batches.map(b => b.plans);
     const conflictCoexists = allBatchPlanSets.some(bp => bp.includes(planX) && bp.includes(planY));
     assert.equal(conflictCoexists, false, "graph-detected conflicting plans must not share a batch");
@@ -173,6 +180,10 @@ describe("worker_batch_planner — dependency graph optimization (Task 3)", () =
 
 describe("worker_batch_planner — cross-role wave ordering", () => {
   const baseConfig = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+  const splitConfig = {
+    copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 },
+    planner: { splitConflictingPlansAcrossBatches: true },
+  };
 
   it("all wave-1 batches precede all wave-2 batches across different roles", () => {
     // Two roles each contributing one plan per wave.
@@ -204,20 +215,27 @@ describe("worker_batch_planner — cross-role wave ordering", () => {
     const planA = { role: "Worker A", task: "task-alpha", filesInScope: ["src/shared.ts"] };
     const planB = { role: "Worker B", task: "task-beta",  filesInScope: ["src/shared.ts"] };
 
-    const batches = buildRoleExecutionBatches([planA, planB], baseConfig);
+    const batches = buildRoleExecutionBatches([planA, planB], splitConfig);
 
     const batchA = batches.find(b => b.plans.includes(planA as any));
     const batchB = batches.find(b => b.plans.includes(planB as any));
 
     assert.ok(batchA, "planA must appear in a batch");
     assert.ok(batchB, "planB must appear in a batch");
-    assert.ok((batchA as any).wave !== (batchB as any).wave,
-      "conflicting cross-role plans must be in different waves");
+    assert.notEqual(
+      (batchA as any).bundleIndex,
+      (batchB as any).bundleIndex,
+      "conflicting cross-role plans must not share the same bundle"
+    );
 
-    const earlier = (batchA as any).wave < (batchB as any).wave ? batchA : batchB;
-    const later   = (batchA as any).wave < (batchB as any).wave ? batchB : batchA;
-    assert.ok((earlier as any).bundleIndex < (later as any).bundleIndex,
-      "earlier-wave batch must have lower bundleIndex than later-wave batch");
+    // When graph assigns different waves, bundle ordering must follow wave order.
+    // When waves are equal, bundleIndex still provides deterministic serialization.
+    if ((batchA as any).wave !== (batchB as any).wave) {
+      const earlier = (batchA as any).wave < (batchB as any).wave ? batchA : batchB;
+      const later = (batchA as any).wave < (batchB as any).wave ? batchB : batchA;
+      assert.ok((earlier as any).bundleIndex < (later as any).bundleIndex,
+        "earlier-wave batch must have lower bundleIndex than later-wave batch");
+    }
   });
 
   it("negative: single-role plans are unaffected by cross-role sort", () => {

@@ -1278,14 +1278,47 @@ async function dispatchWorker(config, plan) {
   const logicalRole = plan.role;
   const roleName = resolveWorkerRole(logicalRole, plan.taskKind || plan.kind || "implementation");
   const batchPlans = Array.isArray(plan?.plans) ? plan.plans : null;
+  const orderedBatchLines = batchPlans
+    ? batchPlans.map((item, i) => {
+        const title = String(item?.task || item?.title || `Task ${i + 1}`);
+        const deps = Array.isArray(item?.dependencies)
+          ? item.dependencies
+          : Array.isArray(item?.dependsOn)
+            ? item.dependsOn
+            : [];
+        const files = Array.isArray(item?.target_files)
+          ? item.target_files
+          : Array.isArray(item?.targetFiles)
+            ? item.targetFiles
+            : [];
+        const depText = deps.length > 0 ? ` | dependsOn=${deps.map((d) => String(d)).join(", ")}` : "";
+        const fileText = files.length > 0 ? ` | files=${files.slice(0, 5).map((f) => String(f)).join(", ")}` : "";
+        return `${i + 1}. ${title}${depText}${fileText}`;
+      }).join("\n")
+    : "";
   const task = batchPlans
-    ? `Execute this bundled work package in a single worker session.\n${batchPlans.map((item, i) => `${i + 1}. ${String(item?.task || item?.title || "Untitled task")}`).join("\n")}`
+    ? `Execute this bundled work package in a single worker session.\nYou MUST execute tasks in exact numeric order (1 -> N).\nDo not parallelize steps inside this batch.\nDo not skip a step; if a step is blocked, stop and report blocked with the exact blocker.\n\nOrdered steps:\n${orderedBatchLines}`
     : plan.task;
   const context = batchPlans
     ? batchPlans.map((item, i) => {
         const taskLine = String(item?.task || item?.title || `Task ${i + 1}`);
         const ctxLine = String(item?.context || item?.scope || "").trim();
-        return ctxLine ? `Task ${i + 1}: ${taskLine}\nContext: ${ctxLine}` : `Task ${i + 1}: ${taskLine}`;
+        const deps = Array.isArray(item?.dependencies)
+          ? item.dependencies
+          : Array.isArray(item?.dependsOn)
+            ? item.dependsOn
+            : [];
+        const files = Array.isArray(item?.target_files)
+          ? item.target_files
+          : Array.isArray(item?.targetFiles)
+            ? item.targetFiles
+            : [];
+        const depsLine = deps.length > 0 ? `\nDepends On: ${deps.map((d) => String(d)).join(", ")}` : "";
+        const filesLine = files.length > 0 ? `\nTarget Files: ${files.map((f) => String(f)).join(", ")}` : "";
+        if (ctxLine) {
+          return `Task ${i + 1}: ${taskLine}\nContext: ${ctxLine}${depsLine}${filesLine}`;
+        }
+        return `Task ${i + 1}: ${taskLine}${depsLine}${filesLine}`;
       }).join("\n\n")
     : (plan.context || "");
   const verification = batchPlans
