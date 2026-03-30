@@ -59,7 +59,7 @@ import { validateAllPlans } from "./plan_contract_validator.js";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
 import { isGovernanceCanaryBreachActive } from "./governance_canary.js";
 import { executeRollback, ROLLBACK_LEVEL, ROLLBACK_TRIGGER } from "./rollback_engine.js";
-import { initializeAggregateLiveLog } from "./live_log.js";
+import { initializeAggregateLiveLog, appendAggregateLiveLogSync } from "./live_log.js";
 import { buildRoleExecutionBatches } from "./worker_batch_planner.js";
 import { agentFileExists, nameToSlug } from "./agent_loader.js";
 import { getRoleRegistry } from "./role_registry.js";
@@ -1344,7 +1344,7 @@ async function dispatchWorker(config, plan) {
     taskKind
   });
 
-  return {
+  const workerResult = {
     roleName,
     status: result?.status || "unknown",
     pr: result?.prUrl || null,
@@ -1353,6 +1353,24 @@ async function dispatchWorker(config, plan) {
     raw: String(result?.fullOutput || "").slice(0, 3000),
     verificationEvidence: result?.verificationEvidence || null
   };
+
+  // Log worker dispatch to live agents log
+  appendAggregateLiveLogSync(
+    config.paths.stateDir,
+    `worker:${workerResult.roleName}`,
+    JSON.stringify(
+      {
+        status: workerResult.status,
+        summary: workerResult.summary,
+        pr: workerResult.pr,
+        filesChanged: workerResult.filesChanged
+      },
+      null,
+      2
+    )
+  );
+
+  return workerResult;
 }
 
 // ── Count completed plans from worker state files ─────────────────────────
