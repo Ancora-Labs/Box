@@ -97,6 +97,13 @@ const DEFAULT_CAPABILITY_MAP = Object.freeze({
  * @property {boolean} isFallback — true if using fallback worker
  * @property {number} performanceScore — Laplace-smoothed success rate (0–1); 0.5 when no data
  */
+export interface WorkerSelection {
+  role: string;
+  lane: string;
+  reason: string;
+  isFallback: boolean;
+  performanceScore: number;
+}
 
 /**
  * Infer capability tag from plan content.
