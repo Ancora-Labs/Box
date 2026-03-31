@@ -637,8 +637,8 @@ export async function appendAutoApproveTelemetry(
   const stateDir = (config as any)?.paths?.stateDir || "state";
   const filePath = path.join(stateDir, "auto_approve_telemetry.json");
   try {
-    const existing: unknown[] = await readJsonSafe(filePath, READ_JSON_REASON.FILE_NOT_FOUND, []);
-    const safeList = Array.isArray(existing) ? existing : [];
+    const rawResult = await readJsonSafe(filePath);
+    const safeList: unknown[] = (rawResult.ok && Array.isArray(rawResult.data)) ? rawResult.data : [];
     const entry = {
       cycleId,
       signal: String((planReviewResult.autoApproveReason as any)?.code || AUTO_APPROVE_DISPATCH_SIGNAL.LOW_RISK_UNCHANGED),
