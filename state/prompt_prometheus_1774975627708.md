@@ -2,7 +2,35 @@ TARGET REPO: CanerDoqdu/Box
 REPO PATH: C:\Users\caner\Desktop\Box
 
 ## OPERATOR OBJECTIVE
-The system is in a post-burst consolidation phase. Ten PRs (#155–#164) merged in approximately 17 hours, each touching deeply interconnected behavioral systems: component confidence scoring (shape/budget/dependency penalties), verification gate profile-awareness with canonical value normalization, span contract conformance across agent emitters, dispatch strictness decisions driven by confidence penalties, reviewer precision/recall measurement feeding policy tuning, readiness gates and Athena evidence completeness calibration, decomposition caps and ambiguity checks, pipeline composition tests and model routing ROI, branch cleanliness recovery and singleton wave compaction, and SLO-coupled alerts on completion yield collapse. CI passes on individual PRs do not validate cross-cutting behavioral correctness. Three KPI trends are simultaneously degrading: plan count per cycle, worker completion rate, and budget efficiency. Prometheus flagged critical health despite clean structural audit — this is likely a correct read on latent integration risk. YOUR MISSION: (1) Integration coherence audit — trace the end-to-end flow from task decomposition through confidence scoring → gating → dispatch → verification → SLO alerting. Map where data produced by one subsystem feeds the next. Find: missing connectors, mismatched schemas, contradictory thresholds, or dead-end paths where signals are emitted but not consumed. Focus on: src/providers/, src/ agent logic, any policy/gating modules touched by the recent PRs. (2) Completion trend diagnosis — examine task sizing patterns. Are work items being specified at a granularity that a single worker session can complete? Is context being handed off completely between agents, or are workers starting blind and rethrowing? (3) Budget efficiency — are there retry loops, over-specified prompts, or redundant validation passes that consume budget without output? Produce work items that are: scoped to single-session completion, have explicit acceptance criteria, and directly address integration gaps or completion blockers. Do NOT produce new feature work — the system needs stabilization before expansion. Expected deliverables: a ranked list of concrete, bounded work items with exact file paths, the specific integration gap or behavioral risk each addresses, and acceptance criteria that can be verified by Athena.
+CONTEXT: The BOX system has merged 10 meta-system PRs today (#165-#174) covering telemetry, auto-approval, debt compression, quality gates, and fast-path logic. Despite this, three capacity KPIs are degrading: plan count, budget usage, and worker completion. CI is green. No open issues or PRs. 6 workers available, 0 active sessions. Health assessment: 'needs-work'.
+
+CORE QUESTION: Why is plan count degrading? Is it healthy filtering (quality gates working correctly) or is it a discovery gap (no new work being found)?
+
+YOUR MISSION — two parallel workstreams:
+
+1. FRESH WORK DISCOVERY (highest priority)
+   - Scan the repository for product-level implementation gaps NOT related to orchestration infrastructure
+   - Focus areas: src/ (business logic, providers, workers), tests/ (coverage gaps, missing negative paths), docs/ (correctness vs. implementation), public/ (frontend gaps if any)
+   - Look for: incomplete features, TODO/FIXME markers, functions with stub implementations, missing error handling, untested critical paths
+   - Do NOT produce more telemetry/approval/debt-compression tasks — the orchestration layer is saturated
+   - Target: identify at least 3-5 concrete, scoped implementation tasks
+
+2. PIPELINE HEALTH VALIDATION (second priority)
+   - Validate that PRs #165-#174 are working correctly end-to-end, not just CI-passing
+   - Specifically: do the new quality gates from #165 correctly filter bad plans WITHOUT starving the pipeline?
+   - Does carry-forward compression from #168 preserve enough work items for workers to execute?
+   - Is the Athena auto-approve path from #167/#171 correctly passing valid packets or over-filtering?
+   - Look at: state/evolution_progress.json, state/prometheus_analysis.json, any logs or metrics files
+
+DELIVERABLES EXPECTED:
+- At least 3 scoped work items for product-level implementation
+- A clear diagnosis of whether plan-count degradation is healthy filtering or a discovery gap
+- If pipeline has a bottleneck, identify the specific component and file
+
+ANTI-GOALS:
+- Do not plan more orchestration meta-work unless you find a concrete defect
+- Do not re-plan work already in recent merged PRs
+- Do not produce vague 'improve X' tasks — each task must have a file path and specific outcome
 
 ## EVOLUTION DIRECTIVE
 You are NOT a risk-reducing planner. You are NOT a security-first hardening auditor.
@@ -87,26 +115,23 @@ The 21 sources provide strong coverage of multi-agent orchestration, reliability
 ## ACCUMULATED TOPIC KNOWLEDGE (cross-run memory)
 This knowledge has been accumulated across multiple Prometheus runs.
 Use it to produce deeper, more informed plans. Do NOT re-research completed topics.
-Active topics tracked: 67. Completed topics tracked: 15.
+Active topics tracked: 56. Completed topics tracked: 26.
 
 ### ACTIVE TOPICS (still being researched — use accumulated knowledge)
 
-**control-loop-desired-state-reconciliation-architecture** (4 run(s), since 2026-03-30):
-  - Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts
-
-**tracing** (4 run(s), since 2026-03-30):
+**tracing** (9 run(s), since 2026-03-30):
   - Plan: Normalize event fields to a cross-agent span contract for deterministic tracing. | scope=src/core/event_schema.ts
 
 ### COMPLETED TOPICS (fully researched — summaries only)
 - **agent-evaluation-infrastructure-continuous-quality-loops**: Topic researched over 2 runs. Key findings: Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts; Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes un
 - **genai-observability-telemetry-standards**: Topic researched over 4 runs. Key findings: Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts; Plan: Calibrate packet ranking and model routing with declared-vs-realized ROI telem
 - **cost-latency-optimization-prompt-caching-model-routing**: Topic researched over 2 runs. Key findings: Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes under quality constraints. | scope=src/core/model_policy.ts; Plan: Optimize model routing with completion-yield ROI while prese
+- **security-governance-threat-modeling-for-llm-systems**: Topic researched over 6 runs. Key findings: Plan: Refactor governance pre-dispatch evaluation to compute reusable gate signals once while preserving current precedence an | scope=src/core/orchestrator.ts governance gate path. Plans produced: Refactor
+- **control-loop-desired-state-reconciliation-architecture**: Topic researched over 6 runs. Key findings: Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts; Plan: Bind deterministic role->workerKind resolution at dispatch and verification
 - **observability-genai-telemetry-standards**: Topic researched over 4 runs. Key findings: Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts; Plan: Calibrate packet ranking and model routing with declared-vs-realized ROI telem
 - **cost-latency-optimization-via-caching-model-routing**: Topic researched over 2 runs. Key findings: Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes under quality constraints. | scope=src/core/model_policy.ts; Plan: Optimize model routing with completion-yield ROI while prese
 - **durable-execution-for-workflows-and-agents-conductor-oss**: Topic researched over 4 runs. Key findings: Plan: Guarantee all core agents emit span-conformant planning transition events. | scope=src/core/event_schema.ts. Plans produced: Guarantee all core agents emit span-conformant planning transition events.
-- **semantic-conventions-for-genai-agent-and-framework-spans-opentelemetry**: Topic researched over 3 runs. Key findings: Plan: Normalize event fields to a cross-agent span contract for deterministic tracing. | scope=src/core/event_schema.ts; Plan: Extend span validation and tests to ensure all runtime agent classes emit contr
-- **metrics**: Topic researched over 2 runs. Key findings: Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts; Plan: Persist gate-level rejection and false-negative proxy metrics for calibrati
-- ... 7 additional completed topic summary/summaries omitted for prompt budget control.
+- ... 18 additional completed topic summary/summaries omitted for prompt budget control.
 
 ## BEHAVIOR PATTERNS FROM RECENT POSTMORTEMS (last 20 cycles)
 Average decision quality: 2.60/10

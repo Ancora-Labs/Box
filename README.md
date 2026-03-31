@@ -4,42 +4,49 @@
 
 # BOX
 
-BOX is an orchestration runtime designed for autonomous software delivery.
-It is not a simple one-command script; it is a multi-role operating model
-that decides, plans, executes, observes, and attempts to improve itself.
+BOX is an orchestration runtime framework for autonomous software delivery operations.
+It should not be interpreted as a single-command automation utility; rather, it is a
+multi-role operational system that performs state interpretation, planning, execution,
+observability, and iterative self-optimization within a governed cycle model.
 
-At its core, BOX does this:
+At its operational core, BOX performs the following functions:
 
-- Reads system state.
-- Distributes tasks to the right roles.
-- Evaluates outputs.
-- Records what happened.
-- Tries to perform better in the next cycle.
+- Ingests and normalizes system state.
+- Routes work packages to role-appropriate execution units.
+- Assesses outcome quality against explicit evaluation criteria.
+- Persists execution artifacts and decision traces.
+- Applies cycle-over-cycle corrective and optimization logic.
 
 ## Development Status
 
-BOX is in active development.
+BOX is currently under active development.
 
-That means:
+This implies the following:
 
-- The architecture and worker behaviors are still evolving.
-- Some decision mechanisms are calibrated frequently.
-- The system aims to become a bit smarter and a bit safer every cycle.
+- Architectural boundaries and worker behaviors remain subject to controlled evolution.
+- Selected decision mechanisms are recalibrated at regular intervals.
+- The system is explicitly designed to increase capability, reliability, and safety on a per-cycle basis.
 
-In short: this is less a "finished product" showroom and more a live R&D lab.
+In practical terms, this repository should be viewed less as a finalized product showcase
+and more as a continuously operating R&D environment.
 
 ## The Agent Roster
 
 ### Leadership Layer
 
 **Jesus** — CEO Supervisor  
-Maintains the high-level strategy and makes critical decisions about what BOX should focus on next. Reads the cycle state, keeps escalations in check, and ensures the system doesn't wander too far off track.
+Maintains strategic direction and adjudicates high-impact prioritization decisions.
+Interprets cycle state, constrains escalation growth, and enforces directional coherence
+to prevent strategic drift across autonomous cycles.
 
 **Prometheus** — Evolution Architect  
-Deep-dives into the codebase, analyzes what BOX could improve about itself, and produces a structured plan. Balances ambition with feasibility; knows when to push forward and when to consolidate.
+Performs deep repository analysis to identify self-improvement opportunities and
+produces a structured, dependency-aware execution plan. Balances advancement pressure
+against implementation feasibility and consolidation requirements.
 
 **Athena** — Reviewer  
-Reviews plans and implementations with a critical eye. Questions assumptions, validates logic, and acts as the quality gate before major decisions move forward.
+Executes adversarial review of plans and implementations, validates assumptions,
+and functions as a quality and governance gate prior to major progression events.
 
 <p align="center">
 	<img src="public/divider.gif" alt="divider" width="240" />
@@ -48,10 +55,14 @@ Reviews plans and implementations with a critical eye. Questions assumptions, va
 ### Research Layer
 
 **Research Scout** — Knowledge Hunter  
-Searches the open internet for cutting-edge technical insights, best practices, and emerging patterns relevant to autonomous agent systems. Brings raw findings back to the team.
+Conducts structured open-internet reconnaissance for high-value technical knowledge,
+emerging patterns, and implementation-relevant practices for autonomous agent systems.
+Returns raw research artifacts for downstream synthesis.
 
 **Research Synthesizer** — Knowledge Organizer  
-Takes the Scout's raw findings and transforms them into structured, actionable insights. Distills noise into signal so the planning layer has high-quality input for decision-making.
+Transforms Scout artifacts into topic-organized, decision-ready synthesis outputs.
+Reduces informational noise, preserves high-signal findings, and supplies planning
+layers with higher-quality strategic inputs.
 
 <p align="center">
 	<img src="public/divider.gif" alt="divider" width="240" />
@@ -60,22 +71,28 @@ Takes the Scout's raw findings and transforms them into structured, actionable i
 ### Worker Layer
 
 **Evolution Worker** — Codebase Improver  
-Focuses on runtime evolution, refactoring, and core system improvements. Tends to suggest "we can do this better" and is usually right about it.
+Focuses on runtime evolution, refactoring, and structural capability improvements
+across core system components.
 
 **quality-worker** — Test Specialist  
-Ensures test coverage, validates behavior, and pushes back on untested changes. Takes quality seriously; sees green checks as a starting point, not an end.
+Owns verification depth, behavioral validation, and regression prevention.
+Treats passing checks as a baseline control, not as final evidence of adequacy.
 
 **governance-worker** — Policy Enforcer  
-Manages state governance, audit trails, and compliance with system policies. Keeps records clean and decisions traceable; the discipline backbone of the system.
+Enforces policy conformance, state governance, and auditability requirements.
+Maintains traceable decision lineage and record integrity as a discipline backbone.
 
 **infrastructure-worker** — Foundation Layer  
-Handles orchestration, deployment, containerization, and the runtime infrastructure. Works quietly most of the time; deeply missed when something breaks.
+Handles orchestration plumbing, deployment pathways, containerized runtime
+infrastructure, and operational continuity mechanics.
 
 **integration-worker** — Connector  
-Bridges separate components and ensures they communicate reliably. If it says "these two systems work together," you can trust it.
+Coordinates inter-component compatibility and validates communication reliability
+across subsystem boundaries.
 
 **observation-worker** — Signal Collector  
-Gathers metrics, health signals, and system telemetry. Detects anomalies and raises flags when patterns shift. Tends to be right.
+Collects telemetry, health indicators, and runtime signals, then performs anomaly
+detection and early warning escalation when pattern behavior deviates.
 
 <p align="center">
 	<img src="public/divider.gif" alt="divider" width="240" />
@@ -83,7 +100,8 @@ Gathers metrics, health signals, and system telemetry. Detects anomalies and rai
 
 ## BOX Mindset
 
-BOX is ambitious not because it is flawless, but because it can learn.
-Its goal is not to be perfect in one shot, but to become more robust,
-more intelligent, and more autonomous with each cycle.
+BOX is ambitious not because it is static or flawless, but because it is capable
+of institutional learning under iterative constraints.
+Its objective is not one-shot perfection; its objective is progressive gains in
+robustness, intelligence, and autonomy across successive operational cycles.
 

@@ -2,43 +2,21 @@ TARGET REPO: CanerDoqdu/Box
 REPO PATH: C:\Users\caner\Desktop\Box
 
 ## OPERATOR OBJECTIVE
-The system is in a post-velocity-spike degradation state. Ten PRs merged in ~18 hours have created integration surface that CI does not catch. Your job this cycle is diagnostic before generative — do NOT produce new feature plans until you have identified and proposed fixes for what is degrading completion efficiency.
+SITUATION: Worker completion trend is degrading and budget usage is degrading simultaneously, despite CI passing and zero open issues. Ten PRs were merged this cycle — all meta-system improvements. The system is improving its own orchestration while delivering less actual work. This is a gate miscalibration problem, not a structural code problem.
 
-**The three simultaneous degrading trends are your primary evidence:**
-1. Worker completion trend: degrading — workers are failing to complete planned tasks
-2. Budget usage trend: degrading — budget is burning without proportional output (rework signature)
-3. Plan count trend: degrading — fewer viable plans produced, likely because more work is stalled
+ROOT CAUSE HYPOTHESIS: The quality gate stack added in PR #165 (postmortem quality gates, debt compression, deterministic fast-path T1-T3) and the Athena correction layer in PR #171 (deterministic correction of bounded low-risk packet format defects) are likely producing over-strict rejection of valid worker completions. PR #170 (fix: prevent false completion blocks from globally-promoted BUILD requirements) was a prior symptom of exactly this pattern — false negatives blocking legitimate work. The fix in #170 may be incomplete or the pattern has re-emerged elsewhere in the gate stack.
 
-**Recent merge batch to analyze for integration coherence:**
-- #164: completion yield collapse detection + verification SLO breach alerts (src/providers area)
-- #163: branch cleanliness recovery + singleton wave compaction
-- #162: decomposition caps + ambiguity checks (T-001)
-- #161: readiness gate + Athena evidence completeness calibration
-- #160: T1+T2 pipeline composition tests + model routing ROI optimization
-- #159: component confidence penalties in strictness decisions (src/providers/**)
-- #158: profile-aware evidence matching + canonical value normalization (src/providers/**)
-- #157: event schema validation + span contract conformance across agent emitters
-- #156: component confidence (shape/budget/dependency) for high-risk gating
-- #155: reviewer precision/recall measurement + policy tuning feedback
+OBJECTIVES FOR THIS CYCLE:
 
-**Key diagnostic questions Prometheus must answer:**
-1. Are any gating mechanisms introduced in this batch applying constraints that pre-existing planned work items cannot satisfy? (Gate/plan version mismatch)
-2. Do the confidence penalty systems (#159, #156) interact with the readiness gate (#161) in a way that creates tasks that can never pass — i.e., a logical deadlock in the approval chain?
-3. Does the SLO breach detection in #164 trigger alerts that halt work without providing a recovery path — turning monitoring into a blocker?
-4. Are the evidence completeness calibration changes in #161 now rejecting evidence that was previously valid, causing Athena to fail work that should pass?
-5. Is the model routing ROI optimization in #160 conflicting with budget allocation assumptions elsewhere in the system?
+1. GATE AUDIT (Priority 1): Trace the full worker completion path. Identify every gate that a worker result passes through: artifact gate, postmortem gate, tier classification (T1/T2/T3 fast-path), BUILD requirement promotion, Athena correction eligibility check. For each gate, find the rejection threshold and verify it is calibrated correctly. Look specifically at: state/evolution_progress.json (completion evidence), src/ files related to postmortem evaluation, Athena correction boundaries, and tier assignment logic. Find what changed in PRs #165, #171, #172 that could tighten rejection rates.
 
-**Expected deliverables from this analysis cycle:**
-- Identification of the specific gate/constraint interaction causing completion degradation
-- A targeted fix plan (not new features — repairs to existing logic)
-- Confirmation of whether the 'critical' finding from the prior Prometheus analysis (3.2h ago) is resolved or still active
-- A coherence map of how #155-#164 interact, identifying any logical deadlocks or self-defeating constraint combinations
+2. BUDGET EFFICIENCY (Priority 2): Identify why budget usage is degrading. Possible causes: (a) workers retrying after gate rejection, (b) Prometheus prompts growing in size due to carry-forward debt accumulation (PR #168 added recurrence metadata), (c) telemetry overhead added in PR #169 consuming tokens. Quantify the largest budget consumer and propose a reduction.
 
-**Anti-goals — do NOT do these:**
-- Do not generate new capability feature plans
-- Do not propose broad refactors
-- Do not treat CI green as evidence of integration health
-- Do not optimize for plan count — optimize for diagnosing why completion is dropping
+3. FAST-PATH VALIDATION (Priority 3): The T1-T3 fast-path from PR #165 and PR #167 was designed to accelerate low-risk work through auto-approval. Verify this path is actually being taken for eligible work items. If worker completion is degrading despite the fast-path existing, either: (a) items are not being classified as T1-T3 when they should be, or (b) the fast-path has a bug that causes silent failures.
+
+DELIVERABLES EXPECTED: Specific file paths and line numbers where gate thresholds are miscalibrated. A concrete fix (not a workaround) that restores worker completion rate without removing the quality guarantees the gates provide. If carry-forward debt is accumulating without resolution, propose a debt flush mechanism.
+
+ANTI-GOALS: Do not add more gates or more telemetry. Do not add new orchestration features. Do not refactor broadly. The system needs less friction on the critical path, not more instrumentation of that friction.
 
 ## EVOLUTION DIRECTIVE
 You are NOT a risk-reducing planner. You are NOT a security-first hardening auditor.
@@ -123,32 +101,23 @@ The 21 sources provide strong coverage of multi-agent orchestration, reliability
 ## ACCUMULATED TOPIC KNOWLEDGE (cross-run memory)
 This knowledge has been accumulated across multiple Prometheus runs.
 Use it to produce deeper, more informed plans. Do NOT re-research completed topics.
-Active topics tracked: 70. Completed topics tracked: 12.
+Active topics tracked: 59. Completed topics tracked: 23.
 
 ### ACTIVE TOPICS (still being researched — use accumulated knowledge)
 
-**genai-observability-telemetry-standards** (3 run(s), since 2026-03-30):
-  - Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts
-
-**control-loop-desired-state-reconciliation-architecture** (3 run(s), since 2026-03-30):
-  - Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts
-
-**observability-genai-telemetry-standards** (3 run(s), since 2026-03-30):
-  - Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts
-
-**tracing** (3 run(s), since 2026-03-30):
+**tracing** (8 run(s), since 2026-03-30):
   - Plan: Normalize event fields to a cross-agent span contract for deterministic tracing. | scope=src/core/event_schema.ts
 
 ### COMPLETED TOPICS (fully researched — summaries only)
 - **agent-evaluation-infrastructure-continuous-quality-loops**: Topic researched over 2 runs. Key findings: Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts; Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes un
+- **genai-observability-telemetry-standards**: Topic researched over 4 runs. Key findings: Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts; Plan: Calibrate packet ranking and model routing with declared-vs-realized ROI telem
 - **cost-latency-optimization-prompt-caching-model-routing**: Topic researched over 2 runs. Key findings: Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes under quality constraints. | scope=src/core/model_policy.ts; Plan: Optimize model routing with completion-yield ROI while prese
+- **security-governance-threat-modeling-for-llm-systems**: Topic researched over 6 runs. Key findings: Plan: Refactor governance pre-dispatch evaluation to compute reusable gate signals once while preserving current precedence an | scope=src/core/orchestrator.ts governance gate path. Plans produced: Refactor
+- **control-loop-desired-state-reconciliation-architecture**: Topic researched over 6 runs. Key findings: Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts; Plan: Bind deterministic role->workerKind resolution at dispatch and verification
+- **observability-genai-telemetry-standards**: Topic researched over 4 runs. Key findings: Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts; Plan: Calibrate packet ranking and model routing with declared-vs-realized ROI telem
 - **cost-latency-optimization-via-caching-model-routing**: Topic researched over 2 runs. Key findings: Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes under quality constraints. | scope=src/core/model_policy.ts; Plan: Optimize model routing with completion-yield ROI while prese
-- **semantic-conventions-for-genai-agent-and-framework-spans-opentelemetry**: Topic researched over 3 runs. Key findings: Plan: Normalize event fields to a cross-agent span contract for deterministic tracing. | scope=src/core/event_schema.ts; Plan: Extend span validation and tests to ensure all runtime agent classes emit contr
-- **metrics**: Topic researched over 2 runs. Key findings: Plan: Persist gate-fired, rework, and false-negative proxy metrics for calibration loops. | scope=src/core/state_tracker.ts; Plan: Persist gate-level rejection and false-negative proxy metrics for calibrati
-- **latency**: Topic researched over 3 runs. Key findings: Plan: Expose coupled alerts when completion yield collapses while verification latency breaches SLO. | scope=src/core/capacity_scoreboard.ts. Plans produced: Expose coupled alerts when completion yield coll
-- **prompt-caching-with-azure-openai**: Topic researched over 2 runs. Key findings: Plan: Tune high-risk rejection threshold using recent outcome telemetry with hard bounds. | scope=src/core/prometheus.ts; Plan: Mark cache-eligible prompt segments and prioritize cost-effective routes under
-- **guardrails**: Topic researched over 3 runs. Key findings: Plan: Integrate routeModelWithCompletionROI into default dispatch model resolution and preserve policy guardrails. | scope=src/core/worker_runner.ts. Plans produced: Integrate routeModelWithCompletionROI in
-- ... 4 additional completed topic summary/summaries omitted for prompt budget control.
+- **durable-execution-for-workflows-and-agents-conductor-oss**: Topic researched over 4 runs. Key findings: Plan: Guarantee all core agents emit span-conformant planning transition events. | scope=src/core/event_schema.ts. Plans produced: Guarantee all core agents emit span-conformant planning transition events.
+- ... 15 additional completed topic summary/summaries omitted for prompt budget control.
 
 ## BEHAVIOR PATTERNS FROM RECENT POSTMORTEMS (last 20 cycles)
 Average decision quality: 2.60/10
