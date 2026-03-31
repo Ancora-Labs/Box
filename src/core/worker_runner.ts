@@ -26,7 +26,7 @@ import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract,
 import { enforceModelPolicy, routeModelWithUncertainty, classifyComplexityTier, COMPLEXITY_TIER } from "./model_policy.js";
 import { deriveRoutingAdjustments, buildPromptHardConstraints } from "./learning_policy_compiler.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
-import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
+import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION, resolveEscalationsForTask } from "./escalation_queue.js";
 import { buildTaskFingerprint, buildLineageId, LINEAGE_ENTRY_STATUS } from "./lineage_graph.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 import { classifyFailure } from "./failure_classifier.js";
@@ -1047,6 +1047,18 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     }
   } catch {
     // Non-fatal: if policy cannot be read, keep existing worker result.
+  }
+
+  // Auto-resolve transient ACCESS_BLOCKED escalations once the same worker+task
+  // completes or partially completes in a later retry.
+  if (parsed.status !== "blocked" && parsed.status !== "error") {
+    resolveEscalationsForTask(config, {
+      role: roleName,
+      task: instruction.task,
+      blockingReasonClass: BLOCKING_REASON_CLASS.ACCESS_BLOCKED,
+      resolutionSummary: `Worker recovered with status=${parsed.status}`,
+      resolvedBy: `worker:${roleName}`,
+    }).catch(() => { /* non-fatal */ });
   }
 
   // Track premium request usage per worker (always log, even for failed verification attempts)

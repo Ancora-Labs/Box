@@ -96,9 +96,12 @@ export function detectModelFallback(rawText) {
 
 export function buildPrometheusPlanningPolicy(config) {
   const planner = config?.planner || {};
-  const maxWorkersPerWave = Math.max(1, Number(planner.defaultMaxWorkersPerWave || config?.maxParallelWorkers || 10));
+  const configuredMaxWorkersPerWave = Math.max(1, Number(planner.defaultMaxWorkersPerWave || config?.maxParallelWorkers || 10));
   const rawMaxTasks = Number(planner.maxTasks);
   const maxTasks = Number.isFinite(rawMaxTasks) && rawMaxTasks > 0 ? Math.floor(rawMaxTasks) : 0;
+  const maxWorkersPerWave = maxTasks > 0
+    ? Math.min(configuredMaxWorkersPerWave, maxTasks)
+    : configuredMaxWorkersPerWave;
   return {
     maxTasks,
     maxWorkersPerWave,
@@ -200,9 +203,12 @@ function buildResearchPromptSection(
     return { sectionText: "", topicCount: 0, sourceCount: 0, coverageTarget: 0 };
   }
 
-  const topicLines = topics.slice(0, 10).map((topic, i) => `${i + 1}. ${topic}`).join("\n");
+  const topicPreviewLimit = 5;
+  const sourcePreviewLimit = 3;
+  const topicLines = topics.slice(0, topicPreviewLimit).map((topic, i) => `${i + 1}. ${topic}`).join("\n");
+  const hiddenTopicCount = Math.max(0, topicCount - topicPreviewLimit);
   const sourceSignals = (Array.isArray(scoutObj.sources) ? scoutObj.sources : [])
-    .slice(0, 6)
+    .slice(0, sourcePreviewLimit)
     .map((source, i: number) => {
       const sourceObj = (source && typeof source === "object") ? source as Record<string, unknown> : {};
       const title = sanitizePromptLine(sourceObj.title || "Untitled source", 120);
@@ -212,7 +218,7 @@ function buildResearchPromptSection(
     .join("\n");
   const gapsPreview = sanitizePromptLine(synthesisObj.researchGaps || "", 420);
 
-  const sectionText = `\n\n## EXTERNAL RESEARCH INTELLIGENCE\nResearch signal available for this cycle: ${topicCount} topic(s), ${sourceCount} source(s).\n\nResearch coverage target: ${coverageTarget > 0 ? coverageTarget : "AUTO"} research-backed packet(s) when materially applicable.\nDo NOT ignore this section. For each high-confidence unresolved topic, either:\n1) produce an actionable packet with concrete target_files and verification, or\n2) state that it is already implemented and cite exact file evidence in before_state/after_state.\n\nTop topics:\n${topicLines || "(none)"}${sourceSignals ? `\n\nSource signals:\n${sourceSignals}` : ""}${gapsPreview ? `\n\nResearch gaps to consider:\n${gapsPreview}` : ""}`;
+  const sectionText = `\n\n## EXTERNAL RESEARCH INTELLIGENCE\nResearch signal available for this cycle: ${topicCount} topic(s), ${sourceCount} source(s).\n\nResearch coverage target: ${coverageTarget > 0 ? coverageTarget : "AUTO"} research-backed packet(s) when materially applicable.\nDo NOT ignore this section. For each high-confidence unresolved topic, either:\n1) produce an actionable packet with concrete target_files and verification, or\n2) state that it is already implemented and cite exact file evidence in before_state/after_state.\n\nTop topics:\n${topicLines || "(none)"}${hiddenTopicCount > 0 ? `\n... plus ${hiddenTopicCount} additional topic signal(s) omitted from the prompt for budget control.` : ""}${sourceSignals ? `\n\nSource signals:\n${sourceSignals}` : ""}${gapsPreview ? `\n\nResearch gaps to consider:\n${gapsPreview}` : ""}`;
 
   return { sectionText, topicCount, sourceCount, coverageTarget };
 }
@@ -243,11 +249,15 @@ export const CARRY_FORWARD_MAX_TOKENS = 2000;
  */
 export const BEHAVIOR_PATTERNS_MAX_TOKENS = 1500;
 
+export const DEFAULT_PROMETHEUS_RESEARCH_SECTION_MAX_TOKENS = 1400;
+export const DEFAULT_PROMETHEUS_TOPIC_MEMORY_MAX_TOKENS = 1800;
+export const DEFAULT_PROMETHEUS_TIMEOUT_MINUTES = 20;
+
 /**
  * Maximum tokens for the topic memory section in the planning prompt.
  * Active topics get full knowledge fragments; completed topics get only summaries.
  */
-export const TOPIC_MEMORY_MAX_TOKENS = 4000;
+export const TOPIC_MEMORY_MAX_TOKENS = DEFAULT_PROMETHEUS_TOPIC_MEMORY_MAX_TOKENS;
 
 // ── Topic Memory System ─────────────────────────────────────────────────────
 // Accumulates knowledge per research topic across multiple Prometheus runs.
@@ -410,6 +420,7 @@ export function detectAndCompleteTopics(
 export function buildTopicMemoryPromptSection(memory: TopicMemoryState): string {
   const activeTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "active");
   const completedTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "completed");
+  const activeTopicsWithFragments = activeTopics.filter(([, topic]) => topic.knowledgeFragments.length > 0);
 
   if (activeTopics.length === 0 && completedTopics.length === 0) return "";
 
@@ -417,21 +428,31 @@ export function buildTopicMemoryPromptSection(memory: TopicMemoryState): string 
   lines.push("\n\n## ACCUMULATED TOPIC KNOWLEDGE (cross-run memory)");
   lines.push("This knowledge has been accumulated across multiple Prometheus runs.");
   lines.push("Use it to produce deeper, more informed plans. Do NOT re-research completed topics.");
+  lines.push(`Active topics tracked: ${activeTopics.length}. Completed topics tracked: ${completedTopics.length}.`);
 
-  if (activeTopics.length > 0) {
+  if (activeTopicsWithFragments.length > 0) {
     lines.push("\n### ACTIVE TOPICS (still being researched — use accumulated knowledge)");
-    for (const [key, topic] of activeTopics.slice(0, 15)) {
+    for (const [key, topic] of activeTopicsWithFragments.slice(0, 6)) {
       lines.push(`\n**${key}** (${topic.runCount} run(s), since ${topic.firstSeenAt.slice(0, 10)}):`);
-      for (const frag of topic.knowledgeFragments.slice(-8)) {
+      for (const frag of topic.knowledgeFragments.slice(-2)) {
         lines.push(`  - ${frag.slice(0, 200)}`);
       }
     }
+    if (activeTopicsWithFragments.length > 6) {
+      lines.push(`\n... ${activeTopicsWithFragments.length - 6} additional active topic(s) with stored evidence omitted for prompt budget control.`);
+    }
+  } else if (activeTopics.length > 0) {
+    lines.push("\n### ACTIVE TOPICS");
+    lines.push("Detailed active-topic fragments omitted because no accumulated evidence snippets are currently stored.");
   }
 
   if (completedTopics.length > 0) {
     lines.push("\n### COMPLETED TOPICS (fully researched — summaries only)");
-    for (const [key, topic] of completedTopics.slice(0, 20)) {
+    for (const [key, topic] of completedTopics.slice(0, 8)) {
       lines.push(`- **${key}**: ${(topic.completedSummary || "No summary").slice(0, 250)}`);
+    }
+    if (completedTopics.length > 8) {
+      lines.push(`- ... ${completedTopics.length - 8} additional completed topic summary/summaries omitted for prompt budget control.`);
     }
   }
 
@@ -1003,7 +1024,7 @@ function buildExecutionStrategyFromPlans(plans = []) {
   };
 }
 
-function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}) {
+export function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}) {
   const waves = Array.isArray(executionStrategy.waves) ? executionStrategy.waves : [];
   const byWave = waves.map((w) => {
     const waveNum = Number.isFinite(Number(w.wave)) ? Number(w.wave) : 1;
@@ -1013,19 +1034,21 @@ function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}
       wave: waveNum,
       planCount: wavePlans.length,
       roles,
-      estimatedRequests: wavePlans.length > 0 ? 2 : 0
+      estimatedRequests: roles.length
     };
   });
 
   const byRoleMap = new Map();
   for (const plan of plans) {
     const role = String(plan.role || "evolution-worker");
-    byRoleMap.set(role, (byRoleMap.get(role) || 0) + 1);
+    const wave = Number.isFinite(Number(plan.wave)) ? Number(plan.wave) : 1;
+    if (!byRoleMap.has(role)) byRoleMap.set(role, new Set());
+    byRoleMap.get(role).add(wave);
   }
-  const byRole = [...byRoleMap.entries()].map(([role, planCount]) => ({
+  const byRole = [...byRoleMap.entries()].map(([role, waveSet]) => ({
     role,
-    planCount,
-    estimatedRequests: planCount
+    planCount: plans.filter((plan) => String(plan.role || "evolution-worker") === role).length,
+    estimatedRequests: waveSet.size
   }));
 
   const estimatedPremiumRequestsTotal = Math.max(1, 3 + byWave.reduce((acc, w) => acc + w.estimatedRequests, 0));
@@ -1039,7 +1062,7 @@ function buildDeterministicRequestBudget(plans = [], executionStrategy: any = {}
     byRole,
     assumptions: [
       "1 Jesus + 1 Prometheus + 1 Athena plan review per cycle",
-      "~2 requests per execution wave for worker+postmortem envelope"
+      "1 worker premium request per role session within each execution wave"
     ]
   };
 }
@@ -2515,11 +2538,11 @@ Consider whether the root causes are:
   );
   const researchSection = Object.assign(
     section("research-intelligence", researchSectionText),
-    { maxTokens: Number(config?.runtime?.prometheusResearchSectionMaxTokens ?? 2500) }
+    { maxTokens: Number(config?.runtime?.prometheusResearchSectionMaxTokens ?? DEFAULT_PROMETHEUS_RESEARCH_SECTION_MAX_TOKENS) }
   );
   const topicMemSection = Object.assign(
     section("topic-memory", topicMemorySection),
-    { maxTokens: TOPIC_MEMORY_MAX_TOKENS }
+    { maxTokens: Number(config?.runtime?.prometheusTopicMemoryMaxTokens ?? TOPIC_MEMORY_MAX_TOKENS) }
   );
   const contextPrompt = compilePrompt([
     section("context", `TARGET REPO: ${config.env?.targetRepo || "unknown"}\nREPO PATH: ${repoRoot}\n\n## OPERATOR OBJECTIVE\n${userPrompt}`),
@@ -2552,15 +2575,39 @@ Consider whether the root causes are:
 
   appendLiveLogSync(stateDir, `\n[copilot_stream_start] ${ts()}\n`);
 
-  const result = await spawnAsync(command, args, {
-    env: process.env,
-    onStdout(chunk) {
-      appendLiveLogSync(stateDir, chunk.toString("utf8"));
-    },
-    onStderr(chunk) {
-      appendLiveLogSync(stateDir, chunk.toString("utf8"));
-    }
-  });
+  const prometheusCallStartedAt = Date.now();
+  const promptChars = contextPrompt.length;
+  const heartbeatIntervalMs = Math.max(
+    30_000,
+    Number(config?.runtime?.prometheusHeartbeatIntervalMs || 60_000)
+  );
+  const heartbeatTimer = setInterval(() => {
+    const elapsedMs = Date.now() - prometheusCallStartedAt;
+    const elapsedMinutes = Math.floor(elapsedMs / 60_000);
+    const elapsedSeconds = Math.floor((elapsedMs % 60_000) / 1000);
+    const heartbeat = `[PROMETHEUS] Analysis in progress — elapsed=${elapsedMinutes}m ${elapsedSeconds}s promptChars=${promptChars} model=${prometheusModel}`;
+    appendProgress(config, heartbeat).catch(() => { /* non-fatal heartbeat logging */ });
+    appendPrometheusLiveLog(
+      stateDir,
+      "leadership_live",
+      `[${ts()}] ${prometheusName.padEnd(20)} Heartbeat — elapsed=${elapsedMinutes}m ${elapsedSeconds}s promptChars=${promptChars} model=${prometheusModel}`
+    ).catch(() => { /* non-fatal heartbeat logging */ });
+  }, heartbeatIntervalMs);
+
+  let result;
+  try {
+    result = await spawnAsync(command, args, {
+      env: process.env,
+      onStdout(chunk) {
+        appendLiveLogSync(stateDir, chunk.toString("utf8"));
+      },
+      onStderr(chunk) {
+        appendLiveLogSync(stateDir, chunk.toString("utf8"));
+      }
+    });
+  } finally {
+    clearInterval(heartbeatTimer);
+  }
 
   appendLiveLogSync(stateDir, `\n[copilot_stream_end] ${ts()} exit=${(result as any).status}\n`);
 

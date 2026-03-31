@@ -1820,6 +1820,9 @@ describe("PLANNER_HEALTH_ALIASES and normalizeProjectHealthAlias (Task 1)", () =
 import {
   splitWavesIntoMicrowaves,
   MICROWAVE_MAX_TASKS_DEFAULT,
+  buildPrometheusPlanningPolicy,
+  buildDeterministicRequestBudget,
+  buildTopicMemoryPromptSection,
 } from "../../src/core/prometheus.js";
 
 describe("splitWavesIntoMicrowaves", () => {
@@ -2114,6 +2117,123 @@ describe("computeHighRiskComponentGate", () => {
     const waveNums = [...new Set(result.map((p: any) => p.wave))];
     assert.equal(waveNums.length, 1, "exactly-2-tasks wave with limit-2 must NOT be split");
     assert.equal(waveNums[0], 1, "must remain in wave 1");
+  });
+});
+
+describe("buildPrometheusPlanningPolicy", () => {
+  it("preserves unlimited planning semantics when planner.maxTasks is 0", () => {
+    const policy = buildPrometheusPlanningPolicy({
+      planner: {
+        maxTasks: 0,
+        defaultMaxWorkersPerWave: 9,
+      },
+      runtime: {
+        runtimeBudget: {
+          maxTasksPerCycle: 12,
+        },
+      },
+    });
+
+    assert.equal(policy.maxTasks, 0);
+    assert.equal(policy.maxWorkersPerWave, 9);
+  });
+
+  it("caps maxWorkersPerWave only when maxTasks is finite", () => {
+    const policy = buildPrometheusPlanningPolicy({
+      planner: {
+        maxTasks: 3,
+        defaultMaxWorkersPerWave: 10,
+      },
+    });
+
+    assert.equal(policy.maxTasks, 3);
+    assert.equal(policy.maxWorkersPerWave, 3);
+  });
+});
+
+describe("buildDeterministicRequestBudget", () => {
+  it("counts one worker request per distinct role session in each wave", () => {
+    const plans = [
+      { task: "Task A", role: "quality-worker", wave: 1 },
+      { task: "Task B", role: "quality-worker", wave: 1 },
+      { task: "Task C", role: "infrastructure-worker", wave: 1 },
+      { task: "Task D", role: "quality-worker", wave: 2 },
+    ];
+    const executionStrategy = {
+      waves: [
+        { wave: 1 },
+        { wave: 2 },
+      ],
+    };
+
+    const budget = buildDeterministicRequestBudget(plans, executionStrategy);
+
+    assert.equal(budget.byWave[0].estimatedRequests, 2, "wave 1 should count two role sessions");
+    assert.equal(budget.byWave[1].estimatedRequests, 1, "wave 2 should count one role session");
+    assert.equal(
+      budget.byRole.find((entry: any) => entry.role === "quality-worker")?.estimatedRequests,
+      2,
+      "quality-worker should count once per wave where it runs"
+    );
+    assert.equal(
+      budget.estimatedPremiumRequestsTotal,
+      6,
+      "3 leadership requests + 3 worker role sessions"
+    );
+  });
+
+  it("does not multiply requests by plan count inside one shared role wave", () => {
+    const plans = [
+      { task: "Task A", role: "quality-worker", wave: 1 },
+      { task: "Task B", role: "quality-worker", wave: 1 },
+      { task: "Task C", role: "quality-worker", wave: 1 },
+    ];
+    const budget = buildDeterministicRequestBudget(plans, { waves: [{ wave: 1 }] });
+
+    assert.equal(budget.byWave[0].estimatedRequests, 1);
+    assert.equal(budget.byRole[0].estimatedRequests, 1);
+  });
+});
+
+describe("buildTopicMemoryPromptSection", () => {
+  it("omits empty active topics while keeping summary counts", () => {
+    const prompt = buildTopicMemoryPromptSection({
+      topics: {
+        "empty-active": {
+          status: "active",
+          runCount: 2,
+          firstSeenAt: "2026-03-30T00:00:00.000Z",
+          lastUpdatedAt: "2026-03-31T00:00:00.000Z",
+          knowledgeFragments: [],
+          completedSummary: null,
+        },
+        "useful-active": {
+          status: "active",
+          runCount: 3,
+          firstSeenAt: "2026-03-30T00:00:00.000Z",
+          lastUpdatedAt: "2026-03-31T00:00:00.000Z",
+          knowledgeFragments: ["Plan: tighten request budgeting in prometheus.ts"],
+          completedSummary: null,
+        },
+        "done-topic": {
+          status: "completed",
+          runCount: 2,
+          firstSeenAt: "2026-03-30T00:00:00.000Z",
+          lastUpdatedAt: "2026-03-31T00:00:00.000Z",
+          knowledgeFragments: [],
+          completedSummary: "Completed summary",
+        },
+      },
+    });
+
+    assert.ok(prompt.includes("Active topics tracked: 2. Completed topics tracked: 1."));
+    assert.ok(prompt.includes("useful-active"));
+    assert.ok(!prompt.includes("**empty-active**"), "empty active topics should not consume prompt budget");
+    assert.ok(prompt.includes("done-topic"));
+  });
+
+  it("returns an empty string when no topic memory exists", () => {
+    assert.equal(buildTopicMemoryPromptSection({ topics: {} }), "");
   });
 });
 

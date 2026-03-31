@@ -49,6 +49,28 @@ import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_sch
 
 /** Canonical agent identifier for Athena in span events. */
 export const ATHENA_AGENT_ID = "athena";
+const ATHENA_PLAN_REVIEW_TIMEOUT_MS = 12 * 60 * 1000;
+const ATHENA_REVIEW_HEARTBEAT_MS = 60_000;
+
+function resolveAthenaPlanReviewTimeoutMs(config): number {
+  const raw = Number(
+    config?.runtime?.athenaPlanReviewTimeoutMs
+    ?? config?.runtime?.athenaReviewTimeoutMs
+    ?? ATHENA_PLAN_REVIEW_TIMEOUT_MS
+  );
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return ATHENA_PLAN_REVIEW_TIMEOUT_MS;
+  }
+  return Math.floor(raw);
+}
+
+function resolveAthenaReviewHeartbeatMs(config): number {
+  const raw = Number(config?.runtime?.athenaReviewHeartbeatMs ?? ATHENA_REVIEW_HEARTBEAT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return ATHENA_REVIEW_HEARTBEAT_MS;
+  }
+  return Math.floor(raw);
+}
 
 /**
  * Build a PLANNING_STAGE_TRANSITION span event for Athena.
@@ -943,21 +965,83 @@ export function checkPlanPremortemGate(plans) {
 // ── AI call (single-prompt, 1 request) ──────────────────────────────────────
 
 async function callCopilotAgent(command, agentSlug, contextPrompt, config, model) {
-  // Single-prompt mode: no autopilot, no continues — exactly 1 premium request
-  const args = buildAgentArgs({
-    agentSlug,
-    prompt: contextPrompt,
-    model,
-    allowAll: false,
-    maxContinues: undefined
-  });
-  const result: any = await spawnAsync(command, args, { env: process.env });
-  const stdout = String(result?.stdout || "");
-  const stderr = String(result?.stderr || "");
-  if (result.status !== 0) {
-    return { ok: false, raw: stdout || stderr, parsed: null, thinking: "", error: `exited ${result.status}` };
+  // Single-prompt mode: no autopilot, no continues — exactly 1 premium request.
+  // Hardened behavior: force non-interactive mode and retry once without --agent
+  // if the custom-agent invocation stalls or fails.
+  const timeoutMs = resolveAthenaPlanReviewTimeoutMs(config);
+
+  const runAttempt = async (useAgent: boolean): Promise<{
+    ok: boolean;
+    raw: string;
+    parsed: any;
+    thinking: string;
+    error: string;
+  }> => {
+    const args = buildAgentArgs({
+      agentSlug: useAgent ? agentSlug : undefined,
+      prompt: contextPrompt,
+      model,
+      allowAll: false,
+      noAskUser: true,
+      maxContinues: undefined
+    });
+
+    const result: any = await spawnAsync(command, args, {
+      env: process.env,
+      timeoutMs
+    });
+    const stdout = String(result?.stdout || "");
+    const stderr = String(result?.stderr || "");
+    if (result?.timedOut) {
+      return {
+        ok: false,
+        raw: stdout || stderr,
+        parsed: null,
+        thinking: "",
+        error: `timed out after ${Math.round(timeoutMs / 1000)}s`
+      };
+    }
+    if (result.status !== 0) {
+      const errPreview = String(stderr || stdout || "").trim().slice(0, 300);
+      const errSuffix = errPreview ? `: ${errPreview}` : "";
+      return { ok: false, raw: stdout || stderr, parsed: null, thinking: "", error: `exited ${result.status}${errSuffix}` };
+    }
+    const parsed = parseAgentOutput(stdout || stderr);
+    return {
+      ok: Boolean(parsed?.ok),
+      raw: stdout || stderr,
+      parsed: parsed?.parsed || null,
+      thinking: String(parsed?.thinking || ""),
+      error: parsed?.ok ? "" : "no structured decision returned"
+    };
+  };
+
+  const primary = await runAttempt(true);
+  if (primary.ok && primary.parsed) {
+    return primary;
   }
-  return parseAgentOutput(stdout || stderr);
+
+  if (agentSlug) {
+    await appendProgress(
+      config,
+      `[ATHENA][WARN] Agent invocation failed (${primary.error || "unknown error"}) — retrying once with plain model invocation`
+    );
+    const fallback = await runAttempt(false);
+    if (fallback.ok && fallback.parsed) {
+      await appendProgress(config, `[ATHENA] Fallback invocation succeeded after primary agent invocation failed`);
+      return fallback;
+    }
+    const fallbackError = fallback.error || "unknown error";
+    return {
+      ok: false,
+      raw: `${String(primary.raw || "")}\n${String(fallback.raw || "")}`.trim(),
+      parsed: null,
+      thinking: "",
+      error: `primary=${primary.error || "unknown"}; fallback=${fallbackError}`
+    };
+  }
+
+  return primary;
 }
 
 function pickReviewerPayload(raw) {
@@ -1494,6 +1578,8 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   const athenaName = registry?.qualityReviewer?.name || "Athena";
   const athenaModel = registry?.qualityReviewer?.model || "Claude Sonnet 4.6";
   const command = config.env?.copilotCliCommand || "copilot";
+  const reviewStartedAt = Date.now();
+  const heartbeatMs = resolveAthenaReviewHeartbeatMs(config);
 
   await appendProgress(config, `[ATHENA] Plan review starting — validating Prometheus plan`);
   chatLog(stateDir, athenaName, "Plan review starting...");
@@ -1662,7 +1748,31 @@ Respond with your assessment, then:
 
 IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Even if no changes were needed, return the original plans as-is in patchedPlans. This ensures the orchestrator always has a validated plan set.`;
 
-  const aiResult = await callCopilotAgent(command, "athena", contextPrompt, config, athenaModel);
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  try {
+    heartbeatTimer = setInterval(() => {
+      const elapsedMs = Date.now() - reviewStartedAt;
+      const elapsedSec = Math.floor(elapsedMs / 1000);
+      void appendProgress(
+        config,
+        `[ATHENA] Plan review in progress — elapsed=${elapsedSec}s model=${athenaModel}`
+      );
+    }, heartbeatMs);
+    if (heartbeatTimer && typeof heartbeatTimer.unref === "function") {
+      heartbeatTimer.unref();
+    }
+  } catch {
+    heartbeatTimer = null;
+  }
+
+  let aiResult;
+  try {
+    aiResult = await callCopilotAgent(command, "athena", contextPrompt, config, athenaModel);
+  } finally {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
+  }
 
   if (!aiResult.ok || !aiResult.parsed) {
     // Rollback: if runtime.athenaFailOpen is explicitly enabled, restore legacy permissive behavior.

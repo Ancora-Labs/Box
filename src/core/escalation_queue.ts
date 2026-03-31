@@ -217,6 +217,63 @@ export async function appendEscalation(config, params) {
   return { appended: true };
 }
 
+/**
+ * Resolve unresolved escalations for a concrete role+task fingerprint.
+ *
+ * Used when a previously blocked worker task later recovers successfully.
+ * Matching rule:
+ *   - same computed taskFingerprint(role, task)
+ *   - unresolved only
+ *   - optional blockingReasonClass filter when provided
+ *
+ * @param {object} config
+ * @param {{ role: string, task: string, blockingReasonClass?: string|null,
+ *           resolutionSummary?: string, resolvedBy?: string }} params
+ * @returns {Promise<{ resolvedCount: number }>}
+ */
+export async function resolveEscalationsForTask(config, params = {}) {
+  const resolvedParams = (params && typeof params === "object") ? params : {};
+  const role = String("role" in resolvedParams ? resolvedParams.role : "").trim();
+  const task = String("task" in resolvedParams ? resolvedParams.task : "").trim();
+  if (!role || !task) return { resolvedCount: 0 };
+
+  const blockingReasonClass = "blockingReasonClass" in resolvedParams && resolvedParams.blockingReasonClass
+    ? String(resolvedParams.blockingReasonClass)
+    : null;
+  const resolutionSummary = String(
+    ("resolutionSummary" in resolvedParams ? resolvedParams.resolutionSummary : "") || "Recovered after subsequent worker execution"
+  ).slice(0, 500);
+  const resolvedBy = String(("resolvedBy" in resolvedParams ? resolvedParams.resolvedBy : "") || "system:auto-resolve").slice(0, 120);
+  const fingerprint = computeTaskFingerprint(role, task);
+  const filePath = path.join(config?.paths?.stateDir || "state", "escalation_queue.json");
+
+  const state = await readJson(filePath, { entries: [], updatedAt: null });
+  const entries = Array.isArray(state?.entries) ? state.entries : [];
+  let resolvedCount = 0;
+  const resolvedAt = new Date().toISOString();
+
+  const updated = entries.map((entry) => {
+    if (entry?.resolved) return entry;
+    if (entry?.taskFingerprint !== fingerprint) return entry;
+    if (blockingReasonClass && entry?.blockingReasonClass !== blockingReasonClass) return entry;
+
+    resolvedCount += 1;
+    return {
+      ...entry,
+      resolved: true,
+      resolvedAt,
+      resolutionSummary,
+      resolvedBy,
+    };
+  });
+
+  if (resolvedCount > 0) {
+    await writeJson(filePath, { entries: updated, updatedAt: resolvedAt });
+  }
+
+  return { resolvedCount };
+}
+
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
 /**
