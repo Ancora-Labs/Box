@@ -1748,7 +1748,7 @@ Respond with your assessment, then:
 
 IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Even if no changes were needed, return the original plans as-is in patchedPlans. This ensures the orchestrator always has a validated plan set.`;
 
-  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let heartbeatTimer: NodeJS.Timeout | null;
   try {
     heartbeatTimer = setInterval(() => {
       const elapsedMs = Date.now() - reviewStartedAt;
@@ -1762,7 +1762,7 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
       heartbeatTimer.unref();
     }
   } catch {
-    heartbeatTimer = null;
+    // Heartbeat is best-effort observability; review continues without it.
   }
 
   let aiResult;
