@@ -55,6 +55,20 @@ export const ATHENA_AGENT_ID = "athena";
 const ATHENA_PLAN_REVIEW_TIMEOUT_MS = 12 * 60 * 1000;
 const ATHENA_REVIEW_HEARTBEAT_MS = 60_000;
 
+/**
+ * Reason codes emitted by the deterministic auto-approve (fast-path) gate.
+ * Exported so callers can track fast-path telemetry without string literals.
+ *
+ * @enum {string}
+ */
+export const ATHENA_FAST_PATH_REASON = Object.freeze({
+  /**
+   * All plans are low-risk and the batch fingerprint matches the last approved review.
+   * The AI review call was skipped and the cached result was returned.
+   */
+  LOW_RISK_UNCHANGED: "LOW_RISK_UNCHANGED",
+} as const);
+
 // ── Deterministic plan-batch fingerprinting ───────────────────────────────────
 
 /**

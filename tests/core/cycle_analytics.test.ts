@@ -737,6 +737,176 @@ describe("computeCycleAnalytics — funnel (Task 1)", () => {
 // Verifies that cycle_health.json (degradation channel) is cleanly separated
 // from cycle_analytics.json (performance/semantic channel).
 
+// ── tierCounts field ──────────────────────────────────────────────────────────
+
+describe("computeCycleAnalytics — tierCounts (tier telemetry)", () => {
+  it("schema requires tierCounts field", () => {
+    assert.ok(CYCLE_ANALYTICS_SCHEMA.cycleRecord.required.includes("tierCounts"),
+      "schema.cycleRecord.required must list 'tierCounts'");
+  });
+
+  it("tierCounts is present on every record regardless of input", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {});
+    assert.ok("tierCounts" in record, "tierCounts must be present");
+  });
+
+  it("tierCounts contains T1, T2, T3 keys", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      tierCounts: { T1: 3, T2: 2, T3: 1 },
+    });
+    assert.ok("T1" in record.tierCounts, "tierCounts missing T1");
+    assert.ok("T2" in record.tierCounts, "tierCounts missing T2");
+    assert.ok("T3" in record.tierCounts, "tierCounts missing T3");
+  });
+
+  it("tierCounts stores provided T1/T2/T3 counts verbatim", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      tierCounts: { T1: 4, T2: 3, T3: 2 },
+    });
+    assert.equal(record.tierCounts.T1, 4);
+    assert.equal(record.tierCounts.T2, 3);
+    assert.equal(record.tierCounts.T3, 2);
+  });
+
+  it("tierCounts values are null when tierCounts not provided (AC3 — no silent zero-fill)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {});
+    assert.equal(record.tierCounts.T1, null, "T1 must be null when tierCounts absent");
+    assert.equal(record.tierCounts.T2, null, "T2 must be null when tierCounts absent");
+    assert.equal(record.tierCounts.T3, null, "T3 must be null when tierCounts absent");
+  });
+
+  it("missing tierCounts adds MISSING_SOURCE entry to missingData (AC3)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, { tierCounts: null });
+    const entry = record.missingData.find((m: any) => m.field === "tierCounts");
+    assert.ok(entry, "missingData must include an entry for tierCounts when absent");
+    assert.equal(entry.reason, MISSING_DATA_REASON.MISSING_SOURCE);
+    assert.equal(entry.impact, MISSING_DATA_IMPACT.KPI);
+  });
+
+  it("partial tierCounts: non-numeric keys are null (AC3)", () => {
+    const config = makeConfig("state");
+    // T2 has valid value; T1 and T3 are missing (not numeric)
+    const record = computeCycleAnalytics(config, {
+      tierCounts: { T2: 5 },
+    });
+    assert.equal(record.tierCounts.T1, null, "T1 must be null when not numeric");
+    assert.equal(record.tierCounts.T2, 5);
+    assert.equal(record.tierCounts.T3, null, "T3 must be null when not numeric");
+  });
+
+  it("negative path: tierCounts not added to missingData when all three tiers present", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      tierCounts: { T1: 1, T2: 2, T3: 0 },
+    });
+    const entry = record.missingData.find((m: any) => m.field === "tierCounts");
+    // missingData entry is only added when the whole tierCounts object is null/absent
+    assert.equal(entry, undefined, "no missingData entry expected when tierCounts is provided");
+  });
+});
+
+// ── fastPathCounts field ──────────────────────────────────────────────────────
+
+describe("computeCycleAnalytics — fastPathCounts (fast-path telemetry)", () => {
+  it("schema requires fastPathCounts field", () => {
+    assert.ok(CYCLE_ANALYTICS_SCHEMA.cycleRecord.required.includes("fastPathCounts"),
+      "schema.cycleRecord.required must list 'fastPathCounts'");
+  });
+
+  it("fastPathCounts is present on every record regardless of input", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {});
+    assert.ok("fastPathCounts" in record, "fastPathCounts must be present");
+  });
+
+  it("fastPathCounts contains athenaAutoApproved, athenaFullReview, fastPathRate keys", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaAutoApproved: 2, athenaFullReview: 3 },
+    });
+    assert.ok("athenaAutoApproved" in record.fastPathCounts);
+    assert.ok("athenaFullReview" in record.fastPathCounts);
+    assert.ok("fastPathRate" in record.fastPathCounts);
+  });
+
+  it("fastPathCounts stores provided counts verbatim", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaAutoApproved: 3, athenaFullReview: 7 },
+    });
+    assert.equal(record.fastPathCounts.athenaAutoApproved, 3);
+    assert.equal(record.fastPathCounts.athenaFullReview,   7);
+  });
+
+  it("fastPathRate = athenaAutoApproved / (athenaAutoApproved + athenaFullReview)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaAutoApproved: 2, athenaFullReview: 8 },
+    });
+    // 2 / (2+8) = 0.2
+    assert.equal(record.fastPathCounts.fastPathRate, 0.2);
+  });
+
+  it("fastPathRate is 1 when all reviews were auto-approved", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaAutoApproved: 5, athenaFullReview: 0 },
+    });
+    assert.equal(record.fastPathCounts.fastPathRate, 1);
+  });
+
+  it("fastPathRate is 0 when no reviews were auto-approved", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaAutoApproved: 0, athenaFullReview: 4 },
+    });
+    assert.equal(record.fastPathCounts.fastPathRate, 0);
+  });
+
+  it("fastPathRate is null when athenaAutoApproved is absent (AC3 — no division by zero)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaFullReview: 4 },
+    });
+    assert.equal(record.fastPathCounts.athenaAutoApproved, null);
+    assert.equal(record.fastPathCounts.fastPathRate, null,
+      "fastPathRate must be null when athenaAutoApproved is absent");
+  });
+
+  it("fastPathCounts values are null when fastPathCounts not provided (AC3)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {});
+    assert.equal(record.fastPathCounts.athenaAutoApproved, null);
+    assert.equal(record.fastPathCounts.athenaFullReview,   null);
+    assert.equal(record.fastPathCounts.fastPathRate,       null);
+  });
+
+  it("missing fastPathCounts adds MISSING_SOURCE entry to missingData (AC3)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, { fastPathCounts: null });
+    const entry = record.missingData.find((m: any) => m.field === "fastPathCounts");
+    assert.ok(entry, "missingData must include fastPathCounts entry when absent");
+    assert.equal(entry.reason, MISSING_DATA_REASON.MISSING_SOURCE);
+    assert.equal(entry.impact, MISSING_DATA_IMPACT.KPI);
+  });
+
+  it("negative path: fastPathRate is null when total reviews is zero", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      fastPathCounts: { athenaAutoApproved: 0, athenaFullReview: 0 },
+    });
+    assert.equal(record.fastPathCounts.fastPathRate, null,
+      "fastPathRate must be null when total reviews is 0 (no division by zero)");
+  });
+});
+
+
+
 describe("CYCLE_HEALTH_SCHEMA", () => {
   it("exports schemaVersion 1", () => {
     assert.equal(CYCLE_HEALTH_SCHEMA.schemaVersion, 1);

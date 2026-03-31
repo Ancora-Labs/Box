@@ -163,6 +163,8 @@ export const CYCLE_ANALYTICS_SCHEMA = Object.freeze({
       "outcomes",
       "kpis",
       "funnel",
+      "tierCounts",
+      "fastPathCounts",
       "confidence",
       "causalLinks",
       "canonicalEvents",
@@ -394,6 +396,14 @@ function computeOutcomeStatus(phase, workerResults, planCount) {
  * @param {Array}       opts.dropReasons             Task drop summaries from PLANNING_TASK_DROPPED
  *                                                   span events.
  *                                                   Each entry: {taskId,stageWhenDropped,reason,dropCode,spanId}.
+ * @param {object|null} opts.tierCounts              Per-tier dispatch counts for this cycle.
+ *                                                   Shape: { T1: number|null, T2: number|null, T3: number|null }.
+ *                                                   T1 = routine, T2 = medium, T3 = architectural.
+ *                                                   null when not tracked by the caller.
+ * @param {object|null} opts.fastPathCounts          Athena plan-review fast-path counts for this cycle.
+ *                                                   Shape: { athenaAutoApproved: number|null, athenaFullReview: number|null }.
+ *                                                   fastPathRate is derived from these two values.
+ *                                                   null when not tracked by the caller.
  * @returns {object} Analytics record conforming to CYCLE_ANALYTICS_SCHEMA.cycleRecord.
  */
 export function computeCycleAnalytics(config, {
@@ -404,6 +414,8 @@ export function computeCycleAnalytics(config, {
   phase = CYCLE_PHASE.COMPLETED,
   parserBaselineRecovery = null,
   funnelCounts = null,
+  tierCounts = null,
+  fastPathCounts = null,
   stageTransitions = [],
   dropReasons = [],
 }: any = {}) {
@@ -531,6 +543,42 @@ export function computeCycleAnalytics(config, {
     completionRate: safeRatio(rawCompleted,  rawDispatched),
   };
 
+  // ── Tier counts: T1/T2/T3 dispatch distribution ───────────────────────────
+  // null when not provided by caller — missing data sentinel follows AC3.
+  const rawT1 = (tierCounts && typeof tierCounts.T1 === "number") ? tierCounts.T1 : null;
+  const rawT2 = (tierCounts && typeof tierCounts.T2 === "number") ? tierCounts.T2 : null;
+  const rawT3 = (tierCounts && typeof tierCounts.T3 === "number") ? tierCounts.T3 : null;
+  const tierCountsRecord = { T1: rawT1, T2: rawT2, T3: rawT3 };
+
+  if (tierCounts === null || tierCounts === undefined) {
+    missingData.push({
+      field: "tierCounts",
+      reason: MISSING_DATA_REASON.MISSING_SOURCE,
+      impact: MISSING_DATA_IMPACT.KPI,
+    });
+  }
+
+  // ── Fast-path counts: Athena auto-approve vs full-review ──────────────────
+  // fastPathRate is derived from the two counts; null when either is absent.
+  const rawAutoApproved = (fastPathCounts && typeof fastPathCounts.athenaAutoApproved === "number") ? fastPathCounts.athenaAutoApproved : null;
+  const rawFullReview   = (fastPathCounts && typeof fastPathCounts.athenaFullReview   === "number") ? fastPathCounts.athenaFullReview   : null;
+  const totalReviews = (rawAutoApproved !== null && rawFullReview !== null)
+    ? rawAutoApproved + rawFullReview
+    : null;
+  const fastPathCountsRecord = {
+    athenaAutoApproved: rawAutoApproved,
+    athenaFullReview:   rawFullReview,
+    fastPathRate:       safeRatio(rawAutoApproved, totalReviews),
+  };
+
+  if (fastPathCounts === null || fastPathCounts === undefined) {
+    missingData.push({
+      field: "fastPathCounts",
+      reason: MISSING_DATA_REASON.MISSING_SOURCE,
+      impact: MISSING_DATA_IMPACT.KPI,
+    });
+  }
+
   return {
     cycleId,
     generatedAt: new Date().toISOString(),
@@ -538,6 +586,8 @@ export function computeCycleAnalytics(config, {
     outcomes,
     kpis,
     funnel,
+    tierCounts: tierCountsRecord,
+    fastPathCounts: fastPathCountsRecord,
     confidence,
     causalLinks,
     canonicalEvents,
