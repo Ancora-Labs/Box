@@ -1,5 +1,5 @@
 <p align="center">
-	<img src="public/cube.webp" alt="BOX Showroom" width="280" />
+	<img src="public/cube.webp" alt="BOX Showroom" width="400" />
 </p>
 
 # BOX
