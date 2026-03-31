@@ -982,6 +982,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       summary: errorMsg,
       updatedHistory,
       prUrl: null,
+      tier,
       failureClassification: null,
       retryDecision: errorRetryDecision
     };
@@ -1334,6 +1335,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     filesTouched: parsed.filesTouched,
     updatedHistory,
     workerKind,
+    tier,
     verificationReport: parsed.verificationReport,
     responsiveMatrix: parsed.responsiveMatrix,
     verificationEvidence: parsed.verificationEvidence || null,

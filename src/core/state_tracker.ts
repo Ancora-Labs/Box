@@ -660,3 +660,116 @@ export { persistMonthlyCompoundingReport } from "./compounding_effects_analyzer.
  * @returns {Promise<{ ok: boolean, filePath?: string, report?: object, reason?: string }>}
  */
 export { generateAndPersistMonthlyReport } from "./compounding_effects_analyzer.js";
+
+// ── Dispatch tier telemetry ───────────────────────────────────────────────────
+
+/** Valid complexity tier values for dispatch tier telemetry records. */
+export const DISPATCH_TIER = Object.freeze({
+  T1: "T1",
+  T2: "T2",
+  T3: "T3",
+} as const);
+
+/**
+ * Append a single dispatch tier event to state/dispatch_tier_log.jsonl.
+ *
+ * Records the complexity tier assigned to each worker dispatch so that
+ * cycle_analytics.js can aggregate tierCounts per cycle. The log is a
+ * rolling JSONL buffer (max 2000 entries) that the orchestrator reads at
+ * cycle close time.
+ *
+ * Fail-open: write errors return { ok: false, reason } and are never thrown.
+ *
+ * @param {object} config
+ * @param {{ taskId?: string|null, roleName: string, tier: string, taskKind?: string|null, cycleId?: string|null, recordedAt?: string }} entry
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+export async function appendDispatchTierEvent(
+  config,
+  entry: {
+    taskId?: string | null;
+    roleName: string;
+    tier: string;
+    taskKind?: string | null;
+    cycleId?: string | null;
+    recordedAt?: string;
+  },
+): Promise<{ ok: boolean; reason?: string }> {
+  const logFile = path.join(config?.paths?.stateDir || "state", "dispatch_tier_log.jsonl");
+
+  try {
+    if (!entry || typeof entry !== "object") {
+      return { ok: false, reason: "entry is required (got null/undefined/non-object)" };
+    }
+    if (!entry.roleName || typeof entry.roleName !== "string" || entry.roleName.trim() === "") {
+      return { ok: false, reason: "entry.roleName must be a non-empty string" };
+    }
+    const validTiers = new Set<string>(Object.values(DISPATCH_TIER));
+    const tier = String(entry.tier || "");
+    if (!validTiers.has(tier)) {
+      return { ok: false, reason: `entry.tier must be one of ${[...validTiers].join(", ")}, got "${tier}"` };
+    }
+
+    const record = JSON.stringify({
+      taskId:    entry.taskId    ?? null,
+      roleName:  String(entry.roleName).trim(),
+      tier,
+      taskKind:  entry.taskKind  ?? null,
+      cycleId:   entry.cycleId   ?? null,
+      recordedAt: entry.recordedAt ?? new Date().toISOString(),
+    });
+
+    await fs.appendFile(logFile, record + "\n", "utf8");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: String((err as any)?.message || err) };
+  }
+}
+
+/**
+ * Read and parse all dispatch tier events from the rolling JSONL log.
+ * Returns parsed entries; silently skips malformed lines.
+ * Returns [] if the file does not exist.
+ *
+ * @param {object} config
+ * @returns {Promise<object[]>}
+ */
+export async function readDispatchTierEvents(config): Promise<object[]> {
+  const logFile = path.join(config?.paths?.stateDir || "state", "dispatch_tier_log.jsonl");
+  try {
+    const raw = await fs.readFile(logFile, "utf8");
+    return raw.split("\n")
+      .filter(line => line.trim().length > 0)
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Aggregate dispatch tier events from the JSONL log into tierCounts for a given cycleId.
+ * When cycleId is null, aggregates all events in the log.
+ *
+ * Returns { T1: number, T2: number, T3: number } where each value is the count of
+ * dispatches at that tier. Missing tiers default to 0.
+ *
+ * @param {object} config
+ * @param {string|null} cycleId — filter events by cycleId; null aggregates all
+ * @returns {Promise<{ T1: number, T2: number, T3: number }>}
+ */
+export async function aggregateTierCounts(config, cycleId: string | null = null): Promise<{ T1: number; T2: number; T3: number }> {
+  const events = await readDispatchTierEvents(config);
+  const relevant = cycleId
+    ? events.filter((e: any) => e.cycleId === cycleId)
+    : events;
+  const counts = { T1: 0, T2: 0, T3: 0 };
+  for (const ev of relevant) {
+    const tier = (ev as any).tier;
+    if (tier === "T1") counts.T1++;
+    else if (tier === "T2") counts.T2++;
+    else if (tier === "T3") counts.T3++;
+  }
+  return counts;
+}
+
