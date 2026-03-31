@@ -319,3 +319,183 @@ describe("isEnvelopeUnambiguous — fast-path bypass gate (Task 3)", () => {
     assert.equal(result.unambiguous, false, "null envelope must return false, not throw");
   });
 });
+
+// ── Task 1: runAthenaPlanReview — deterministic auto-approve for low-risk unchanged batches ──
+
+import { computePlanBatchFingerprint } from "../../src/core/athena_reviewer.js";
+
+describe("computePlanBatchFingerprint", () => {
+  it("returns the same fingerprint for the same plan batch", () => {
+    const plans = [
+      { task: "Fix retry logic", role: "evolution-worker", wave: 1, riskLevel: "low", verification: "npm test", acceptance_criteria: ["retries < 3"] },
+    ];
+    assert.equal(computePlanBatchFingerprint(plans), computePlanBatchFingerprint(plans),
+      "same input must produce the same fingerprint (deterministic)");
+  });
+
+  it("returns different fingerprints when acceptance_criteria changes", () => {
+    const base = { task: "Fix retry logic", role: "evolution-worker", wave: 1, riskLevel: "low", verification: "npm test", acceptance_criteria: ["retries < 3"] };
+    const changed = { ...base, acceptance_criteria: ["retries < 5"] };
+    assert.notEqual(computePlanBatchFingerprint([base]), computePlanBatchFingerprint([changed]),
+      "changed acceptance_criteria must yield a different fingerprint");
+  });
+
+  it("returns empty string for an empty plans array", () => {
+    assert.equal(computePlanBatchFingerprint([]), "",
+      "empty plans array must return empty fingerprint");
+  });
+
+  it("is order-sensitive — different plan order yields different fingerprint", () => {
+    const p1 = { task: "Task A", role: "evolution-worker", wave: 1, riskLevel: "low", verification: "npm test", acceptance_criteria: [] };
+    const p2 = { task: "Task B", role: "evolution-worker", wave: 1, riskLevel: "low", verification: "npm test", acceptance_criteria: [] };
+    assert.notEqual(
+      computePlanBatchFingerprint([p1, p2]),
+      computePlanBatchFingerprint([p2, p1]),
+      "plan order is significant for fingerprint — reordering must change the fingerprint"
+    );
+  });
+});
+
+describe("runAthenaPlanReview — deterministic auto-approve for low-risk unchanged batches", () => {
+  let tmpDir;
+
+  const LOW_RISK_PLANS = [
+    {
+      role: "evolution-worker",
+      task: "Add retry logic to worker dispatch with exponential backoff",
+      priority: 1,
+      wave: 1,
+      riskLevel: "low",
+      verification: "tests/core/worker_dispatch.test.ts — test: retry logic passes",
+      acceptance_criteria: ["retry count < 3 on transient failures"],
+      dependencies: [],
+      scope: "src/core/worker_dispatch.ts",
+      capacityDelta: 0.1,
+      requestROI: 2.0,
+    },
+  ];
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-athena-aa-"));
+    await fs.writeFile(path.join(tmpDir, "policy.json"), JSON.stringify({ blockedCommands: [] }), "utf8");
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("auto-approves a low-risk unchanged batch when a prior approved review exists with matching fingerprint", async () => {
+    const fingerprint = computePlanBatchFingerprint(LOW_RISK_PLANS);
+    // Seed state with a previously approved review with the matching fingerprint.
+    await fs.writeFile(
+      path.join(tmpDir, "athena_plan_review.json"),
+      JSON.stringify({
+        approved: true,
+        overallScore: 8,
+        summary: "All plans are well-defined",
+        appliedFixes: [],
+        corrections: [],
+        unresolvedIssues: [],
+        planBatchFingerprint: fingerprint,
+      }),
+      "utf8"
+    );
+
+    const config = makeConfig(tmpDir);
+    const prometheusOutput = { plans: LOW_RISK_PLANS, analyzedAt: new Date().toISOString() };
+    const result = await runAthenaPlanReview(config, prometheusOutput);
+
+    assert.equal(result.approved, true, "auto-approve must return approved=true");
+    assert.equal(result.autoApproved, true, "autoApproved flag must be set on cache-hit results");
+    assert.ok(
+      result.autoApproveReason?.code === "LOW_RISK_UNCHANGED",
+      "autoApproveReason.code must be LOW_RISK_UNCHANGED"
+    );
+  });
+
+  it("falls through to AI review (fails closed) when last review has a different fingerprint", async () => {
+    const staleFingerprint = "0000000000000000";
+    await fs.writeFile(
+      path.join(tmpDir, "athena_plan_review.json"),
+      JSON.stringify({
+        approved: true,
+        overallScore: 8,
+        summary: "Old review",
+        appliedFixes: [],
+        corrections: [],
+        unresolvedIssues: [],
+        planBatchFingerprint: staleFingerprint,
+      }),
+      "utf8"
+    );
+
+    const config = makeConfig(tmpDir);
+    const prometheusOutput = { plans: LOW_RISK_PLANS, analyzedAt: new Date().toISOString() };
+    const result = await runAthenaPlanReview(config, prometheusOutput);
+
+    // With no valid AI binary, the call fails; the result must not be auto-approved
+    assert.equal(result.autoApproved, undefined,
+      "mismatched fingerprint must not trigger auto-approve");
+    assert.notEqual(result.reason?.code, "LOW_RISK_UNCHANGED",
+      "mismatched fingerprint must fall through to AI, not return auto-approve");
+  });
+
+  it("never auto-approves when any plan has riskLevel=high even if fingerprint matches", async () => {
+    const highRiskPlan = {
+      ...LOW_RISK_PLANS[0],
+      riskLevel: "high",
+      preMortem: {
+        failureScenarios: ["DB migration fails"],
+        mitigations: ["rollback script tested"],
+        rollbackPlan: "revert migration",
+        guardrails: ["read-only mode enabled during migration"],
+      },
+    };
+    const highRiskPlans = [highRiskPlan];
+    const fingerprint = computePlanBatchFingerprint(highRiskPlans);
+    await fs.writeFile(
+      path.join(tmpDir, "athena_plan_review.json"),
+      JSON.stringify({
+        approved: true,
+        overallScore: 8,
+        summary: "Old approved",
+        appliedFixes: [],
+        corrections: [],
+        unresolvedIssues: [],
+        planBatchFingerprint: fingerprint,
+      }),
+      "utf8"
+    );
+
+    const config = makeConfig(tmpDir);
+    const prometheusOutput = { plans: highRiskPlans, analyzedAt: new Date().toISOString() };
+    const result = await runAthenaPlanReview(config, prometheusOutput);
+
+    assert.equal(result.autoApproved, undefined,
+      "high-risk plans must never be auto-approved, even when fingerprint matches");
+  });
+
+  it("never auto-approves when disablePlanReviewCache=true", async () => {
+    const fingerprint = computePlanBatchFingerprint(LOW_RISK_PLANS);
+    await fs.writeFile(
+      path.join(tmpDir, "athena_plan_review.json"),
+      JSON.stringify({
+        approved: true,
+        overallScore: 8,
+        summary: "All plans are well-defined",
+        appliedFixes: [],
+        corrections: [],
+        unresolvedIssues: [],
+        planBatchFingerprint: fingerprint,
+      }),
+      "utf8"
+    );
+
+    const config = makeConfig(tmpDir, { runtime: { disablePlanReviewCache: true } });
+    const prometheusOutput = { plans: LOW_RISK_PLANS, analyzedAt: new Date().toISOString() };
+    const result = await runAthenaPlanReview(config, prometheusOutput);
+
+    assert.equal(result.autoApproved, undefined,
+      "disablePlanReviewCache=true must bypass the auto-approve path regardless of fingerprint match");
+  });
+});

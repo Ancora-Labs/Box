@@ -38,7 +38,7 @@ import {
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
 import { validateAllPlans, PLAN_VIOLATION_SEVERITY, PACKET_VIOLATION_CODE } from "./plan_contract_validator.js";
-import { section, compilePrompt } from "./prompt_compiler.js";
+import { section, compilePrompt, markCacheableSegments } from "./prompt_compiler.js";
 import { computeFingerprint } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
 import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
@@ -2003,6 +2003,34 @@ Wrap the JSON companion with markers:
 ===END===`),
 });
 
+/**
+ * Section names that carry per-cycle data in the Prometheus planning prompt.
+ *
+ * These sections are marked `required: true` during prompt compilation so that
+ * under token-budget pressure they are retained over large optional context
+ * (repo file listing, drift summary). The static sections in PROMETHEUS_STATIC_SECTIONS
+ * are also required, but their content is invariant across cycles — unlike these
+ * delta sections whose content changes every cycle.
+ *
+ * Downstream callers (e.g., tests) can import this to verify cycle-delta
+ * prioritization behaviour without re-listing the names inline.
+ */
+export const PROMETHEUS_CYCLE_DELTA_SECTION_NAMES: ReadonlySet<string> = new Set([
+  "research-intelligence",
+  "topic-memory",
+  "behavior-patterns",
+  "carry-forward",
+]);
+
+/**
+ * Section names for the static invariant Prometheus planning prompt sections.
+ * Used with markCacheableSegments to flag these as prompt-cache eligible so
+ * caching layers can avoid re-tokenising unchanged prefixes across cycles.
+ */
+export const PROMETHEUS_STATIC_SECTION_NAMES: ReadonlySet<string> = new Set(
+  Object.values(PROMETHEUS_STATIC_SECTIONS).map(s => s.name)
+);
+
 // ── Architecture Drift Confidence Binding (Task 4) ──────────────────────────
 
 /** Minimum total drift items above which plans must include remediation tasks. */
@@ -2526,25 +2554,33 @@ Consider whether the root causes are:
 
   // ── Build prompt from static and dynamic sections ────────────────────────
   // Static sections are invariant across cycles and stored in PROMETHEUS_STATIC_SECTIONS.
-  // Dynamic sections carry per-cycle deltas; carry-forward and behavior-patterns are capped
-  // via maxTokens to prevent unbounded payload growth across many cycles.
+  // Dynamic (cycle-delta) sections carry per-cycle data; they are marked required:true so
+  // that under token-budget pressure they are retained over large optional context such as
+  // the repo file listing. Static sections are marked cacheable via markCacheableSegments
+  // so that prompt-caching layers can avoid re-tokenising their unchanged content.
   const carryFwdSection = Object.assign(
     section("carry-forward", carryForwardSection),
-    { maxTokens: CARRY_FORWARD_MAX_TOKENS }
+    { maxTokens: CARRY_FORWARD_MAX_TOKENS, required: true as const }
   );
   const behaviorSection = Object.assign(
     section("behavior-patterns", behaviorPatternsSection),
-    { maxTokens: BEHAVIOR_PATTERNS_MAX_TOKENS }
+    { maxTokens: BEHAVIOR_PATTERNS_MAX_TOKENS, required: true as const }
   );
   const researchSection = Object.assign(
     section("research-intelligence", researchSectionText),
-    { maxTokens: Number(config?.runtime?.prometheusResearchSectionMaxTokens ?? DEFAULT_PROMETHEUS_RESEARCH_SECTION_MAX_TOKENS) }
+    {
+      maxTokens: Number(config?.runtime?.prometheusResearchSectionMaxTokens ?? DEFAULT_PROMETHEUS_RESEARCH_SECTION_MAX_TOKENS),
+      required: true as const,
+    }
   );
   const topicMemSection = Object.assign(
     section("topic-memory", topicMemorySection),
-    { maxTokens: Number(config?.runtime?.prometheusTopicMemoryMaxTokens ?? TOPIC_MEMORY_MAX_TOKENS) }
+    {
+      maxTokens: Number(config?.runtime?.prometheusTopicMemoryMaxTokens ?? TOPIC_MEMORY_MAX_TOKENS),
+      required: true as const,
+    }
   );
-  const contextPrompt = compilePrompt([
+  const rawSections = [
     section("context", `TARGET REPO: ${config.env?.targetRepo || "unknown"}\nREPO PATH: ${repoRoot}\n\n## OPERATOR OBJECTIVE\n${userPrompt}`),
     PROMETHEUS_STATIC_SECTIONS.evolutionDirective,
     PROMETHEUS_STATIC_SECTIONS.mandatorySelfCritique,
@@ -2558,7 +2594,12 @@ Consider whether the root causes are:
     section("drift-summary", driftSummarySection),
     section("repair-feedback", repairFeedbackSection),
     PROMETHEUS_STATIC_SECTIONS.outputFormat,
-  ]);
+  ];
+  // Mark static sections as cacheable so prompt-caching layers can skip re-tokenising them.
+  const compilableSections = markCacheableSegments(rawSections, {
+    stableNames: Array.from(PROMETHEUS_STATIC_SECTION_NAMES),
+  });
+  const contextPrompt = compilePrompt(compilableSections);
 
   appendPromptPreviewSync(stateDir, contextPrompt);
 
