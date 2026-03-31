@@ -1,6 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+export interface GapCandidate {
+  /** Stable, deterministic identifier for this gap instance. */
+  id: string;
+  type: "missing-test" | "low-test-ratio" | "missing-ci" | "missing-tsconfig" | "no-test-runner";
+  /** Source file path that exhibits the gap, when applicable. */
+  file?: string;
+  /** Concrete, file-based evidence strings that justify this gap. */
+  evidence: string[];
+  severity: "high" | "medium" | "low";
+}
+
 const IGNORED_DIRS = new Set([
   ".git",
   "node_modules",
@@ -14,6 +25,128 @@ const IGNORED_DIRS = new Set([
 const MAX_SCAN_FILES = 1200;
 const MAX_PREVIEW_FILES = 12;
 const PREVIEW_BYTES = 2000;
+
+function srcFileToTestBasename(srcPath: string): string {
+  const normalized = srcPath.replace(/\\/g, "/");
+  const withoutSrc = normalized.replace(/^src\//, "");
+  return withoutSrc.replace(/\.[^./]+$/, "");
+}
+
+/**
+ * Analyse collected file lists and repository signals to produce a sorted,
+ * deterministic list of implementation gap candidates.  Each candidate
+ * carries concrete, file-based evidence so consumers can act on it directly.
+ *
+ * Gap types:
+ *   "missing-test"    — a source file in src/ has no identifiable test counterpart
+ *   "low-test-ratio"  — test/src file ratio is below 0.25 for non-trivial codebases
+ *   "missing-ci"      — a test runner is configured but no CI workflow exists
+ *   "missing-tsconfig"— TypeScript files are present but no tsconfig.json was found
+ *   "no-test-runner"  — source files exist but no test runner is configured at all
+ *
+ * Output is always sorted by `id` for determinism.
+ */
+export function detectImplementationGaps(
+  srcFiles: string[],
+  testFiles: string[],
+  signals: {
+    hasGithubActions: boolean;
+    workflowFileCount: number;
+    tsFileCount: number;
+    hasTsConfig: boolean;
+  },
+  hasTestRunner: boolean,
+): GapCandidate[] {
+  const candidates: GapCandidate[] = [];
+
+  const coreSrcFiles = (Array.isArray(srcFiles) ? srcFiles : []).filter((f) => {
+    const norm = String(f).replace(/\\/g, "/");
+    return norm.startsWith("src/") && !isTestLike(norm);
+  });
+
+  const normalizedTestFiles = (Array.isArray(testFiles) ? testFiles : []).map((f) =>
+    String(f).replace(/\\/g, "/"),
+  );
+
+  // 1. missing-test: each source file that lacks a matching test file
+  for (const srcFile of coreSrcFiles) {
+    const base = srcFileToTestBasename(srcFile);
+    const hasTest = normalizedTestFiles.some(
+      (tf) => tf.includes(base) && isTestLike(tf),
+    );
+    if (!hasTest) {
+      candidates.push({
+        id: `gap:missing-test:${srcFile}`,
+        type: "missing-test",
+        file: srcFile,
+        evidence: [
+          `No test file found matching pattern *${base}*.test.*`,
+          `Source file '${srcFile}' has no corresponding test`,
+        ],
+        severity: "high",
+      });
+    }
+  }
+
+  // 2. low-test-ratio: test coverage well below 25 % for non-trivial repos
+  if (coreSrcFiles.length > 5) {
+    const ratio = normalizedTestFiles.length / coreSrcFiles.length;
+    if (ratio < 0.25) {
+      candidates.push({
+        id: "gap:low-test-ratio",
+        type: "low-test-ratio",
+        evidence: [
+          `Only ${normalizedTestFiles.length} test file(s) found for ${coreSrcFiles.length} source file(s)`,
+          `Test ratio: ${ratio.toFixed(2)} (threshold: 0.25)`,
+        ],
+        severity: "medium",
+      });
+    }
+  }
+
+  // 3. missing-ci: test runner configured but no CI workflows present
+  if (hasTestRunner && !signals.hasGithubActions) {
+    candidates.push({
+      id: "gap:missing-ci",
+      type: "missing-ci",
+      evidence: [
+        "Project has a test runner configured but no GitHub Actions workflows detected",
+        "Missing .github/workflows directory or YAML files",
+      ],
+      severity: "high",
+    });
+  }
+
+  // 4. missing-tsconfig: TypeScript files present but no tsconfig.json
+  if (signals.tsFileCount > 0 && !signals.hasTsConfig) {
+    candidates.push({
+      id: "gap:missing-tsconfig",
+      type: "missing-tsconfig",
+      evidence: [
+        `Found ${signals.tsFileCount} TypeScript file(s) but no tsconfig.json in project root`,
+        "TypeScript projects require a tsconfig.json for type checking",
+      ],
+      severity: "medium",
+    });
+  }
+
+  // 5. no-test-runner: source code exists but testing is not set up at all
+  if (coreSrcFiles.length > 0 && !hasTestRunner) {
+    candidates.push({
+      id: "gap:no-test-runner",
+      type: "no-test-runner",
+      evidence: [
+        `${coreSrcFiles.length} source file(s) found but no test runner is configured`,
+        "Add a test script to package.json (e.g. jest, vitest, or node --test)",
+      ],
+      severity: "high",
+    });
+  }
+
+  // Always sort by id so output is stable regardless of insertion order
+  candidates.sort((a, b) => a.id.localeCompare(b.id));
+  return candidates;
+}
 
 function inferCommands(packageJson) {
   const scripts = packageJson?.scripts ?? {};
@@ -159,14 +292,18 @@ async function buildRepositorySignals(rootDir) {
   let testFileCount = 0;
   let jsFileCount = 0;
   let tsFileCount = 0;
+  const allSrcFiles: string[] = [];
+  const allTestFiles: string[] = [];
   for (const relFile of files) {
     const ext = path.extname(relFile).toLowerCase() || "[noext]";
     extensionHistogram[ext] = (extensionHistogram[ext] || 0) + 1;
     if (relFile.startsWith("src/")) {
       srcFileCount += 1;
+      allSrcFiles.push(relFile);
     }
     if (isTestLike(relFile)) {
       testFileCount += 1;
+      allTestFiles.push(relFile);
     }
     if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
       jsFileCount += 1;
@@ -223,8 +360,11 @@ async function buildRepositorySignals(rootDir) {
     hasPackageLock: await pathExists(path.join(rootDir, "package-lock.json")),
     hasYarnLock: await pathExists(path.join(rootDir, "yarn.lock")),
     hasPnpmLock: await pathExists(path.join(rootDir, "pnpm-lock.yaml")),
+    hasTsConfig: await pathExists(path.join(rootDir, "tsconfig.json")),
     workflowFileCount,
-    keyFilePreviews
+    keyFilePreviews,
+    allSrcFiles,
+    allTestFiles,
   };
 }
 
@@ -255,9 +395,13 @@ export async function scanProject(config) {
       hasPackageLock: false,
       hasYarnLock: false,
       hasPnpmLock: false,
+      hasTsConfig: false,
       workflowFileCount: 0,
-      keyFilePreviews: []
-    }
+      keyFilePreviews: [],
+      allSrcFiles: [],
+      allTestFiles: [],
+    },
+    implementationGaps: [] as GapCandidate[],
   };
 
   try {
@@ -295,6 +439,19 @@ export async function scanProject(config) {
   if (result.repositorySignals.hasDockerDir && !result.domains.includes("devops")) {
     result.domains.push("devops");
   }
+
+  const hasTestRunner = result.frameworks.includes("test-runner") || !!(result.scripts as Record<string, string>)?.["test"];
+  result.implementationGaps = detectImplementationGaps(
+    result.repositorySignals.allSrcFiles,
+    result.repositorySignals.allTestFiles,
+    {
+      hasGithubActions: result.repositorySignals.hasGithubActions,
+      workflowFileCount: result.repositorySignals.workflowFileCount,
+      tsFileCount: result.repositorySignals.tsFileCount,
+      hasTsConfig: result.repositorySignals.hasTsConfig,
+    },
+    hasTestRunner,
+  );
 
   return result;
 }
