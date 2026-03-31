@@ -325,3 +325,61 @@ describe("worker_runner dispatch controls — model routing", () => {
     });
   });
 });
+
+
+// ── routeModelUnderQualityFloor — uncertainty-aware selection under quality-floor ──
+
+describe("routeModelUnderQualityFloor — dispatch routing with quality floor", () => {
+  it("returns a model with both uncertainty and meetsQualityFloor fields", async () => {
+    const { routeModelUnderQualityFloor } = await import("../../src/core/model_policy.js");
+    const result = routeModelUnderQualityFloor(
+      { complexity: "medium" },
+      { defaultModel: "Claude Sonnet 4.6", strongModel: "Claude Opus 4.6" },
+      { recentROI: 0 },
+      0.7
+    );
+    assert.ok(result.model, "must return a model");
+    assert.ok(typeof result.meetsQualityFloor === "boolean");
+    assert.ok(typeof result.uncertainty === "string");
+  });
+
+  it("uncertainty signal is preserved — high uncertainty with low ROI uses default model", async () => {
+    const { routeModelUnderQualityFloor } = await import("../../src/core/model_policy.js");
+    const result = routeModelUnderQualityFloor(
+      { complexity: "critical" },
+      {
+        defaultModel: "Claude Sonnet 4.6",
+        strongModel: "Claude Opus 4.6",
+        qualityByModel: { "Claude Sonnet 4.6": 0.85, "Claude Opus 4.6": 0.95 },
+      },
+      { recentROI: 0.1 },
+      0.7
+    );
+    // T3 + high uncertainty → downgrade to default (Sonnet); Sonnet meets floor 0.7
+    assert.equal(result.model, "Claude Sonnet 4.6");
+    assert.equal(result.uncertainty, "high");
+    assert.equal(result.meetsQualityFloor, true, "Sonnet (0.85) must meet floor 0.7");
+  });
+
+  it("negative path: quality floor is enforced when uncertainty-selected model is below it", async () => {
+    const { routeModelUnderQualityFloor } = await import("../../src/core/model_policy.js");
+    const result = routeModelUnderQualityFloor(
+      { complexity: "low" },
+      {
+        defaultModel: "Claude Sonnet 4.6",
+        strongModel: "Claude Opus 4.6",
+        qualityByModel: {
+          "Claude Sonnet 4.6": 0.85,
+          "Claude Opus 4.6": 0.95,
+        },
+      },
+      { recentROI: 0 },
+      0.90  // floor is high — Sonnet (0.85) doesn't qualify → Opus selected
+    );
+    assert.equal(result.model, "Claude Opus 4.6", "Opus must be selected when floor is 0.90");
+    assert.ok(
+      result.reason.includes("quality-floor-upgrade") || result.meetsQualityFloor,
+      "either upgrade path or meetsQualityFloor must be true"
+    );
+  });
+});

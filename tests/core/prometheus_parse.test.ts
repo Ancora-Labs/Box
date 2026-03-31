@@ -24,6 +24,7 @@ import {
   checkDecompositionCaps,
   MAX_DECOMPOSITION_PLANS,
   DECOMPOSITION_CAP_REASON,
+  CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS,
 } from "../../src/core/prometheus.js";
 import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
 import { isNonSpecificVerification, validatePlanContract } from "../../src/core/plan_contract_validator.js";
@@ -2719,5 +2720,32 @@ describe("rankPlansByTelemetryAdjustedScore", () => {
     const original = [...plans];
     rankPlansByTelemetryAdjustedScore(plans);
     assert.deepEqual(plans, original, "input array must not be mutated");
+  });
+});
+
+
+// ── Task 3: carry-forward prompt bulk reduction constants ─────────────────────
+
+describe("carry-forward prompt bulk reduction", () => {
+  it("CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS is a positive integer", () => {
+    assert.ok(Number.isFinite(CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS), "must be finite");
+    assert.ok(CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS > 0, "must be positive");
+    assert.ok(Number.isInteger(CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS), "must be integer");
+  });
+
+  it("CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS is less than CARRY_FORWARD_MAX_TOKENS (not token-like)", () => {
+    // Ensures the two constants serve different roles and are not accidentally swapped.
+    assert.ok(
+      CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS < CARRY_FORWARD_MAX_TOKENS,
+      "MAX_LOW_RECURRENCE_ITEMS must be smaller than MAX_TOKENS — they are different units"
+    );
+  });
+
+  it("negative path: CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS < total items does not equal CARRY_FORWARD_MAX_TOKENS", () => {
+    assert.notEqual(
+      CARRY_FORWARD_MAX_LOW_RECURRENCE_ITEMS,
+      CARRY_FORWARD_MAX_TOKENS,
+      "the item cap and the token cap must not be equal — they measure different things"
+    );
   });
 });

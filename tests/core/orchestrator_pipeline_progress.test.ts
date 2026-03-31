@@ -1475,6 +1475,7 @@ describe("pipeline progress — terminology drift prevention (stage IDs)", () =>
       MANDATORY_DRIFT_DEBT_UNRESOLVED:"mandatory_drift_debt_unresolved",
       PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",
       DEPENDENCY_READINESS_INCOMPLETE:"dependency_readiness_incomplete",
+      ROLLING_YIELD_THROTTLE:         "rolling_yield_throttle",
     };
 
     for (const [key, expectedValue] of Object.entries(CANONICAL_BLOCK_REASONS)) {

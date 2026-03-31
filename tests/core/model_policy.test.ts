@@ -14,6 +14,7 @@ import {
   routeModelByComplexity,
   computeTokenROI,
   routeModelWithUncertainty,
+  routeModelUnderQualityFloor,
   appendRouteROIEntry,
   realizeRouteROIEntry,
   loadRouteROILedger,
@@ -625,5 +626,75 @@ describe("summarizeTierTelemetry", () => {
     );
     assert.equal(result.avgRoiDelta, 0, "missing state dir must not throw — returns zero-signal");
     assert.equal(result.sampleCount, 0);
+  });
+});
+
+
+// ── routeModelUnderQualityFloor — uncertainty-aware routing under quality-floor constraints ──
+
+describe("routeModelUnderQualityFloor — uncertainty + quality floor", () => {
+  const modelOptions = {
+    efficientModel: "Claude Haiku 4",
+    defaultModel:   "Claude Sonnet 4.6",
+    strongModel:    "Claude Opus 4.6",
+    qualityByModel: {
+      "Claude Haiku 4":    0.70,
+      "Claude Sonnet 4.6": 0.85,
+      "Claude Opus 4.6":   0.95,
+    },
+  };
+
+  it("returns a model with meetsQualityFloor and uncertainty fields", () => {
+    const result = routeModelUnderQualityFloor({}, modelOptions);
+    assert.ok(result.model, "must return a model");
+    assert.ok(typeof result.meetsQualityFloor === "boolean", "meetsQualityFloor must be boolean");
+    assert.ok(typeof result.uncertainty === "string", "uncertainty must be a string");
+    assert.ok(result.tier, "tier must be present");
+    assert.ok(typeof result.reason === "string", "reason must be a string");
+  });
+
+  it("passes through uncertainty-selected model when it meets the quality floor", () => {
+    // Low complexity → Haiku selected; Haiku (0.70) meets floor 0.65
+    const result = routeModelUnderQualityFloor({ complexity: "low" }, modelOptions, { recentROI: 0 }, 0.65);
+    assert.equal(result.meetsQualityFloor, true);
+    assert.ok(result.model, "must return a model");
+  });
+
+  it("upgrades to floor-constrained model when uncertainty-selected model is below floor", () => {
+    // Low complexity with very high floor 0.88 → Haiku (0.70) and Sonnet (0.85) fail → Opus (0.95) selected
+    const result = routeModelUnderQualityFloor({ complexity: "low" }, modelOptions, { recentROI: 0 }, 0.88);
+    assert.equal(result.meetsQualityFloor, true, "upgrade path must meet quality floor");
+    assert.ok(
+      result.reason.includes("quality-floor-upgrade"),
+      `reason must mention quality-floor-upgrade; got: ${result.reason}`
+    );
+    assert.equal(result.model, "Claude Opus 4.6", "must upgrade to Opus when floor is 0.88");
+  });
+
+  it("preserves uncertainty signal even when upgrading for quality floor", () => {
+    // High ROI → low uncertainty, but floor forces upgrade
+    const result = routeModelUnderQualityFloor({ complexity: "low" }, modelOptions, { recentROI: 0.9 }, 0.88);
+    assert.ok(typeof result.uncertainty === "string", "uncertainty must still be present after upgrade");
+  });
+
+  it("negative path: no history → low uncertainty, tier selects appropriately", () => {
+    const result = routeModelUnderQualityFloor({ complexity: "critical" }, modelOptions, { recentROI: 0 }, 0.7);
+    assert.ok(result.model, "must return a model even with no history");
+    assert.equal(result.uncertainty, "low", "zero recentROI means no signal → low uncertainty");
+    assert.equal(result.meetsQualityFloor, true);
+  });
+
+  it("negative path: high uncertainty with low ROI downgrades T3, but still meets floor", () => {
+    // T3 + low ROI → downgraded to defaultModel (Sonnet); Sonnet (0.85) > floor (0.7)
+    const result = routeModelUnderQualityFloor({ complexity: "critical" }, modelOptions, { recentROI: 0.1 }, 0.7);
+    assert.equal(result.model, "Claude Sonnet 4.6", "high-uncertainty T3 must downgrade to default (Sonnet)");
+    assert.equal(result.uncertainty, "high");
+    assert.equal(result.meetsQualityFloor, true, "Sonnet must meet quality floor 0.7");
+  });
+
+  it("handles empty modelOptions without throwing", () => {
+    const result = routeModelUnderQualityFloor({}, {}, { recentROI: 0 }, 0.5);
+    assert.ok(result.model, "must return a model even with empty options");
+    assert.ok(typeof result.meetsQualityFloor === "boolean");
   });
 });

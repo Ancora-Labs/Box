@@ -16,6 +16,7 @@ import {
   prioritizeStaleDebts,
   clusterDuplicateDebts,
   compressLedger,
+  classifyCarryForwardByRecurrence,
 } from "../../src/core/carry_forward_ledger.js";
 
 describe("carry_forward_ledger", () => {
@@ -979,5 +980,78 @@ describe("addDebtEntries — recurrenceCount tracking", () => {
     assert.equal(result.length, 2, "new open entry must be created when canonical is closed");
     const newEntry = result.find(e => !e.closedAt)!;
     assert.equal(newEntry.recurrenceCount, 1, "new entry starts at recurrenceCount=1");
+  });
+});
+
+
+// ── classifyCarryForwardByRecurrence — prompt bulk reduction ─────────────────
+
+describe("classifyCarryForwardByRecurrence — recurrence classification", () => {
+  function makePending(task: string) {
+    return { followUpNeeded: true, followUpTask: task, workerName: "worker", reviewedAt: "2025-01-01" };
+  }
+
+  it("returns empty buckets for empty input", () => {
+    const { highRecurrence, lowRecurrence } = classifyCarryForwardByRecurrence([], [], {});
+    assert.deepEqual(highRecurrence, []);
+    assert.deepEqual(lowRecurrence, []);
+  });
+
+  it("classifies items with >= threshold occurrences as high-recurrence", () => {
+    const task = "Fix flaky test in worker runner";
+    const pending = [makePending(task)];
+    // Simulate 3 postmortem entries mentioning the same task
+    const all = [
+      { followUpTask: task }, { followUpTask: task }, { followUpTask: task },
+    ];
+    const { highRecurrence, lowRecurrence } = classifyCarryForwardByRecurrence(pending, all, { recurrenceThreshold: 3 });
+    assert.equal(highRecurrence.length, 1, "item appearing 3 times must be high-recurrence");
+    assert.equal(lowRecurrence.length, 0);
+    assert.equal(highRecurrence[0]._recurrenceCount, 3);
+  });
+
+  it("classifies items with fewer than threshold occurrences as low-recurrence", () => {
+    const task = "Add circuit breaker for model calls";
+    const pending = [makePending(task)];
+    const all = [{ followUpTask: task }, { followUpTask: task }];
+    const { highRecurrence, lowRecurrence } = classifyCarryForwardByRecurrence(pending, all, { recurrenceThreshold: 3 });
+    assert.equal(lowRecurrence.length, 1, "item appearing 2 times must be low-recurrence (below threshold 3)");
+    assert.equal(highRecurrence.length, 0);
+  });
+
+  it("mixes high and low recurrence items correctly", () => {
+    const highTask = "Recurring critical issue";
+    const lowTask = "One-off follow-up";
+    const pending = [makePending(highTask), makePending(lowTask)];
+    const all = [
+      { followUpTask: highTask }, { followUpTask: highTask }, { followUpTask: highTask },
+      { followUpTask: lowTask },
+    ];
+    const result = classifyCarryForwardByRecurrence(pending, all, { recurrenceThreshold: 3 });
+    assert.equal(result.highRecurrence.length, 1);
+    assert.equal(result.lowRecurrence.length, 1);
+    assert.equal(result.highRecurrence[0].followUpTask, highTask);
+    assert.equal(result.lowRecurrence[0].followUpTask, lowTask);
+  });
+
+  it("defaults to recurrenceThreshold=3 when opts not provided", () => {
+    const task = "Recurring item";
+    const pending = [makePending(task)];
+    const all = [{ followUpTask: task }, { followUpTask: task }, { followUpTask: task }];
+    const { highRecurrence } = classifyCarryForwardByRecurrence(pending, all);
+    assert.equal(highRecurrence.length, 1, "default threshold of 3 must work");
+  });
+
+  it("handles null/undefined inputs gracefully without throwing", () => {
+    const result = classifyCarryForwardByRecurrence(null as any, null as any, {});
+    assert.deepEqual(result.highRecurrence, []);
+    assert.deepEqual(result.lowRecurrence, []);
+  });
+
+  it("negative path: item with no history is classified as low-recurrence", () => {
+    const pending = [makePending("Brand new task with no history")];
+    const { highRecurrence, lowRecurrence } = classifyCarryForwardByRecurrence(pending, [], { recurrenceThreshold: 3 });
+    assert.equal(lowRecurrence.length, 1, "item with no history is low-recurrence");
+    assert.equal(highRecurrence.length, 0);
   });
 });

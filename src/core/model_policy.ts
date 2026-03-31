@@ -593,6 +593,51 @@ export function routeModelWithCompletionROI(
 }
 
 /**
+/**
+ * Route model selection by combining uncertainty-awareness with quality-floor enforcement.
+ *
+ * Priority:
+ *   1. Apply uncertainty-aware routing as the primary mechanism.
+ *   2. Check whether the selected candidate meets the quality floor.
+ *   3. If not, fall back to cost-aware quality-floor routing so no model below the
+ *      minimum bar is dispatched. Uncertainty routing operates *under* the floor.
+ *
+ * @param taskHints    - task scope for complexity classification
+ * @param modelOptions - model pool; defaultModel / strongModel / efficientModel and optional qualityByModel overrides
+ * @param history      - routing history for uncertainty computation (recentROI)
+ * @param qualityFloor - minimum acceptable quality score (0-1; default 0.7)
+ */
+export function routeModelUnderQualityFloor(
+  taskHints: TaskHints = {},
+  modelOptions: ModelOptions & { qualityByModel?: Record<string, number> } = {},
+  history: RoutingHistory = {},
+  qualityFloor = 0.7,
+): { model: string; tier: string; reason: string; uncertainty: string; meetsQualityFloor: boolean } {
+  const uncertaintyResult = routeModelWithUncertainty(taskHints, modelOptions, history);
+
+  const qualityByModel = modelOptions.qualityByModel || {};
+  const resolveQuality = (name: string): number => {
+    const key = String(name || "").toLowerCase();
+    return qualityByModel[name] ?? qualityByModel[key] ?? DEFAULT_MODEL_QUALITY[key] ?? 0.75;
+  };
+  const candidateQuality = resolveQuality(uncertaintyResult.model);
+
+  if (candidateQuality >= qualityFloor) {
+    return { ...uncertaintyResult, meetsQualityFloor: true };
+  }
+
+  // Uncertainty-selected model is below quality floor - upgrade via cost-aware routing.
+  const floorResult = routeModelByCost(taskHints, modelOptions, qualityFloor);
+  return {
+    model: floorResult.model,
+    tier: floorResult.tier,
+    reason: `quality-floor-upgrade(uncertainty-selected=${uncertaintyResult.model} score=${candidateQuality.toFixed(2)} < floor=${qualityFloor}): ${floorResult.reason}`,
+    uncertainty: uncertaintyResult.uncertainty,
+    meetsQualityFloor: floorResult.meetsQualityFloor,
+  };
+}
+
+/**
  * Compute the average realized ROI for a complexity tier from the ledger.
  *
  * Only realized entries (realizedAt !== null) for the requested tier are

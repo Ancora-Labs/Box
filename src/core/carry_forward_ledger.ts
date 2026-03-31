@@ -547,3 +547,50 @@ export function compressLedger(ledger: any[]): {
 
   return { compressedCount, clustersProcessed, retirementIds };
 }
+
+/**
+ * Classify carry-forward pending entries by recurrence count.
+ *
+ * High-recurrence items (appearing >= recurrenceThreshold times across all
+ * postmortem entries) are always surfaced in prompts; low-recurrence items
+ * can be capped to reduce prompt bulk.
+ *
+ * @param pendingEntries  - carry-forward entries with followUpNeeded=true (already deduped)
+ * @param allPostmortemEntries - full postmortem entry list used to count recurrences
+ * @param opts.recurrenceThreshold - minimum count to classify as high-recurrence (default: 3)
+ * @returns {{ highRecurrence: any[], lowRecurrence: any[] }}
+ */
+export function classifyCarryForwardByRecurrence(
+  pendingEntries: any[],
+  allPostmortemEntries: any[],
+  opts: { recurrenceThreshold?: number } = {}
+): { highRecurrence: any[]; lowRecurrence: any[] } {
+  const threshold = opts.recurrenceThreshold ?? 3;
+  const pending = Array.isArray(pendingEntries) ? pendingEntries : [];
+  const allEntries = Array.isArray(allPostmortemEntries) ? allPostmortemEntries : [];
+
+  if (pending.length === 0) return { highRecurrence: [], lowRecurrence: [] };
+
+  // Count how many times each pending task fingerprint appears in all postmortem entries.
+  const recurrenceMap = new Map<string, number>();
+  for (const entry of allEntries) {
+    const text = String(entry.followUpTask || entry.lessonLearned || "");
+    const fp = computeFingerprint(text);
+    if (fp) recurrenceMap.set(fp, (recurrenceMap.get(fp) ?? 0) + 1);
+  }
+
+  const highRecurrence: any[] = [];
+  const lowRecurrence: any[] = [];
+
+  for (const entry of pending) {
+    const fp = computeFingerprint(String(entry.followUpTask || ""));
+    const count = fp ? (recurrenceMap.get(fp) ?? 1) : 1;
+    if (count >= threshold) {
+      highRecurrence.push({ ...entry, _recurrenceCount: count });
+    } else {
+      lowRecurrence.push({ ...entry, _recurrenceCount: count });
+    }
+  }
+
+  return { highRecurrence, lowRecurrence };
+}
