@@ -6,6 +6,8 @@ import {
   CARRY_FORWARD_MAX_TOKENS,
   BEHAVIOR_PATTERNS_MAX_TOKENS,
   PROMETHEUS_STATIC_SECTIONS,
+  PROMETHEUS_CYCLE_DELTA_SECTION_NAMES,
+  PROMETHEUS_STATIC_SECTION_NAMES,
   computeDriftConfidencePenalty,
   DRIFT_REMEDIATION_THRESHOLD,
   computeBottleneckCoverage,
@@ -23,7 +25,7 @@ import {
   MAX_DECOMPOSITION_PLANS,
   DECOMPOSITION_CAP_REASON,
 } from "../../src/core/prometheus.js";
-import { compilePrompt } from "../../src/core/prompt_compiler.js";
+import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
 import { isNonSpecificVerification, validatePlanContract } from "../../src/core/plan_contract_validator.js";
 
 describe("normalizePrometheusParsedOutput", () => {
@@ -2432,5 +2434,103 @@ describe("checkDecompositionCaps", () => {
     const plans = Array.from({ length: MAX_DECOMPOSITION_PLANS }, (_, i) => ({ task: `Task ${i + 1}` }));
     const result = checkDecompositionCaps(plans);
     assert.equal(result.capped, false, "exactly MAX_DECOMPOSITION_PLANS must not trigger capping");
+  });
+});
+
+// ── Task 2: Cycle-delta section prioritization ─────────────────────────────────
+
+describe("PROMETHEUS_CYCLE_DELTA_SECTION_NAMES — cycle-delta section priority", () => {
+  const DELTA_NAMES = ["research-intelligence", "topic-memory", "behavior-patterns", "carry-forward"];
+
+  it("exports PROMETHEUS_CYCLE_DELTA_SECTION_NAMES as a non-empty ReadonlySet", () => {
+    assert.ok(PROMETHEUS_CYCLE_DELTA_SECTION_NAMES instanceof Set,
+      "PROMETHEUS_CYCLE_DELTA_SECTION_NAMES must be a Set");
+    assert.ok(PROMETHEUS_CYCLE_DELTA_SECTION_NAMES.size > 0,
+      "PROMETHEUS_CYCLE_DELTA_SECTION_NAMES must not be empty");
+  });
+
+  it("includes all expected cycle-delta section names", () => {
+    for (const name of DELTA_NAMES) {
+      assert.ok(PROMETHEUS_CYCLE_DELTA_SECTION_NAMES.has(name),
+        `PROMETHEUS_CYCLE_DELTA_SECTION_NAMES must include "${name}"`);
+    }
+  });
+
+  it("cycle-delta sections are disjoint from static section names", () => {
+    for (const name of PROMETHEUS_CYCLE_DELTA_SECTION_NAMES) {
+      assert.equal(PROMETHEUS_STATIC_SECTION_NAMES.has(name), false,
+        `"${name}" must not appear in both delta and static section name sets`);
+    }
+  });
+
+  it("cycle-delta sections survive under token pressure when marked required:true", () => {
+    const deltaSection = Object.assign(
+      { name: "research-intelligence", content: "RESEARCH_DELTA_CONTENT" },
+      { required: true }
+    );
+    const largeOptional = { name: "repo-file-listing", content: "R".repeat(100_000) };
+    const result = compilePrompt([deltaSection, largeOptional], { tokenBudget: 50 });
+    assert.ok(result.includes("RESEARCH_DELTA_CONTENT"),
+      "required cycle-delta section must survive token pressure");
+  });
+
+  it("optional large sections are dropped under token pressure, preserving cycle-delta content", () => {
+    const deltaSection = Object.assign(
+      { name: "carry-forward", content: "CARRY_FORWARD_DATA" },
+      { required: true }
+    );
+    const optionalLarge = { name: "repo-file-listing", content: "REPO_LISTING_DATA_".repeat(5_000) };
+    const result = compilePrompt([deltaSection, optionalLarge], { tokenBudget: 50 });
+    assert.ok(result.includes("CARRY_FORWARD_DATA"),
+      "required cycle-delta content must be retained");
+    assert.equal(result.includes("REPO_LISTING_DATA_"), false,
+      "large optional section must be dropped under tight token budget");
+  });
+});
+
+describe("PROMETHEUS_STATIC_SECTION_NAMES — cache eligibility", () => {
+  it("exports PROMETHEUS_STATIC_SECTION_NAMES as a non-empty ReadonlySet", () => {
+    assert.ok(PROMETHEUS_STATIC_SECTION_NAMES instanceof Set,
+      "PROMETHEUS_STATIC_SECTION_NAMES must be a Set");
+    assert.ok(PROMETHEUS_STATIC_SECTION_NAMES.size > 0,
+      "PROMETHEUS_STATIC_SECTION_NAMES must not be empty");
+  });
+
+  it("contains the name of every static section", () => {
+    for (const [key, sec] of Object.entries(PROMETHEUS_STATIC_SECTIONS)) {
+      assert.ok(PROMETHEUS_STATIC_SECTION_NAMES.has(sec.name),
+        `static section "${key}" (name="${sec.name}") must appear in PROMETHEUS_STATIC_SECTION_NAMES`);
+    }
+  });
+
+  it("markCacheableSegments marks static sections as cacheable using PROMETHEUS_STATIC_SECTION_NAMES", () => {
+    const sections = [
+      { ...PROMETHEUS_STATIC_SECTIONS.evolutionDirective },
+      { name: "research-intelligence", content: "some research" },
+      { name: "context", content: "dynamic context" },
+    ];
+    const marked = markCacheableSegments(sections, {
+      stableNames: Array.from(PROMETHEUS_STATIC_SECTION_NAMES),
+    });
+
+    const evolutionEntry = marked.find(s => s.name === PROMETHEUS_STATIC_SECTIONS.evolutionDirective.name);
+    const researchEntry = marked.find(s => s.name === "research-intelligence");
+
+    assert.equal(evolutionEntry?.cacheable, true,
+      "static section evolutionDirective must be marked cacheable");
+    assert.equal(researchEntry?.cacheable, false,
+      "cycle-delta section research-intelligence must NOT be marked cacheable");
+  });
+
+  it("negative path: cycle-delta sections are NOT marked cacheable by default", () => {
+    const sections = Array.from(PROMETHEUS_CYCLE_DELTA_SECTION_NAMES).map(name => ({
+      name,
+      content: `content for ${name}`,
+    }));
+    const marked = markCacheableSegments(sections);
+    for (const s of marked) {
+      assert.equal(s.cacheable, false,
+        `cycle-delta section "${s.name}" must not be cacheable by default`);
+    }
   });
 });

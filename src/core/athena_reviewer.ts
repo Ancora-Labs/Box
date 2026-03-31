@@ -15,6 +15,7 @@
  */
 
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
@@ -53,6 +54,36 @@ import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_sch
 export const ATHENA_AGENT_ID = "athena";
 const ATHENA_PLAN_REVIEW_TIMEOUT_MS = 12 * 60 * 1000;
 const ATHENA_REVIEW_HEARTBEAT_MS = 60_000;
+
+// ── Deterministic plan-batch fingerprinting ───────────────────────────────────
+
+/**
+ * Compute a stable 16-hex-char fingerprint of a plan batch.
+ *
+ * Only semantic fields that define plan intent are hashed (task, role, wave,
+ * riskLevel, verification, acceptance_criteria). Runtime metadata
+ * (analyzedAt, owner, etc.) is excluded so that re-runs with the same
+ * logical plan batch produce the same fingerprint.
+ *
+ * Used by the auto-approve path: if the batch is unchanged and all plans
+ * are low-risk, AI review can be skipped when the last review was approved.
+ */
+export function computePlanBatchFingerprint(plans: any[]): string {
+  if (!Array.isArray(plans) || plans.length === 0) return "";
+  const stableFields = plans.map(p => ({
+    task: String(p.task || "").trim(),
+    role: String(p.role || "").trim(),
+    wave: Number(p.wave) || 1,
+    riskLevel: String(p.riskLevel || "low").trim().toLowerCase(),
+    verification: String(p.verification || "").trim(),
+    acceptance_criteria: (Array.isArray(p.acceptance_criteria) ? p.acceptance_criteria : [])
+      .map((c: any) => String(c || "").trim())
+      .filter(Boolean)
+      .sort(),
+  }));
+  const serialized = JSON.stringify(stableFields);
+  return createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+}
 
 function resolveAthenaPlanReviewTimeoutMs(config): number {
   const raw = Number(
@@ -1714,6 +1745,52 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
     };
   }
 
+  // ── Deterministic auto-approve path (low-risk unchanged plan batches) ─────
+  // When ALL plans are low-risk and the plan batch fingerprint matches the last
+  // approved review, skip the AI call and return the cached result immediately.
+  // High-risk plans (riskLevel="high") always require fresh AI review.
+  // The quality pre-gate and pre-mortem gate above still run unconditionally.
+  const allPlansLowRisk = plans.every(
+    p => String(p.riskLevel || "low").trim().toLowerCase() !== "high"
+  );
+  if (allPlansLowRisk && config?.runtime?.disablePlanReviewCache !== true) {
+    const batchFingerprint = computePlanBatchFingerprint(plans);
+    try {
+      const lastReview = await readJson(
+        path.join(stateDir, "athena_plan_review.json"),
+        null
+      );
+      if (
+        lastReview !== null &&
+        lastReview.approved === true &&
+        typeof lastReview.planBatchFingerprint === "string" &&
+        lastReview.planBatchFingerprint === batchFingerprint
+      ) {
+        const shortFp = batchFingerprint.slice(0, 8);
+        await appendProgress(
+          config,
+          `[ATHENA] Plan review AUTO-APPROVED — low-risk unchanged batch (fingerprint=${shortFp})`
+        );
+        chatLog(
+          stateDir,
+          athenaName,
+          `Plan auto-approved (unchanged low-risk batch, fingerprint=${shortFp})`
+        );
+        return {
+          ...lastReview,
+          autoApproved: true,
+          autoApproveReason: {
+            code: "LOW_RISK_UNCHANGED",
+            message: "All plans are low-risk and unchanged since last approval"
+          },
+          reviewedAt: new Date().toISOString(),
+        };
+      }
+    } catch {
+      // Cache read is best-effort; fall through to AI review on any error.
+    }
+  }
+
   const plansSummary = plans.map((p, i) => {
     const preMortemTag = p.riskLevel === "high" ? " [HIGH-RISK:premortem=present]" : "";
     const targetFiles = Array.isArray(p.target_files)
@@ -2012,7 +2089,10 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
     result.patchedPlans = handoff.plans;
   }
 
-  await writeJson(path.join(stateDir, "athena_plan_review.json"), result);
+  await writeJson(path.join(stateDir, "athena_plan_review.json"), {
+    ...result,
+    planBatchFingerprint: computePlanBatchFingerprint(plans),
+  });
 
   if (approved) {
     const fixCount = result.appliedFixes.length;
