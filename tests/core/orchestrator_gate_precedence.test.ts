@@ -196,12 +196,16 @@ describe("evaluatePreDispatchGovernanceGate — gateIndex on blocked results", (
     );
   });
 
-  it("dependency readiness gate has highest precedence number (fires last)", () => {
+  it("rolling completion yield gate has highest precedence number (fires last)", () => {
     const maxPrecedence = Math.max(...Object.values(GATE_PRECEDENCE));
     assert.equal(
-      GATE_PRECEDENCE.DEPENDENCY_READINESS,
+      GATE_PRECEDENCE.ROLLING_COMPLETION_YIELD,
       maxPrecedence,
-      "DEPENDENCY_READINESS must have the highest precedence number (fires last)"
+      "ROLLING_COMPLETION_YIELD must have the highest precedence number (fires last)"
+    );
+    assert.ok(
+      GATE_PRECEDENCE.DEPENDENCY_READINESS < GATE_PRECEDENCE.ROLLING_COMPLETION_YIELD,
+      "DEPENDENCY_READINESS must fire before ROLLING_COMPLETION_YIELD"
     );
   });
 
@@ -496,6 +500,98 @@ describe("AUTO_APPROVE_DISPATCH_SIGNAL structural invariants", () => {
     for (let i = 0; i < values.length; i++) {
       assert.equal(values[i], i + 1,
         `GATE_PRECEDENCE must remain contiguous from 1 — gap detected at index ${i} (value=${values[i]})`);
+    }
+  });
+});
+
+
+// ── Rolling completion yield gate integration ─────────────────────────────────
+
+describe("evaluatePreDispatchGovernanceGate — ROLLING_COMPLETION_YIELD gate", () => {
+  it("BLOCK_REASON.ROLLING_YIELD_THROTTLE is a non-empty string", () => {
+    assert.equal(typeof BLOCK_REASON.ROLLING_YIELD_THROTTLE, "string");
+    assert.ok(BLOCK_REASON.ROLLING_YIELD_THROTTLE.length > 0);
+  });
+
+  it("GATE_PRECEDENCE.ROLLING_COMPLETION_YIELD is 10 (fires last)", () => {
+    assert.equal(GATE_PRECEDENCE.ROLLING_COMPLETION_YIELD, 10);
+  });
+
+  it("rolling yield gate does not fire when no usage log exists (fail-open)", async () => {
+    // passAllConfig uses a stateDir that has no premium_usage_log.json
+    const result = await evaluatePreDispatchGovernanceGate(passAllConfig(), [], "yield-pass-test");
+    assert.equal(result.blocked, false, "must fail-open when no usage log exists");
+    assert.equal(result.gateIndex, undefined, "gateIndex must be absent on pass");
+  });
+
+  it("rolling yield gate fires when recent dispatch yield is at/below throttle threshold", async () => {
+    const stateDir = path.join(os.tmpdir(), `box-yield-gate-${Date.now()}`);
+    await fs.mkdir(stateDir, { recursive: true });
+    try {
+      // Write 5 all-failed dispatches → yield = 0.0 ≤ 0.2 → throttled
+      const entries = Array.from({ length: 5 }, (_, i) => ({
+        role: "worker",
+        outcome: "failed",
+        timestamp: new Date().toISOString(),
+        taskId: `task-${i}`,
+      }));
+      await fs.writeFile(
+        path.join(stateDir, "premium_usage_log.json"),
+        JSON.stringify(entries),
+        "utf8"
+      );
+
+      const config = {
+        systemGuardian: { enabled: false },
+        governance: { freeze: { active: false } },
+        carryForward: { maxCriticalOverdue: 999 },
+        budget: { enabled: false },
+        workerPool: { minLanes: 1 },
+        paths: { stateDir },
+        runtime: {},
+      };
+
+      const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(config, [], "yield-block-test");
+      assert.equal(result.blocked, true, "low yield must block dispatch");
+      assert.ok(
+        result.reason?.startsWith(BLOCK_REASON.ROLLING_YIELD_THROTTLE),
+        `reason must start with '${BLOCK_REASON.ROLLING_YIELD_THROTTLE}' — got: ${result.reason}`
+      );
+      assert.equal(result.gateIndex, GATE_PRECEDENCE.ROLLING_COMPLETION_YIELD,
+        "gateIndex must equal GATE_PRECEDENCE.ROLLING_COMPLETION_YIELD");
+      assert.ok("rollingYieldContract" in result, "rollingYieldContract must be present on rolling yield block");
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("negative path: rolling yield gate does not fire when yield is healthy", async () => {
+    const stateDir = path.join(os.tmpdir(), `box-yield-pass-${Date.now()}`);
+    await fs.mkdir(stateDir, { recursive: true });
+    try {
+      // 5 dispatches, 4 done → yield = 0.8 > threshold → pass
+      const entries = [
+        ...Array.from({ length: 4 }, () => ({ role: "w", outcome: "done", timestamp: new Date().toISOString() })),
+        { role: "w", outcome: "failed", timestamp: new Date().toISOString() },
+      ];
+      await fs.writeFile(
+        path.join(stateDir, "premium_usage_log.json"),
+        JSON.stringify(entries),
+        "utf8"
+      );
+      const config = {
+        systemGuardian: { enabled: false },
+        governance: { freeze: { active: false } },
+        carryForward: { maxCriticalOverdue: 999 },
+        budget: { enabled: false },
+        workerPool: { minLanes: 1 },
+        paths: { stateDir },
+        runtime: {},
+      };
+      const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(config, [], "yield-healthy-test");
+      assert.equal(result.blocked, false, "healthy yield must not block dispatch");
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
     }
   });
 });
