@@ -12,6 +12,7 @@ import {
   markCacheableSegments,
   CACHE_STABLE_SECTION_NAMES,
   markCycleDeltaSectionsRequired,
+  PROMPT_BUDGET_PARTITION,
 } from "../../src/core/prompt_compiler.js";
 
 describe("prompt_compiler", () => {
@@ -384,5 +385,145 @@ describe("markCycleDeltaSectionsRequired()", () => {
     for (const s of result) {
       assert.equal(s.required, true, `cycle-delta section "${s.name}" must be required`);
     }
+  });
+});
+
+// ── PROMPT_BUDGET_PARTITION — three-pass deterministic trimming ───────────────
+
+describe("PROMPT_BUDGET_PARTITION", () => {
+  it("exports INVARIANT, REQUIRED, EXPANDABLE string constants", () => {
+    assert.equal(PROMPT_BUDGET_PARTITION.INVARIANT,  "invariant");
+    assert.equal(PROMPT_BUDGET_PARTITION.REQUIRED,   "required");
+    assert.equal(PROMPT_BUDGET_PARTITION.EXPANDABLE, "expandable");
+  });
+
+  it("is frozen (immutable)", () => {
+    assert.ok(Object.isFrozen(PROMPT_BUDGET_PARTITION));
+  });
+});
+
+describe("compilePrompt — three-pass budget trimming", () => {
+  it("INVARIANT section is included even when it exceeds tokenBudget", () => {
+    const big = Object.assign(section("core", "I".repeat(2000)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
+    });
+    const result = compilePrompt([big], { tokenBudget: 10 });
+    assert.ok(result.includes("I".repeat(100)), "invariant section must be present despite budget");
+  });
+
+  it("INVARIANT section bypasses section-level maxTokens cap", () => {
+    const big = Object.assign(section("core", "X".repeat(400)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
+      maxTokens: 5, // would normally truncate to ~20 chars
+    });
+    const result = compilePrompt([big]);
+    // Should not be truncated — invariant bypasses maxTokens
+    assert.ok(!result.includes("[...truncated to section budget]"), "invariant must bypass maxTokens");
+    assert.equal(result.length, 400);
+  });
+
+  it("REQUIRED section is always included and subject to section maxTokens", () => {
+    const req = Object.assign(section("req", "R".repeat(400)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED,
+      maxTokens: 5, // cap at ~20 chars
+    });
+    const result = compilePrompt([req], { tokenBudget: 5000 });
+    assert.ok(result.includes("[...truncated to section budget]"), "required section must be truncated by maxTokens");
+  });
+
+  it("EXPANDABLE section is dropped when budget is exhausted by invariant + required", () => {
+    const inv = Object.assign(section("inv", "A".repeat(200)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
+    }); // ~50 tokens
+    const req = Object.assign(section("req", "B".repeat(200)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED,
+    }); // ~50 tokens
+    const exp = Object.assign(section("exp", "EXPANDABLE_DATA"), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE,
+    }); // ~4 tokens — but budget is already exhausted
+    const result = compilePrompt([inv, req, exp], { tokenBudget: 100 });
+    assert.ok(result.includes("A".repeat(200)), "invariant must be present");
+    assert.ok(result.includes("B".repeat(200)), "required must be present");
+    assert.ok(!result.includes("EXPANDABLE_DATA"), "expandable must be dropped when budget exhausted");
+  });
+
+  it("EXPANDABLE sections fill remaining budget after invariant + required", () => {
+    const inv = Object.assign(section("inv", "A".repeat(40)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
+    }); // ~10 tokens
+    const req = Object.assign(section("req", "B".repeat(40)), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED,
+    }); // ~10 tokens
+    const exp = Object.assign(section("exp", "FITS"), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE,
+    }); // 1 token — should fit in budget=100
+    const result = compilePrompt([inv, req, exp], { tokenBudget: 100 });
+    assert.ok(result.includes("FITS"), "expandable section must be included when budget allows");
+  });
+
+  it("original section order is preserved across all three partitions", () => {
+    const s1 = Object.assign(section("first",  "AAA"), { partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE });
+    const s2 = Object.assign(section("second", "BBB"), { partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED });
+    const s3 = Object.assign(section("third",  "CCC"), { partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT });
+    const s4 = Object.assign(section("fourth", "DDD"), { partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE });
+    const result = compilePrompt([s1, s2, s3, s4], { tokenBudget: 10000 });
+    const posA = result.indexOf("AAA");
+    const posB = result.indexOf("BBB");
+    const posC = result.indexOf("CCC");
+    const posD = result.indexOf("DDD");
+    assert.ok(posA < posB && posB < posC && posC < posD, "section order must be preserved across partitions");
+  });
+
+  it("backward compat: required:true without partitionBudget behaves as REQUIRED partition", () => {
+    const req = { ...section("req", "MUST_KEEP"), required: true };
+    const exp = section("exp", "X".repeat(400)); // ~100 tokens, no budget for it
+    const result = compilePrompt([exp, req], { tokenBudget: 10 });
+    assert.ok(result.includes("MUST_KEEP"), "required:true section must be retained (backward compat)");
+  });
+
+  it("negative path: all-expandable sections drop when budget is zero-like", () => {
+    const s1 = Object.assign(section("a", "A".repeat(400)), { partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE });
+    const s2 = Object.assign(section("b", "B".repeat(400)), { partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE });
+    // tokenBudget: 5 — only ~20 chars fit; first expandable should fit if ≤ 5 tokens
+    const tiny = Object.assign(section("tiny", "Hi"), { partitionBudget: PROMPT_BUDGET_PARTITION.EXPANDABLE });
+    const result = compilePrompt([s1, s2, tiny], { tokenBudget: 5 });
+    assert.ok(!result.includes("A".repeat(100)), "large expandable must be dropped");
+    assert.ok(!result.includes("B".repeat(100)), "large expandable must be dropped");
+  });
+});
+
+describe("markCycleDeltaSectionsRequired — partitionBudget field", () => {
+  const CYCLE_DELTA: ReadonlySet<string> = new Set(["research-intelligence", "carry-forward"]);
+
+  it("sets partitionBudget: REQUIRED on cycle-delta sections", () => {
+    const sections = [section("research-intelligence", "data")];
+    const result = markCycleDeltaSectionsRequired(sections, CYCLE_DELTA);
+    assert.equal(result[0].partitionBudget, PROMPT_BUDGET_PARTITION.REQUIRED);
+  });
+
+  it("sets partitionBudget: EXPANDABLE on non-delta sections", () => {
+    const sections = [section("context", "some context")];
+    const result = markCycleDeltaSectionsRequired(sections, CYCLE_DELTA);
+    assert.equal(result[0].partitionBudget, PROMPT_BUDGET_PARTITION.EXPANDABLE);
+  });
+
+  it("preserves existing partitionBudget on non-delta sections", () => {
+    const sections = [Object.assign(section("role", "You are X."), {
+      partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
+    })];
+    const result = markCycleDeltaSectionsRequired(sections, CYCLE_DELTA);
+    assert.equal(result[0].partitionBudget, PROMPT_BUDGET_PARTITION.INVARIANT,
+      "existing partitionBudget must be preserved on non-delta sections");
+  });
+
+  it("cycle-delta sections with partitionBudget:REQUIRED survive compilePrompt budget pressure", () => {
+    const sections = [
+      section("research-intelligence", "RESEARCH_DELTA"),
+      section("large-context", "Z".repeat(100_000)),
+    ];
+    const withPartitions = markCycleDeltaSectionsRequired(sections, CYCLE_DELTA);
+    const result = compilePrompt(withPartitions, { tokenBudget: 50 });
+    assert.ok(result.includes("RESEARCH_DELTA"), "cycle-delta section must survive token pressure");
+    assert.ok(!result.includes("Z".repeat(10)), "large expandable must be dropped");
   });
 });

@@ -38,7 +38,7 @@ import {
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
 import { validateAllPlans, PLAN_VIOLATION_SEVERITY, PACKET_VIOLATION_CODE } from "./plan_contract_validator.js";
-import { section, compilePrompt, markCacheableSegments } from "./prompt_compiler.js";
+import { section, compilePrompt, markCacheableSegments, PROMPT_BUDGET_PARTITION } from "./prompt_compiler.js";
 import { computeFingerprint, classifyCarryForwardByRecurrence } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
 import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
@@ -1861,11 +1861,11 @@ function buildNarrativeFallbackParsed(aiResult) {
  * shared, tested, and referenced by name rather than being buried in a template literal.
  */
 
-/** Build a section marked as required — always retained under any token-budget pressure in compileTieredPrompt. */
-const rqs = (name: string, content: string) => Object.assign(section(name, content), { required: true as const });
+/** Build a section marked as invariant — always retained in full, never trimmed by maxTokens or global budget. */
+const ivs = (name: string, content: string) => Object.assign(section(name, content), { required: true as const, partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT });
 
 export const PROMETHEUS_STATIC_SECTIONS = Object.freeze({
-  evolutionDirective: rqs("evolution-directive", `## EVOLUTION DIRECTIVE
+  evolutionDirective: ivs("evolution-directive", `## EVOLUTION DIRECTIVE
 You are NOT a risk-reducing planner. You are NOT a security-first hardening auditor.
 You are the system's META-IMPROVER: your primary objective is TOTAL SYSTEM CAPACITY INCREASE.
 "Capacity" means: more capability delivered per cycle, deeper reasoning, faster adaptation, better learning, higher task quality, smarter model usage — across every dimension simultaneously.
@@ -1886,7 +1886,7 @@ You MUST analyze and propose improvements for EACH of these:
 9. Cost efficiency (premium requests per useful outcome, waste reduction)
 10. Security (vulnerability prevention, access control, governance — ONE dimension among equals)`),
 
-  mandatorySelfCritique: rqs("mandatory-self-critique", `## MANDATORY SELF-CRITIQUE SECTIONS
+  mandatorySelfCritique: ivs("mandatory-self-critique", `## MANDATORY SELF-CRITIQUE SECTIONS
 You MUST include a dedicated self-critique section for EACH of the following components.
 Each section must answer: "What is this component doing well?", "What is it doing poorly?", and "How specifically should it improve next cycle?"
 Do NOT just say "there is a problem" — produce a concrete improvement proposal for each.
@@ -1899,7 +1899,7 @@ Do NOT just say "there is a problem" — produce a concrete improvement proposal
 6. **Prompt Layer Self-Critique** — Are runtime prompts getting the most out of model capacity? What prompt patterns waste tokens or produce shallow output?
 7. **Verification System Self-Critique** — Is verification catching real failures or generating false signals? Are verification commands reliable across platforms?`),
 
-  mandatoryOperatorQuestions: rqs("mandatory-operator-questions", `## MANDATORY_OPERATOR_QUESTIONS
+  mandatoryOperatorQuestions: ivs("mandatory-operator-questions", `## MANDATORY_OPERATOR_QUESTIONS
 You MUST answer these explicitly in a dedicated section titled "Mandatory Answers" before the rest of the plan:
 1. Is wave-based plan distribution truly the most efficient model for this system?
 2. Should it be preserved, improved, or removed?
@@ -1909,7 +1909,7 @@ You MUST answer these explicitly in a dedicated section titled "Mandatory Answer
 6. Does the worker behavior model and code structure help self-improvement, or block it?
 7. In this cycle, what are the highest-leverage changes that make the system not only safer, but also smarter and deeper in reasoning?`),
 
-  outputFormat: rqs("output-format", `## OUTPUT FORMAT
+  outputFormat: ivs("output-format", `## OUTPUT FORMAT
 Write a substantial senior-level narrative master plan.
 The plan must be centered on TOTAL SYSTEM CAPACITY INCREASE, not generic hardening.
 First analyze how BOX can increase its capacity in every dimension, then derive what should change.
@@ -2962,23 +2962,27 @@ Consider whether the root causes are:
 
   // ── Build prompt from static and dynamic sections ────────────────────────
   // Static sections are invariant across cycles and stored in PROMETHEUS_STATIC_SECTIONS.
-  // Dynamic (cycle-delta) sections carry per-cycle data; they are marked required:true so
+  // Dynamic (cycle-delta) sections carry per-cycle data; they are marked REQUIRED so
   // that under token-budget pressure they are retained over large optional context such as
-  // the repo file listing. Static sections are marked cacheable via markCacheableSegments
-  // so that prompt-caching layers can avoid re-tokenising their unchanged content.
+  // the repo file listing. maxTokens caps prevent individual sections from consuming the
+  // entire budget — trimming is applied deterministically. Static sections are marked
+  // INVARIANT (via ivs() in PROMETHEUS_STATIC_SECTIONS) so they are never trimmed.
+  // Contextual sections (repo-file-listing, drift-summary, repair-feedback) are EXPANDABLE
+  // — they fill remaining budget and are dropped when budget is exhausted.
   const carryFwdSection = Object.assign(
     section("carry-forward", carryForwardSection),
-    { maxTokens: CARRY_FORWARD_MAX_TOKENS, required: true as const }
+    { maxTokens: CARRY_FORWARD_MAX_TOKENS, required: true as const, partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED }
   );
   const behaviorSection = Object.assign(
     section("behavior-patterns", behaviorPatternsSection),
-    { maxTokens: BEHAVIOR_PATTERNS_MAX_TOKENS, required: true as const }
+    { maxTokens: BEHAVIOR_PATTERNS_MAX_TOKENS, required: true as const, partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED }
   );
   const researchSection = Object.assign(
     section("research-intelligence", researchSectionText),
     {
       maxTokens: Number(config?.runtime?.prometheusResearchSectionMaxTokens ?? DEFAULT_PROMETHEUS_RESEARCH_SECTION_MAX_TOKENS),
       required: true as const,
+      partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED,
     }
   );
   const topicMemSection = Object.assign(
@@ -2986,21 +2990,28 @@ Consider whether the root causes are:
     {
       maxTokens: Number(config?.runtime?.prometheusTopicMemoryMaxTokens ?? TOPIC_MEMORY_MAX_TOKENS),
       required: true as const,
+      partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED,
     }
   );
   const rawSections = [
-    section("context", `TARGET REPO: ${config.env?.targetRepo || "unknown"}\nREPO PATH: ${repoRoot}\n\n## OPERATOR OBJECTIVE\n${userPrompt}`),
+    // REQUIRED: task context and planning policy must survive token pressure
+    Object.assign(section("context", `TARGET REPO: ${config.env?.targetRepo || "unknown"}\nREPO PATH: ${repoRoot}\n\n## OPERATOR OBJECTIVE\n${userPrompt}`), { required: true as const, partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED }),
+    // INVARIANT: static sections that define Prometheus identity — never trimmed
     PROMETHEUS_STATIC_SECTIONS.evolutionDirective,
     PROMETHEUS_STATIC_SECTIONS.mandatorySelfCritique,
     PROMETHEUS_STATIC_SECTIONS.mandatoryOperatorQuestions,
-    section("planning-policy", `## PLANNING POLICY\n- maxTasks: ${planningPolicy.maxTasks > 0 ? planningPolicy.maxTasks : "UNLIMITED — FILL YOUR ENTIRE CONTEXT WINDOW"}\n- maxWorkersPerWave: ${planningPolicy.maxWorkersPerWave}\n- preferFewestWorkers: ${planningPolicy.preferFewestWorkers}\n- requireDependencyAwareWaves: ${planningPolicy.requireDependencyAwareWaves}\n- researchCoverageTarget: ${researchCoverageTarget > 0 ? researchCoverageTarget : "AUTO(0 when no research artifacts)"}\n- Do NOT create extra waves without explicit task-level dependsOn/dependencies evidence.\n- Avoid single-task waves unless dependency constraints force them.\n- CRITICAL: You MUST use your FULL model capacity. Do NOT stop early. Produce as many materially distinct actionable improvement packets as you can find. Keep generating plans until you have exhausted all meaningful improvement opportunities across ALL dimensions. There is NO plan count limit.\n- If EXTERNAL RESEARCH INTELLIGENCE is present, convert unresolved high-confidence topics into actionable packets (with concrete target_files + verification), not vague notes.\n- If ACCUMULATED TOPIC KNOWLEDGE is present, leverage all accumulated knowledge from previous runs to produce deeper, more informed plans. Do NOT re-research topics marked as completed.`),
+    // REQUIRED: planning policy drives packet generation — must be present
+    Object.assign(section("planning-policy", `## PLANNING POLICY\n- maxTasks: ${planningPolicy.maxTasks > 0 ? planningPolicy.maxTasks : "UNLIMITED — FILL YOUR ENTIRE CONTEXT WINDOW"}\n- maxWorkersPerWave: ${planningPolicy.maxWorkersPerWave}\n- preferFewestWorkers: ${planningPolicy.preferFewestWorkers}\n- requireDependencyAwareWaves: ${planningPolicy.requireDependencyAwareWaves}\n- researchCoverageTarget: ${researchCoverageTarget > 0 ? researchCoverageTarget : "AUTO(0 when no research artifacts)"}\n- Do NOT create extra waves without explicit task-level dependsOn/dependencies evidence.\n- Avoid single-task waves unless dependency constraints force them.\n- CRITICAL: You MUST use your FULL model capacity. Do NOT stop early. Produce as many materially distinct actionable improvement packets as you can find. Keep generating plans until you have exhausted all meaningful improvement opportunities across ALL dimensions. There is NO plan count limit.\n- If EXTERNAL RESEARCH INTELLIGENCE is present, convert unresolved high-confidence topics into actionable packets (with concrete target_files + verification), not vague notes.\n- If ACCUMULATED TOPIC KNOWLEDGE is present, leverage all accumulated knowledge from previous runs to produce deeper, more informed plans. Do NOT re-research topics marked as completed.`), { required: true as const, partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED }),
+    // REQUIRED cycle-delta sections (with maxTokens caps for deterministic trimming)
     researchSection,
     topicMemSection,
     behaviorSection,
     carryFwdSection,
+    // EXPANDABLE: contextual sections fill remaining budget; dropped when exhausted
     section("repo-file-listing", repoFileListingSection),
     section("drift-summary", driftSummarySection),
     section("repair-feedback", repairFeedbackSection),
+    // INVARIANT: output format defines the required response structure — never dropped
     PROMETHEUS_STATIC_SECTIONS.outputFormat,
   ];
   // Mark static sections as cacheable so prompt-caching layers can skip re-tokenising them.
