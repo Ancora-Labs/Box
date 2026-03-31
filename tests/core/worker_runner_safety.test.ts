@@ -97,3 +97,59 @@ describe("worker_runner artifact hard-block gate", () => {
     assert.equal(gaps.length, 2, "prose-only done must produce MISSING_SHA + MISSING_TEST_OUTPUT gaps");
   });
 });
+
+// ── precomputedArtifact single-evaluation contract ────────────────────────────
+// Verifies that the checkPostMergeArtifact result used by the hard-block gate
+// and the validateWorkerContract call are consistent — the same evidence object
+// should be used in both paths.
+
+import { validateWorkerContract } from "../../src/core/verification_gate.js";
+
+describe("worker_runner — precomputedArtifact single-evaluation contract", () => {
+  it("checkPostMergeArtifact is deterministic: same output produces identical evidence", () => {
+    const output = [
+      "BOX_MERGED_SHA=abc1234",
+      "===NPM TEST OUTPUT START===",
+      "# tests 10 pass 10 fail 0",
+      "===NPM TEST OUTPUT END===",
+    ].join("\n");
+    const first = checkPostMergeArtifact(output);
+    const second = checkPostMergeArtifact(output);
+    assert.deepEqual(first, second, "two calls with identical input must produce identical evidence");
+  });
+
+  it("precomputedArtifact passed to validateWorkerContract is reflected in evidence", () => {
+    const artifact = checkPostMergeArtifact(
+      "BOX_MERGED_SHA=aaa1111\n===NPM TEST OUTPUT START===\n# tests 3 pass 3 fail 0\n===NPM TEST OUTPUT END==="
+    );
+    assert.equal(artifact.hasArtifact, true, "pre-condition: artifact must be complete");
+
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      // Output alone has no SHA/test block — artifact gate would fail without the pre-computed value
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/77",
+      ].join("\n"),
+    }, { precomputedArtifact: artifact });
+
+    const artifactGap = result.gaps.find(g => /sha|test output|npm/i.test(g));
+    assert.equal(artifactGap, undefined,
+      `precomputedArtifact must suppress artifact gap; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("negative path: absent precomputedArtifact and missing evidence in output fails artifact gate", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/78",
+        // No SHA, no npm output
+      ].join("\n"),
+    });
+    assert.equal(result.passed, false, "missing artifact without precomputedArtifact must fail gate");
+    const hasArtifactGap = result.gaps.some(g => /sha|test output|npm/i.test(g));
+    assert.ok(hasArtifactGap, `artifact gap must be reported; gaps: [${result.gaps.join("; ")}]`);
+  });
+});

@@ -638,6 +638,99 @@ describe("verification_gate — artifact gate non-bypassable (Task 1 hardening)"
   });
 });
 
+// ── precomputedArtifact option — single-evaluation reuse ─────────────────────
+// Verifies that validateWorkerContract uses the caller-supplied artifact result
+// instead of re-calling checkPostMergeArtifact, eliminating the duplicate
+// evaluation on the worker completion path.
+
+describe("verification_gate — validateWorkerContract precomputedArtifact option", () => {
+  const FULL_OUTPUT_NO_ARTIFACT = [
+    "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+    "BOX_PR_URL=https://github.com/org/repo/pull/42",
+    // No git SHA or npm test output — output alone would fail the artifact gate
+  ].join("\n");
+
+  it("uses precomputedArtifact when provided — passes gate with injected complete artifact", () => {
+    // Output has no SHA/test block, but we inject a pre-computed result that says it does.
+    // If validateWorkerContract recomputes from output, it would fail; using the injected
+    // value it must pass — proving the pre-computed path is taken.
+    const fakeCompleteArtifact = checkPostMergeArtifact(
+      "BOX_MERGED_SHA=abc1234\n===NPM TEST OUTPUT START===\n# tests 5 pass 5 fail 0\n===NPM TEST OUTPUT END==="
+    );
+    assert.equal(fakeCompleteArtifact.hasArtifact, true, "pre-condition: injected artifact must be complete");
+
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: FULL_OUTPUT_NO_ARTIFACT,
+    }, { precomputedArtifact: fakeCompleteArtifact });
+
+    const artifactGap = result.gaps.find(g => /sha|test output|npm/i.test(g));
+    assert.equal(
+      artifactGap, undefined,
+      `precomputedArtifact must be used; artifact gaps must not appear; gaps: [${result.gaps.join("; ")}]`
+    );
+    // Evidence must carry the injected artifact, not one re-derived from output
+    const evidenceArtifact = result.evidence?.postMergeArtifact as ReturnType<typeof checkPostMergeArtifact>;
+    assert.ok(evidenceArtifact, "evidence.postMergeArtifact must be populated");
+    assert.equal(evidenceArtifact.hasSha, true, "evidence must reflect injected artifact SHA flag");
+    assert.equal(evidenceArtifact.hasTestOutput, true, "evidence must reflect injected artifact test flag");
+  });
+
+  it("uses precomputedArtifact when provided — fails gate with injected incomplete artifact", () => {
+    // Output has valid SHA + test block, but we inject an incomplete artifact.
+    // If validateWorkerContract recomputes from output, it would pass; using the
+    // injected value it must fail — proving the pre-computed path is taken.
+    const validOutput = [
+      "BOX_MERGED_SHA=def5678",
+      "===NPM TEST OUTPUT START===",
+      "# tests 8 pass 8 fail 0",
+      "===NPM TEST OUTPUT END===",
+      "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+      "BOX_PR_URL=https://github.com/org/repo/pull/43",
+    ].join("\n");
+    const fakeIncompleteArtifact = checkPostMergeArtifact("no sha, no test output here");
+    assert.equal(fakeIncompleteArtifact.hasArtifact, false, "pre-condition: injected artifact must be incomplete");
+
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: validOutput,
+    }, { precomputedArtifact: fakeIncompleteArtifact });
+
+    assert.equal(result.passed, false, "gate must fail when injected artifact is incomplete");
+    const hasArtifactGap = result.gaps.some(g => /sha|test output|npm/i.test(g));
+    assert.ok(hasArtifactGap,
+      `injected incomplete artifact must produce artifact gap; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("falls back to checkPostMergeArtifact from output when precomputedArtifact is not provided", () => {
+    // Baseline: without precomputedArtifact, normal evaluation path is taken.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: FULL_OUTPUT_NO_ARTIFACT,
+    });
+    // Output has no SHA/test block → should fail
+    assert.equal(result.passed, false);
+    const hasArtifactGap = result.gaps.some(g => /sha|test output|npm/i.test(g));
+    assert.ok(hasArtifactGap, `fallback evaluation must produce artifact gap; gaps: [${result.gaps.join("; ")}]`);
+  });
+
+  it("precomputedArtifact is ignored for non-merge task kinds (artifact gate is skipped)", () => {
+    // Even with a precomputedArtifact provided, scan tasks skip the artifact gate entirely.
+    const fakeIncompleteArtifact = checkPostMergeArtifact("no sha, no test output here");
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: "VERIFICATION_REPORT: BUILD=n/a; TESTS=n/a\nScanned 5 files.",
+    }, { taskKind: "scan", precomputedArtifact: fakeIncompleteArtifact });
+
+    const artifactGap = result.gaps.find(g => /sha|test output|npm/i.test(g));
+    assert.equal(
+      artifactGap, undefined,
+      `scan taskKind must skip artifact gate even with precomputedArtifact; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+});
+
 // ── Task 3: Explicit merged SHA marker + npm test output block ─────────────────
 
 import { extractMergedSha } from "../../src/core/verification_gate.js";

@@ -1073,8 +1073,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   // it runs regardless of config.runtime.requireTaskContract.
   // Non-merge task kinds (scan, doc, observation, diagnosis) are exempt even
   // for done-capable roles, eliminating false completion loss on read-only tasks.
-  if (parsed.status === "done" && isArtifactGateRequired(workerKind ?? "unknown", instruction.taskKind)) {
-    const artifact = checkPostMergeArtifact(parsed.fullOutput || parsed.summary || "");
+  //
+  // The artifact is computed once here and reused by both this hard-block check
+  // and the subsequent validateWorkerContract call, avoiding a duplicate evaluation
+  // of the same output string.
+  const isArtifactRequired = parsed.status === "done" && isArtifactGateRequired(workerKind ?? "unknown", instruction.taskKind);
+  const precomputedArtifact = isArtifactRequired
+    ? checkPostMergeArtifact(parsed.fullOutput || parsed.summary || "")
+    : undefined;
+
+  if (isArtifactRequired) {
+    const artifact = precomputedArtifact!;
     if (!artifact.hasArtifact) {
       const artifactGaps = collectArtifactGaps(artifact);
       parsed.status = "blocked";
@@ -1120,6 +1129,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     // Task kind is passed through so non-merge tasks (scan, doc, etc.) skip the artifact gate.
     // verificationText is passed from the packet's verification field so the named-test-proof gate
     // fires when the packet names a specific test file/description in its verification commands.
+    // precomputedArtifact is reused from the hard-block gate above to avoid evaluating the same
+    // output string twice.
     const effectiveKind = workerKind ?? "unknown";
     const validationResult = validateWorkerContract(effectiveKind, {
       status: parsed.status,
@@ -1128,6 +1139,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     }, {
       taskKind: instruction.taskKind,
       verificationText: String(instruction.verification || "").trim() || null,
+      precomputedArtifact,
     });
 
     // Evidence snapshot for audit (AC#4 defined schema)

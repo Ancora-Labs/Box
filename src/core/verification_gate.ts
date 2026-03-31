@@ -471,6 +471,12 @@ export interface ValidateWorkerContractOptions {
    * Packets with non-specific verification text (e.g. "npm test") are not checked.
    */
   verificationText?: string | null;
+  /**
+   * Pre-computed artifact evidence from a prior checkPostMergeArtifact() call.
+   * When provided, the artifact gate reuses this result instead of re-evaluating
+   * the output, avoiding a duplicate computation on the same string.
+   */
+  precomputedArtifact?: ReturnType<typeof checkPostMergeArtifact>;
 }
 
 /**
@@ -528,7 +534,10 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
   const requireArtifact = hasRequiredFields
     && isArtifactGateRequired(workerKind, options.taskKind);
   if (requireArtifact) {
-    const artifact = checkPostMergeArtifact(output);
+    // Reuse a pre-computed artifact object when the caller already evaluated
+    // the same output (e.g., the hard-block gate in worker_runner), avoiding
+    // a redundant call to checkPostMergeArtifact on the same string.
+    const artifact = options.precomputedArtifact ?? checkPostMergeArtifact(output);
     evidence.postMergeArtifact = artifact;
     for (const gap of collectArtifactGaps(artifact)) gaps.push(gap);
   }
