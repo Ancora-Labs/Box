@@ -18,6 +18,12 @@ import { runAthenaPlanReview } from "../../src/core/athena_reviewer.js";
 import { runOnce } from "../../src/core/orchestrator.js";
 import { ALERT_SEVERITY } from "../../src/core/state_tracker.js";
 import { isEnvelopeUnambiguous } from "../../src/core/evidence_envelope.js";
+import {
+  computePlanBatchFingerprint,
+  correctBoundedPacketDefects,
+  PACKET_DEFECT_CODE,
+  normalizeAthenaReviewPayload,
+} from "../../src/core/athena_reviewer.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -322,8 +328,6 @@ describe("isEnvelopeUnambiguous — fast-path bypass gate (Task 3)", () => {
 
 // ── Task 1: runAthenaPlanReview — deterministic auto-approve for low-risk unchanged batches ──
 
-import { computePlanBatchFingerprint } from "../../src/core/athena_reviewer.js";
-
 describe("computePlanBatchFingerprint", () => {
   it("returns the same fingerprint for the same plan batch", () => {
     const plans = [
@@ -499,3 +503,130 @@ describe("runAthenaPlanReview — deterministic auto-approve for low-risk unchan
       "disablePlanReviewCache=true must bypass the auto-approve path regardless of fingerprint match");
   });
 });
+
+// ── correctBoundedPacketDefects — fail-closed guarantee tests ─────────────────
+
+describe("correctBoundedPacketDefects — fail-closed guarantees", () => {
+  const LOW_RISK_PLAN = {
+    role: "evolution-worker",
+    task: "Add retry logic to worker dispatch with exponential backoff",
+    verification: "npm test",
+    target_files: ["src/core/worker_dispatch.ts"],
+    acceptance_criteria: ["retry count < 3 on transient failures"],
+    riskLevel: "low",
+  };
+
+  const HIGH_RISK_PLAN = {
+    role: "evolution-worker",
+    task: "Migrate database schema with zero-downtime deployment strategy",
+    verification: "npm test",
+    target_files: ["src/core/db_migrator.ts"],
+    acceptance_criteria: ["migration completes with < 1% error rate"],
+    riskLevel: "high",
+    premortem: {
+      riskLevel: "high",
+      scenario: "Migration could corrupt live data if applied during peak traffic.",
+      failurePaths: ["Schema mismatch causes query failures"],
+      mitigations: ["Blue-green deployment with canary"],
+      detectionSignals: ["Error rate spike > 1%"],
+      guardrails: ["Rollback script tested in staging"],
+      rollbackPlan: "Restore from last known good snapshot within 5 minutes",
+    },
+  };
+
+  it("returns corrected=false when both approved and planReviews are missing — cannot auto-correct structural failures", () => {
+    const normalized = normalizeAthenaReviewPayload({ summary: "Looks good." }, [LOW_RISK_PLAN]);
+
+    assert.ok(normalized.missingFields.includes("approved"), "pre-condition: approved missing");
+    assert.ok(normalized.missingFields.includes("planReviews"), "pre-condition: planReviews missing");
+
+    const correction = correctBoundedPacketDefects(normalized, [LOW_RISK_PLAN]);
+
+    assert.equal(correction.corrected, false,
+      "both fields missing is not a bounded defect — must remain fail-closed");
+    assert.ok(correction.updatedMissingFields.includes("approved"),
+      "approved must remain in updatedMissingFields when both fields are absent");
+    assert.ok(correction.updatedMissingFields.includes("planReviews"),
+      "planReviews must remain in updatedMissingFields when both fields are absent");
+  });
+
+  it("never auto-corrects approved when planReviews contain issues — fail-closed: issues must be addressed explicitly", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [
+        { planIndex: 0, role: "evolution-worker", measurable: false, issues: ["task description too vague"] },
+      ],
+      summary: "Issues found.",
+    }, [LOW_RISK_PLAN]);
+
+    const correction = correctBoundedPacketDefects(normalized, [LOW_RISK_PLAN]);
+
+    assert.equal(correction.corrected, false,
+      "approved must not be synthesized when plan reviews indicate issues — fail-closed");
+    assert.ok(!correction.correctedFields.includes("approved"),
+      "correctedFields must not include approved when reviews have issues");
+  });
+
+  it("never auto-corrects planReviews when any plan has riskLevel=high — high-risk always requires explicit AI judgment", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      approved: true,
+      summary: "Plans approved.",
+    }, [HIGH_RISK_PLAN]);
+
+    const correction = correctBoundedPacketDefects(normalized, [HIGH_RISK_PLAN]);
+
+    assert.equal(correction.correctedFields.includes("planReviews"), false,
+      "planReviews must never be auto-corrected for high-risk plans");
+    assert.ok(correction.updatedMissingFields.includes("planReviews"),
+      "planReviews must remain in updatedMissingFields for high-risk plans");
+  });
+
+  it("never auto-corrects planReviews when the plan array is empty — no plans means no evidence basis", () => {
+    const normalized = normalizeAthenaReviewPayload({ approved: true, summary: "No plans." }, []);
+
+    const correction = correctBoundedPacketDefects(normalized, []);
+
+    assert.equal(correction.correctedFields.includes("planReviews"), false,
+      "planReviews must not be auto-corrected when the plans array is empty");
+  });
+
+  it("corrects approved when planReviews are all-clear — bounded defect with explicit AI evidence", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [
+        { planIndex: 0, role: "evolution-worker", measurable: true, issues: [] },
+      ],
+      summary: "Plan validated.",
+    }, [LOW_RISK_PLAN]);
+
+    const correction = correctBoundedPacketDefects(normalized, [LOW_RISK_PLAN]);
+
+    if (normalized.missingFields.includes("approved")) {
+      // Only assert correction when the pre-condition is met (approved truly absent)
+      assert.equal(correction.corrected, true,
+        "approved must be corrected when planReviews are all-clear");
+      assert.equal(correction.updatedPayload.approved, true,
+        "corrected payload must set approved=true");
+    }
+  });
+
+  it("defectCodes array contains the applicable code for each corrected field", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [
+        { planIndex: 0, role: "evolution-worker", measurable: true, issues: [] },
+      ],
+      summary: "Plan validated.",
+    }, [LOW_RISK_PLAN]);
+
+    const correction = correctBoundedPacketDefects(normalized, [LOW_RISK_PLAN]);
+
+    if (correction.corrected) {
+      assert.equal(correction.defectCodes.length, correction.correctedFields.length,
+        "each corrected field must have a corresponding defect code");
+      for (const code of correction.defectCodes) {
+        const validCodes = Object.values(PACKET_DEFECT_CODE) as string[];
+        assert.ok(validCodes.includes(code),
+          `defect code '${code}' must be a known PACKET_DEFECT_CODE value`);
+      }
+    }
+  });
+});
+

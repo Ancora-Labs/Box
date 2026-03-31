@@ -1285,6 +1285,107 @@ function normalizePlanReviewEntry(entry, plan, index) {
  */
 export const MANDATORY_ACTIONABLE_PACKET_FIELDS = Object.freeze(["approved", "planReviews"] as const);
 
+// ── Bounded packet format defect correction ───────────────────────────────────
+
+/**
+ * Machine codes for bounded low-risk packet format defects that can be
+ * deterministically corrected without re-invoking the AI.
+ *
+ * A "bounded" defect has a clear, well-defined fix scope (one field).
+ * A "low-risk" defect can be resolved with high confidence from available evidence.
+ *
+ * @enum {string}
+ */
+export const PACKET_DEFECT_CODE = Object.freeze({
+  /**
+   * `approved` field absent but all explicit planReviews have no issues.
+   * Safe to infer approved=true: explicit AI-provided reviews back the decision.
+   */
+  MISSING_APPROVED_REVIEWSPASSED: "MISSING_APPROVED_REVIEWSPASSED",
+  /**
+   * `planReviews` field absent but an explicit `approved` boolean was set
+   * and all plans are low-risk. Synthetic plan reviews (built from plan metadata)
+   * are sufficient for low-risk batches.
+   */
+  MISSING_PLAN_REVIEWS_LOWRISK: "MISSING_PLAN_REVIEWS_LOWRISK",
+} as const);
+
+/**
+ * Attempt deterministic correction of bounded low-risk packet format defects.
+ *
+ * Called before hard-rejecting a plan when MANDATORY_ACTIONABLE_PACKET_FIELDS are
+ * absent from the AI response. Only defects that can be resolved with high confidence
+ * from available evidence are corrected — ambiguous or high-risk cases fall through
+ * to the existing hard-reject path.
+ *
+ * Correctable defects:
+ *   MISSING_APPROVED_REVIEWSPASSED — `approved` absent, planReviews present and all issue-free.
+ *     The AI provided explicit reviews showing every plan passes; `approved=true` is safe.
+ *   MISSING_PLAN_REVIEWS_LOWRISK  — `planReviews` absent, explicit `approved` set, all plans
+ *     low-risk. Synthetic reviews built from plan metadata are sufficient for low-risk batches.
+ *
+ * NOT correctable:
+ *   - Both `approved` and `planReviews` absent (structural failure, not a bounded defect).
+ *   - `approved` absent and planReviews have issues (ambiguous — cannot auto-approve).
+ *   - `planReviews` absent and any plan has riskLevel="high" (high-risk requires explicit AI reviews).
+ *
+ * @param normalizedReview — output of normalizeAthenaReviewPayload
+ * @param plans            — original plans array from Prometheus analysis
+ * @returns correction result with updated payload and missingFields
+ */
+export function correctBoundedPacketDefects(
+  normalizedReview: { payload: any; missingFields: string[]; synthesizedFields: string[] },
+  plans: any[],
+): {
+  corrected: boolean;
+  correctedFields: string[];
+  defectCodes: string[];
+  updatedPayload: any;
+  updatedMissingFields: string[];
+} {
+  const { payload, missingFields } = normalizedReview;
+  const correctedFields: string[] = [];
+  const defectCodes: string[] = [];
+  const updatedPayload: any = { ...payload };
+
+  // Defect 1: `approved` absent, but planReviews are explicit and all issue-free.
+  // Bounded: only the `approved` field is affected.
+  // Low-risk: backed by explicit AI-provided planReviews — not pure fallback synthesis.
+  if (missingFields.includes("approved") && !missingFields.includes("planReviews")) {
+    const reviews = Array.isArray(payload.planReviews) ? payload.planReviews : [];
+    const allClear = reviews.length > 0 &&
+      reviews.every((r: any) => !Array.isArray(r.issues) || r.issues.length === 0);
+    if (allClear) {
+      updatedPayload.approved = true;
+      correctedFields.push("approved");
+      defectCodes.push(PACKET_DEFECT_CODE.MISSING_APPROVED_REVIEWSPASSED);
+    }
+  }
+
+  // Defect 2: `planReviews` absent, but `approved` was explicitly set and all plans are low-risk.
+  // Bounded: only the `planReviews` field is affected (synthetic reviews already in payload).
+  // Low-risk: only applies when no plan has riskLevel="high".
+  if (missingFields.includes("planReviews") && !missingFields.includes("approved")) {
+    const allLowRisk = Array.isArray(plans) && plans.length > 0 &&
+      plans.every((p: any) => String(p?.riskLevel || "low").trim().toLowerCase() !== "high");
+    if (allLowRisk) {
+      // Synthetic reviews were already built in normalizePlanReviewEntry; accept them.
+      correctedFields.push("planReviews");
+      defectCodes.push(PACKET_DEFECT_CODE.MISSING_PLAN_REVIEWS_LOWRISK);
+    }
+  }
+
+  const updatedMissingFields = missingFields.filter((f) => !correctedFields.includes(f));
+
+  return {
+    corrected: correctedFields.length > 0,
+    correctedFields,
+    defectCodes,
+    updatedPayload,
+    updatedMissingFields,
+  };
+}
+
 // ── Patched-plan validation (Task 3) ─────────────────────────────────────────
 
 /**
@@ -1979,23 +2080,41 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
   // ── Mandatory actionable-packet field guard ─────────────────────────────
   // Explicit rejection when the AI omits fields that must not be synthesized.
   // Aliases (e.g. plan_reviews, status) are accepted; pure fallback synthesis is not.
+  // Before hard-rejecting, attempt deterministic correction of bounded low-risk defects:
+  //   - `approved` absent but planReviews all pass → safe to infer approved=true.
+  //   - `planReviews` absent but explicit approved + all low-risk plans → accept synthetic reviews.
   const missingMandatory = normalizedReview.missingFields.filter(
     (f) => (MANDATORY_ACTIONABLE_PACKET_FIELDS as readonly string[]).includes(f)
   );
   if (missingMandatory.length > 0) {
-    const reason = {
-      code: "MISSING_ACTIONABLE_PACKET_FIELDS",
-      message: `Reviewer response is missing mandatory fields (${missingMandatory.join(", ")}) — explicit values required, synthesis not permitted`
-    };
-    await appendProgress(config, `[ATHENA] Plan review REJECTED — ${reason.message}`);
-    chatLog(stateDir, athenaName, `Plan review rejected: missing mandatory fields ${missingMandatory.join(", ")}`);
-    await appendAlert(config, {
-      severity: ALERT_SEVERITY.CRITICAL,
-      source: "athena_reviewer",
-      title: "Reviewer response missing mandatory actionable-packet fields — plan blocked",
-      message: `code=${reason.code} fields=${missingMandatory.join(",")}`
-    });
-    return { approved: false, reason, corrections: [] };
+    const defectCorrection = correctBoundedPacketDefects(normalizedReview, plans);
+    const uncorrectableMissing = defectCorrection.updatedMissingFields.filter(
+      (f) => (MANDATORY_ACTIONABLE_PACKET_FIELDS as readonly string[]).includes(f)
+    );
+
+    if (uncorrectableMissing.length > 0) {
+      // Correction could not resolve all missing mandatory fields — hard reject.
+      const reason = {
+        code: "MISSING_ACTIONABLE_PACKET_FIELDS",
+        message: `Reviewer response is missing mandatory fields (${uncorrectableMissing.join(", ")}) — explicit values required, synthesis not permitted`
+      };
+      await appendProgress(config, `[ATHENA] Plan review REJECTED — ${reason.message}`);
+      chatLog(stateDir, athenaName, `Plan review rejected: missing mandatory fields ${uncorrectableMissing.join(", ")}`);
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "athena_reviewer",
+        title: "Reviewer response missing mandatory actionable-packet fields — plan blocked",
+        message: `code=${reason.code} fields=${uncorrectableMissing.join(",")}`
+      });
+      return { approved: false, reason, corrections: [] };
+    }
+
+    // All missing mandatory fields were corrected — update the payload and continue.
+    await appendProgress(
+      config,
+      `[ATHENA] Bounded packet format defects auto-corrected: ${defectCorrection.correctedFields.join(", ")} (${defectCorrection.defectCodes.join(", ")}) — proceeding with corrected payload`
+    );
+    Object.assign(normalizedReview.payload, defectCorrection.updatedPayload);
   }
 
   const trustCheck = validateLeadershipContract(

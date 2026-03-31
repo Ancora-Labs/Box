@@ -9,6 +9,8 @@ import {
   normalizePatchedPlansForDispatch,
   revalidatePatchedPlansAfterNormalization,
   PATCHED_PLAN_REVALIDATION_REASON,
+  correctBoundedPacketDefects,
+  PACKET_DEFECT_CODE,
 } from "../../src/core/athena_reviewer.js";
 
 const BASE_PLANS = [
@@ -533,3 +535,139 @@ describe("revalidatePatchedPlansAfterNormalization (Task 3)", () => {
     assert.equal(result.valid, true, "absent verification field must not cause a violation");
   });
 });
+
+// ── correctBoundedPacketDefects ───────────────────────────────────────────────
+
+const LOW_RISK_PLANS_ONLY = [
+  {
+    role: "evolution-worker",
+    task: "Add deterministic dispatch verification coverage",
+    verification: "npm test",
+    target_files: ["src/core/orchestrator.js"],
+    acceptance_criteria: ["dispatch path is covered"],
+    riskLevel: "low",
+  },
+];
+
+describe("correctBoundedPacketDefects", () => {
+  it("exports PACKET_DEFECT_CODE with expected codes", () => {
+    assert.ok(Object.isFrozen(PACKET_DEFECT_CODE), "PACKET_DEFECT_CODE must be frozen");
+    assert.equal(PACKET_DEFECT_CODE.MISSING_APPROVED_REVIEWSPASSED, "MISSING_APPROVED_REVIEWSPASSED");
+    assert.equal(PACKET_DEFECT_CODE.MISSING_PLAN_REVIEWS_LOWRISK, "MISSING_PLAN_REVIEWS_LOWRISK");
+  });
+
+  it("corrects missing approved when all explicit planReviews are issue-free (MISSING_APPROVED_REVIEWSPASSED)", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [
+        { planIndex: 0, role: "evolution-worker", measurable: true, issues: [] },
+      ],
+      summary: "Plans reviewed and ready.",
+    }, LOW_RISK_PLANS_ONLY);
+
+    assert.ok(normalized.missingFields.includes("approved"),
+      "pre-condition: approved must be in missingFields when only inferred from reviews");
+
+    const correction = correctBoundedPacketDefects(normalized, LOW_RISK_PLANS_ONLY);
+
+    assert.equal(correction.corrected, true, "defect must be corrected");
+    assert.ok(correction.correctedFields.includes("approved"), "approved must be in correctedFields");
+    assert.ok(correction.defectCodes.includes(PACKET_DEFECT_CODE.MISSING_APPROVED_REVIEWSPASSED));
+    assert.equal(correction.updatedPayload.approved, true, "corrected payload must have approved=true");
+    assert.ok(!correction.updatedMissingFields.includes("approved"),
+      "approved must be removed from updatedMissingFields after correction");
+  });
+
+  it("does NOT correct approved when planReviews have issues (ambiguous — cannot auto-approve)", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [
+        { planIndex: 0, role: "evolution-worker", measurable: false, issues: ["task description is vague"] },
+      ],
+      summary: "Issues found.",
+    }, LOW_RISK_PLANS_ONLY);
+
+    const correction = correctBoundedPacketDefects(normalized, LOW_RISK_PLANS_ONLY);
+
+    assert.equal(correction.corrected, false,
+      "approved must not be auto-corrected when planReviews contain issues");
+    assert.ok(!correction.correctedFields.includes("approved"));
+  });
+
+  it("does NOT correct approved when planReviews is an empty array (no evidence to back approval)", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [],
+      summary: "No reviews provided.",
+    }, LOW_RISK_PLANS_ONLY);
+
+    const correction = correctBoundedPacketDefects(normalized, LOW_RISK_PLANS_ONLY);
+
+    // planReviews present (empty array) but no reviews → cannot auto-approve from zero evidence
+    assert.ok(!correction.correctedFields.includes("approved"),
+      "approved must not be auto-corrected from an empty planReviews array");
+  });
+
+  it("corrects missing planReviews when approved is explicit and all plans are low-risk (MISSING_PLAN_REVIEWS_LOWRISK)", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      approved: true,
+      summary: "All plans look good.",
+    }, LOW_RISK_PLANS_ONLY);
+
+    assert.ok(normalized.missingFields.includes("planReviews"),
+      "pre-condition: planReviews must be in missingFields when absent from AI response");
+
+    const correction = correctBoundedPacketDefects(normalized, LOW_RISK_PLANS_ONLY);
+
+    assert.equal(correction.corrected, true, "defect must be corrected for low-risk plans");
+    assert.ok(correction.correctedFields.includes("planReviews"), "planReviews must be in correctedFields");
+    assert.ok(correction.defectCodes.includes(PACKET_DEFECT_CODE.MISSING_PLAN_REVIEWS_LOWRISK));
+    assert.ok(!correction.updatedMissingFields.includes("planReviews"),
+      "planReviews must be removed from updatedMissingFields after correction");
+  });
+
+  it("does NOT correct planReviews when any plan has riskLevel=high (high-risk requires explicit AI reviews)", () => {
+    // BASE_PLANS contains a high-risk plan
+    const normalized = normalizeAthenaReviewPayload({
+      approved: true,
+      summary: "Plans approved.",
+    }, BASE_PLANS);
+
+    const correction = correctBoundedPacketDefects(normalized, BASE_PLANS);
+
+    assert.equal(correction.correctedFields.includes("planReviews"), false,
+      "planReviews must not be auto-corrected when any plan has riskLevel=high");
+  });
+
+  it("negative path: returns corrected=false when both approved and planReviews are missing", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      summary: "Everything looks great.",
+    }, LOW_RISK_PLANS_ONLY);
+
+    assert.ok(normalized.missingFields.includes("approved"), "pre-condition");
+    assert.ok(normalized.missingFields.includes("planReviews"), "pre-condition");
+
+    const correction = correctBoundedPacketDefects(normalized, LOW_RISK_PLANS_ONLY);
+
+    assert.equal(correction.corrected, false,
+      "both fields missing is a structural failure — not a bounded defect, must not be auto-corrected");
+    assert.deepEqual(correction.correctedFields, []);
+    assert.deepEqual(correction.defectCodes, []);
+    assert.ok(correction.updatedMissingFields.includes("approved"));
+    assert.ok(correction.updatedMissingFields.includes("planReviews"));
+  });
+
+  it("updatedMissingFields only removes corrected fields, leaving others intact", () => {
+    const normalized = normalizeAthenaReviewPayload({
+      planReviews: [{ planIndex: 0, role: "evolution-worker", measurable: true, issues: [] }],
+      summary: "Looks good.",
+    }, LOW_RISK_PLANS_ONLY);
+
+    const correction = correctBoundedPacketDefects(normalized, LOW_RISK_PLANS_ONLY);
+
+    if (correction.corrected) {
+      for (const f of correction.correctedFields) {
+        assert.ok(!correction.updatedMissingFields.includes(f),
+          `corrected field '${f}' must not remain in updatedMissingFields`);
+      }
+    }
+  });
+});
+
