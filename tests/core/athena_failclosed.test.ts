@@ -17,6 +17,7 @@ import os from "node:os";
 import { runAthenaPlanReview } from "../../src/core/athena_reviewer.js";
 import { runOnce } from "../../src/core/orchestrator.js";
 import { ALERT_SEVERITY } from "../../src/core/state_tracker.js";
+import { isEnvelopeUnambiguous } from "../../src/core/evidence_envelope.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -224,5 +225,97 @@ describe("orchestrator — no worker dispatch when Athena blocks plan", () => {
       "Worker dispatch must not occur when the cycle is blocked");
     // Progress log must exist with some content.
     assert.ok(progress.length > 0, "Progress log must be written during blocked cycle");
+  });
+});
+
+// ── Task 3: isEnvelopeUnambiguous — deterministic fast-path gate ─────────────
+
+describe("isEnvelopeUnambiguous — fast-path bypass gate (Task 3)", () => {
+  function makeGreenEnvelope(overrides: Record<string, unknown> = {}): any {
+    const base: any = {
+      roleName: "evolution-worker",
+      status: "done",
+      summary: "All changes implemented, build and tests pass.",
+      verificationPassed: true,
+      verificationEvidence: { build: "pass", tests: "pass", lint: "pass" },
+      preReviewIssues: [],
+    };
+    // Allow overriding nested verificationEvidence keys directly
+    const { build, tests, lint, ...rest } = overrides as any;
+    if (build !== undefined || tests !== undefined || lint !== undefined) {
+      base.verificationEvidence = {
+        ...base.verificationEvidence,
+        ...(build !== undefined ? { build } : {}),
+        ...(tests !== undefined ? { tests } : {}),
+        ...(lint !== undefined ? { lint } : {}),
+      };
+    }
+    return { ...base, ...rest };
+  }
+
+  it("returns unambiguous=true for a fully green, unambiguous low-risk envelope", () => {
+    const result = isEnvelopeUnambiguous(makeGreenEnvelope(), { planRiskLevel: "low" });
+    assert.equal(result.unambiguous, true,
+      "green envelope with low-risk plan must qualify for fast-path");
+  });
+
+  it("returns unambiguous=false when lint evidence is 'fail' — failed lint must fall through to AI review", () => {
+    const result = isEnvelopeUnambiguous(makeGreenEnvelope({ lint: "fail" }), { planRiskLevel: "low" });
+    assert.equal(result.unambiguous, false,
+      "lint=fail must block fast-path to prevent shipping with linting errors");
+  });
+
+  it("returns unambiguous=false when preReviewIssues is non-empty — unresolved issues require AI judgment", () => {
+    const result = isEnvelopeUnambiguous(
+      makeGreenEnvelope({ preReviewIssues: ["Security vulnerability found in dependency"] }),
+      { planRiskLevel: "low" }
+    );
+    assert.equal(result.unambiguous, false,
+      "non-empty preReviewIssues must block fast-path");
+  });
+
+  it("returns unambiguous=false for high-risk plan even with otherwise perfect envelope", () => {
+    const result = isEnvelopeUnambiguous(makeGreenEnvelope(), { planRiskLevel: "high" });
+    assert.equal(result.unambiguous, false,
+      "high-risk plans must always go through AI review regardless of evidence quality");
+  });
+
+  it("returns unambiguous=false when status is not 'done' (partial completion is ambiguous)", () => {
+    const result = isEnvelopeUnambiguous(
+      makeGreenEnvelope({ status: "partial" }),
+      { planRiskLevel: "low" }
+    );
+    assert.equal(result.unambiguous, false,
+      "non-done status must block fast-path");
+  });
+
+  it("returns unambiguous=false when verificationPassed is false — cannot skip AI when verification failed", () => {
+    const result = isEnvelopeUnambiguous(
+      makeGreenEnvelope({ verificationPassed: false }),
+      { planRiskLevel: "low" }
+    );
+    assert.equal(result.unambiguous, false,
+      "verificationPassed=false must block fast-path");
+  });
+
+  it("returns unambiguous=false when build evidence is 'fail'", () => {
+    const result = isEnvelopeUnambiguous(
+      makeGreenEnvelope({ build: "fail" }),
+      { planRiskLevel: "low" }
+    );
+    assert.equal(result.unambiguous, false, "build=fail must block fast-path");
+  });
+
+  it("returns unambiguous=false when tests evidence is 'fail'", () => {
+    const result = isEnvelopeUnambiguous(
+      makeGreenEnvelope({ tests: "fail" }),
+      { planRiskLevel: "low" }
+    );
+    assert.equal(result.unambiguous, false, "tests=fail must block fast-path");
+  });
+
+  it("returns unambiguous=false for null envelope — structural failure must not qualify for bypass", () => {
+    const result = isEnvelopeUnambiguous(null, { planRiskLevel: "low" });
+    assert.equal(result.unambiguous, false, "null envelope must return false, not throw");
   });
 });

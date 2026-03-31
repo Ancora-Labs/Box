@@ -523,3 +523,165 @@ describe("computeDecisionQualityLabelWithEvidence — negative path: missing evi
     assert.equal(result.evidenceReason, EVIDENCE_COMPLETENESS_REASON.MISSING_EVIDENCE);
   });
 });
+
+// ── validatePostmortemClosureFields (Task 1) ──────────────────────────────────
+
+import {
+  POSTMORTEM_CLOSURE_VALIDATION_REASON,
+  validatePostmortemClosureFields,
+} from "../../src/core/athena_reviewer.js";
+
+describe("validatePostmortemClosureFields — positive path", () => {
+  it("returns valid=true when all closure fields are populated", () => {
+    const pm = {
+      expectedOutcome: "Worker should add validation logic to the postmortem closure path.",
+      actualOutcome: "Worker added validatePostmortemClosureFields and tests. Build passed.",
+      deviation: "none",
+    };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, true);
+    assert.equal(r.reason, POSTMORTEM_CLOSURE_VALIDATION_REASON.OK);
+    assert.deepEqual(r.emptyFields, []);
+  });
+
+  it("accepts deviation=minor", () => {
+    const pm = { expectedOutcome: "Task done", actualOutcome: "Build passed", deviation: "minor" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, true);
+  });
+
+  it("accepts deviation=major", () => {
+    const pm = { expectedOutcome: "Task done", actualOutcome: "Build passed", deviation: "major" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, true);
+  });
+});
+
+describe("validatePostmortemClosureFields — negative paths", () => {
+  it("rejects when expectedOutcome is empty string", () => {
+    const pm = { expectedOutcome: "", actualOutcome: "Build passed", deviation: "none" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("expectedOutcome"),
+      "emptyFields must include expectedOutcome");
+  });
+
+  it("rejects when actualOutcome is empty string", () => {
+    const pm = { expectedOutcome: "Task done", actualOutcome: "", deviation: "none" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("actualOutcome"),
+      "emptyFields must include actualOutcome");
+  });
+
+  it("rejects when deviation is empty string", () => {
+    const pm = { expectedOutcome: "Task done", actualOutcome: "Build passed", deviation: "" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("deviation"),
+      "emptyFields must include deviation");
+  });
+
+  it("rejects when expectedOutcome is missing (undefined)", () => {
+    const pm = { actualOutcome: "Build passed", deviation: "none" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("expectedOutcome"));
+    assert.equal(r.reason, POSTMORTEM_CLOSURE_VALIDATION_REASON.MISSING_FIELD);
+  });
+
+  it("rejects when deviation is an unknown value", () => {
+    const pm = { expectedOutcome: "Task done", actualOutcome: "Build passed", deviation: "catastrophic" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false,
+      "unknown deviation value must be rejected — only 'none', 'minor', 'major' are valid");
+    assert.ok(r.emptyFields.includes("deviation"));
+  });
+
+  it("rejects null input entirely", () => {
+    const r = validatePostmortemClosureFields(null);
+    assert.equal(r.valid, false);
+    assert.equal(r.reason, POSTMORTEM_CLOSURE_VALIDATION_REASON.MISSING_FIELD);
+  });
+});
+
+// ── isEnvelopeUnambiguous (Task 3) ────────────────────────────────────────────
+
+import { isEnvelopeUnambiguous } from "../../src/core/evidence_envelope.js";
+
+const UNAMBIGUOUS_ENVELOPE = {
+  roleName: "evolution-worker",
+  status: "done",
+  summary: "All tests passed and build succeeded without errors.",
+  verificationEvidence: { build: "pass", tests: "pass", lint: "pass" },
+  verificationPassed: true,
+};
+
+describe("isEnvelopeUnambiguous — positive path", () => {
+  it("returns unambiguous=true for a fully green low-risk envelope", () => {
+    const r = isEnvelopeUnambiguous(UNAMBIGUOUS_ENVELOPE, { planRiskLevel: "low" });
+    assert.equal(r.unambiguous, true);
+    assert.deepEqual(r.reasons, []);
+  });
+
+  it("returns unambiguous=true when lint is n/a", () => {
+    const env = { ...UNAMBIGUOUS_ENVELOPE, verificationEvidence: { build: "pass", tests: "pass", lint: "n/a" } };
+    const r = isEnvelopeUnambiguous(env);
+    assert.equal(r.unambiguous, true);
+  });
+
+  it("returns unambiguous=true when preReviewIssues is absent", () => {
+    const r = isEnvelopeUnambiguous({ ...UNAMBIGUOUS_ENVELOPE });
+    assert.equal(r.unambiguous, true);
+  });
+});
+
+describe("isEnvelopeUnambiguous — negative paths (Task 3 gate)", () => {
+  it("returns unambiguous=false when plan riskLevel=high", () => {
+    const r = isEnvelopeUnambiguous(UNAMBIGUOUS_ENVELOPE, { planRiskLevel: "high" });
+    assert.equal(r.unambiguous, false,
+      "high-risk plans must always require full AI review — never take deterministic fast-path");
+    assert.ok(r.reasons.length > 0);
+  });
+
+  it("returns unambiguous=false when status is not 'done'", () => {
+    const env = { ...UNAMBIGUOUS_ENVELOPE, status: "partial" };
+    const r = isEnvelopeUnambiguous(env);
+    assert.equal(r.unambiguous, false);
+    assert.ok(r.reasons.some(s => s.includes("status")));
+  });
+
+  it("returns unambiguous=false when verificationPassed is false", () => {
+    const env = { ...UNAMBIGUOUS_ENVELOPE, verificationPassed: false };
+    const r = isEnvelopeUnambiguous(env);
+    assert.equal(r.unambiguous, false);
+    assert.ok(r.reasons.some(s => s.includes("verificationPassed")));
+  });
+
+  it("returns unambiguous=false when build evidence is not 'pass'", () => {
+    const env = { ...UNAMBIGUOUS_ENVELOPE, verificationEvidence: { build: "fail", tests: "pass", lint: "pass" } };
+    const r = isEnvelopeUnambiguous(env);
+    assert.equal(r.unambiguous, false);
+    assert.ok(r.reasons.some(s => s.includes("build")));
+  });
+
+  it("returns unambiguous=false when lint evidence is 'fail'", () => {
+    const env = { ...UNAMBIGUOUS_ENVELOPE, verificationEvidence: { build: "pass", tests: "pass", lint: "fail" } };
+    const r = isEnvelopeUnambiguous(env);
+    assert.equal(r.unambiguous, false);
+    assert.ok(r.reasons.some(s => s.includes("lint")));
+  });
+
+  it("returns unambiguous=false when preReviewIssues is non-empty (unfixed issues)", () => {
+    const env = { ...UNAMBIGUOUS_ENVELOPE, preReviewIssues: ["missing test coverage"] };
+    const r = isEnvelopeUnambiguous(env);
+    assert.equal(r.unambiguous, false,
+      "unfixed pre-review issues make the result ambiguous — must fall through to AI review");
+    assert.ok(r.reasons.some(s => s.includes("preReviewIssues")));
+  });
+
+  it("returns unambiguous=false for null input (structural check fails)", () => {
+    const r = isEnvelopeUnambiguous(null);
+    assert.equal(r.unambiguous, false);
+  });
+});
