@@ -14,6 +14,53 @@
  */
 
 /**
+ * Budget partition labels for prompt sections.
+ *
+ * Partitions define how sections are treated under global token-budget pressure:
+ *
+ *   INVARIANT  — Always included in full. Never trimmed by section-level maxTokens
+ *                or dropped by global budget. Use for core identity sections (role,
+ *                output format, evolution directive) that must survive any token pressure.
+ *
+ *   REQUIRED   — Always included. Section-level maxTokens truncation applies, but the
+ *                section is never dropped regardless of the global budget. Use for
+ *                cycle-delta sections (carry-forward, behavior patterns, research)
+ *                that must be present but whose token cost can be capped.
+ *
+ *   EXPANDABLE — Fill remaining budget after invariant + required sections have been
+ *                allocated. Dropped in order when budget is exhausted. Use for large
+ *                optional context (repo file listing, drift reports, repair feedback)
+ *                that enrich the prompt but are not critical to correctness.
+ *
+ * Backward compatibility: sections with `required: true` and no explicit
+ * `partitionBudget` are treated as REQUIRED. Sections without either field
+ * are treated as EXPANDABLE.
+ */
+export const PROMPT_BUDGET_PARTITION = Object.freeze({
+  INVARIANT:  "invariant"  as const,
+  REQUIRED:   "required"   as const,
+  EXPANDABLE: "expandable" as const,
+});
+
+export type PromptBudgetPartition = "invariant" | "required" | "expandable";
+
+/**
+ * Resolve the effective budget partition for a section.
+ * Checks `partitionBudget` first, then falls back to `required: true` → REQUIRED,
+ * and the absence of either → EXPANDABLE.
+ */
+function resolvePartition(s: {
+  partitionBudget?: string;
+  required?: boolean;
+}): PromptBudgetPartition {
+  if (s.partitionBudget === PROMPT_BUDGET_PARTITION.INVARIANT)  return PROMPT_BUDGET_PARTITION.INVARIANT;
+  if (s.partitionBudget === PROMPT_BUDGET_PARTITION.REQUIRED)   return PROMPT_BUDGET_PARTITION.REQUIRED;
+  if (s.partitionBudget === PROMPT_BUDGET_PARTITION.EXPANDABLE) return PROMPT_BUDGET_PARTITION.EXPANDABLE;
+  if (s.required === true) return PROMPT_BUDGET_PARTITION.REQUIRED;
+  return PROMPT_BUDGET_PARTITION.EXPANDABLE;
+}
+
+/**
  * Create a named prompt section.
  *
  * @param {string} name — section identifier for debugging/tracing
@@ -28,13 +75,20 @@ export function section(name, content) {
  * Compile an array of prompt sections into a single prompt string.
  * Empty sections are omitted. Each section is separated by a double newline.
  *
- * With section-level caps (Packet 8): each section can have a maxTokens limit.
+ * With section-level caps: each section can have a maxTokens limit.
  * If a section exceeds its cap, it is truncated from the end.
+ * Invariant sections bypass section-level caps and are never truncated.
  *
- * Required-field retention: sections marked `required: true` are always included
- * regardless of the global token budget. Optional sections fill remaining budget.
+ * Three-pass budget trimming (when tokenBudget > 0):
+ *   Pass 1 — INVARIANT: included in full, never trimmed.
+ *   Pass 2 — REQUIRED:  included after per-section maxTokens truncation, never dropped.
+ *   Pass 3 — EXPANDABLE: fill remaining budget in original order; dropped when exhausted.
  *
- * @param {Array<{ name: string, content: string, maxTokens?: number, required?: boolean }>} sections
+ * Backward compatibility: sections with `required: true` and no explicit
+ * `partitionBudget` are treated as REQUIRED. Sections without either field
+ * are treated as EXPANDABLE.
+ *
+ * @param {Array<{ name: string, content: string, maxTokens?: number, required?: boolean, partitionBudget?: PromptBudgetPartition }>} sections
  * @param {{ separator?: string, includeHeaders?: boolean, tokenBudget?: number }} opts
  * @returns {string}
  */
@@ -48,9 +102,11 @@ export function compilePrompt(sections, opts: any = {}) {
     .map((s, idx) => ({ s, idx }))
     .filter(({ s }) => s && s.content && s.content.length > 0)
     .map(({ s, idx }) => {
+      const partition = resolvePartition(s);
       let content = s.content;
-      // Section-level cap: truncate if section exceeds its own maxTokens
-      if (s.maxTokens && s.maxTokens > 0) {
+      // Section-level cap: truncate if section exceeds its own maxTokens.
+      // Invariant sections bypass this cap — their content is always used in full.
+      if (partition !== PROMPT_BUDGET_PARTITION.INVARIANT && s.maxTokens && s.maxTokens > 0) {
         const sectionTokens = estimateTokens(content);
         if (sectionTokens > s.maxTokens) {
           const maxChars = s.maxTokens * 4;
@@ -58,30 +114,33 @@ export function compilePrompt(sections, opts: any = {}) {
         }
       }
       const piece = includeHeaders ? `## ${s.name}\n${content}` : content;
-      return { piece, idx, required: s.required === true };
+      return { piece, idx, required: s.required === true, partition };
     });
 
   let pieces: string[];
 
-  // If a global token budget is specified, required sections are always kept;
-  // optional sections fill remaining budget in original order.
+  // If a global token budget is specified, enforce three-pass deterministic trimming.
   if (budget > 0) {
-    const requiredItems = tagged.filter(t => t.required);
-    const optionalItems = tagged.filter(t => !t.required);
+    const invariantItems  = tagged.filter(t => t.partition === PROMPT_BUDGET_PARTITION.INVARIANT);
+    const requiredItems   = tagged.filter(t => t.partition === PROMPT_BUDGET_PARTITION.REQUIRED);
+    const expandableItems = tagged.filter(t => t.partition === PROMPT_BUDGET_PARTITION.EXPANDABLE);
 
-    const requiredTokens = requiredItems.reduce((sum, t) => sum + estimateTokens(t.piece), 0);
-    let remainingBudget = budget - requiredTokens;
+    // Deduct invariant + required token cost unconditionally
+    const invariantTokens = invariantItems.reduce((sum, t) => sum + estimateTokens(t.piece), 0);
+    const requiredTokens  = requiredItems.reduce((sum, t)  => sum + estimateTokens(t.piece), 0);
+    let remainingBudget = budget - invariantTokens - requiredTokens;
 
-    const keptOptional: typeof tagged = [];
-    for (const item of optionalItems) {
+    // Fill remaining budget with expandable sections in original order
+    const keptExpandable: typeof tagged = [];
+    for (const item of expandableItems) {
       const t = estimateTokens(item.piece);
       if (remainingBudget - t < 0) break;
-      keptOptional.push(item);
+      keptExpandable.push(item);
       remainingBudget -= t;
     }
 
-    // Merge required + kept optional, preserving original section order
-    pieces = [...requiredItems, ...keptOptional]
+    // Merge all three partitions, preserving original section order
+    pieces = [...invariantItems, ...requiredItems, ...keptExpandable]
       .sort((a, b) => a.idx - b.idx)
       .map(t => t.piece);
   } else {
@@ -335,32 +394,38 @@ export function markCacheableSegments(
 }
 
 /**
- * Mark sections whose names appear in a cycle-delta name set as `required: true`,
- * guaranteeing they survive token-budget trimming in compilePrompt.
+ * Mark sections whose names appear in a cycle-delta name set as `required: true`
+ * and `partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED`, guaranteeing they
+ * survive token-budget trimming in compilePrompt.
  *
  * Cycle-delta sections carry per-cycle reasoning context (research intelligence,
  * topic memory, carry-forward state) that must not be dropped under token pressure
  * — unlike large static context that can be safely truncated.
  *
  * Original section objects are never mutated — a new array is returned.
- * Sections not in the cycle-delta set retain their existing `required` field.
+ * Sections not in the cycle-delta set retain their existing `required` field
+ * and `partitionBudget` (defaulting to EXPANDABLE via resolvePartition).
  *
  * @param sections       - prompt sections to process
  * @param cycleDeltaNames - set of section names that must be marked required
- * @returns new array with `required: true` on every cycle-delta section
+ * @returns new array with `required: true` and `partitionBudget: "required"` on every cycle-delta section
  */
 export function markCycleDeltaSectionsRequired<
-  T extends { name: string; content: string; required?: boolean; [key: string]: any }
+  T extends { name: string; content: string; required?: boolean; partitionBudget?: PromptBudgetPartition; [key: string]: any }
 >(
   sections: T[],
   cycleDeltaNames: ReadonlySet<string>
-): Array<T & { required: boolean }> {
+): Array<T & { required: boolean; partitionBudget: PromptBudgetPartition }> {
   return (sections || []).map(s => {
     const name = String(s?.name || "").toLowerCase();
     if (cycleDeltaNames.has(name)) {
-      return { ...s, required: true };
+      return { ...s, required: true, partitionBudget: PROMPT_BUDGET_PARTITION.REQUIRED };
     }
-    return { ...s, required: s?.required === true };
+    return {
+      ...s,
+      required: s?.required === true,
+      partitionBudget: (s?.partitionBudget as PromptBudgetPartition | undefined) ?? PROMPT_BUDGET_PARTITION.EXPANDABLE,
+    };
   });
 }
 
