@@ -14,6 +14,8 @@ import {
   saveLedgerFull,
   autoCloseVerifiedDebt,
   prioritizeStaleDebts,
+  clusterDuplicateDebts,
+  compressLedger,
 } from "../../src/core/carry_forward_ledger.js";
 
 describe("carry_forward_ledger", () => {
@@ -648,5 +650,164 @@ describe("prioritizeStaleDebts", () => {
     ];
     const result = prioritizeStaleDebts(ledger, 10);
     assert.deepEqual(result, [], "closed entries must not appear in prioritized output");
+  });
+});
+
+// ── clusterDuplicateDebts ─────────────────────────────────────────────────────
+
+describe("clusterDuplicateDebts (Task 2)", () => {
+  function makeOpen(id: string, lesson: string, openedCycle = 1): any {
+    return {
+      id,
+      lesson,
+      fingerprint: computeFingerprint(lesson),
+      owner: "evolution-worker",
+      openedCycle,
+      dueCycle: openedCycle + 3,
+      severity: "warning",
+      closedAt: null,
+      closureEvidence: null,
+      cyclesOpen: 0,
+    };
+  }
+
+  it("groups open entries with identical fingerprints into clusters", () => {
+    const lesson = "Fix the worker runner retry loop transient error handling";
+    const ledger = [
+      makeOpen("debt-1", lesson, 1),
+      makeOpen("debt-2", lesson, 2),
+      makeOpen("debt-3", lesson, 3),
+    ];
+    const clusters = clusterDuplicateDebts(ledger);
+    assert.equal(clusters.length, 1, "must produce exactly one cluster for three duplicates");
+    assert.equal(clusters[0].length, 3);
+  });
+
+  it("returns empty array when all entries are singletons (no duplicates)", () => {
+    const ledger = [
+      makeOpen("d1", "Fix the orchestrator dispatch retry logic issue"),
+      makeOpen("d2", "Add circuit breaker for model calls in provider layer"),
+    ];
+    const clusters = clusterDuplicateDebts(ledger);
+    assert.deepEqual(clusters, [], "no duplicates → empty clusters");
+  });
+
+  it("ignores closed entries when clustering", () => {
+    const lesson = "Fix the governance canary breach detection false negative path";
+    const ledger = [
+      makeOpen("d1", lesson, 1),
+      { ...makeOpen("d2", lesson, 2), closedAt: "2025-01-01T00:00:00Z" }, // already closed
+    ];
+    // Only 1 open copy → not a duplicate cluster
+    const clusters = clusterDuplicateDebts(ledger);
+    assert.deepEqual(clusters, [], "closed entries must not be counted as duplicates");
+  });
+
+  it("handles empty ledger gracefully", () => {
+    assert.deepEqual(clusterDuplicateDebts([]), []);
+  });
+
+  it("returns multiple clusters when there are multiple duplicate groups", () => {
+    const lesson1 = "Fix the worker batch planner wave ordering contract breach";
+    const lesson2 = "Resolve the carry-forward SLA accounting cycle counter bug";
+    const ledger = [
+      makeOpen("a1", lesson1, 1),
+      makeOpen("a2", lesson1, 2),
+      makeOpen("b1", lesson2, 1),
+      makeOpen("b2", lesson2, 2),
+    ];
+    const clusters = clusterDuplicateDebts(ledger);
+    assert.equal(clusters.length, 2, "must produce two separate clusters");
+  });
+});
+
+// ── compressLedger ────────────────────────────────────────────────────────────
+
+describe("compressLedger (Task 2)", () => {
+  function makeOpen(id: string, lesson: string, openedCycle = 1): any {
+    return {
+      id,
+      lesson,
+      fingerprint: computeFingerprint(lesson),
+      owner: "evolution-worker",
+      openedCycle,
+      dueCycle: openedCycle + 3,
+      severity: "warning",
+      closedAt: null,
+      closureEvidence: null,
+      cyclesOpen: 0,
+    };
+  }
+
+  it("retires duplicate entries keeping the oldest canonical, returns correct counts", () => {
+    const lesson = "Fix the worker runner retry loop transient error handling gap";
+    const ledger = [
+      makeOpen("debt-1", lesson, 1), // oldest → canonical
+      makeOpen("debt-2", lesson, 2),
+      makeOpen("debt-3", lesson, 3),
+    ];
+    const result = compressLedger(ledger);
+    assert.equal(result.compressedCount, 2, "two duplicates must be retired");
+    assert.equal(result.clustersProcessed, 1);
+    assert.equal(result.retirementIds.length, 2);
+    assert.ok(!result.retirementIds.includes("debt-1"), "canonical entry must not be retired");
+
+    // Canonical remains open
+    const canonical = ledger.find(e => e.id === "debt-1");
+    assert.equal(canonical!.closedAt, null, "canonical must remain open");
+
+    // Duplicates are closed with retirement evidence
+    const retired = ledger.filter(e => e.id !== "debt-1");
+    for (const r of retired) {
+      assert.ok(r.closedAt, "retired entries must be closed");
+      assert.ok(r.closureEvidence?.includes("retired-by-compression"),
+        "closureEvidence must contain retirement marker");
+      assert.ok(r.closureEvidence?.includes("debt-1"),
+        "closureEvidence must reference canonical id");
+    }
+  });
+
+  it("returns compressedCount=0 when there are no duplicates", () => {
+    const ledger = [
+      makeOpen("d1", "Fix the orchestrator dispatch retry logic"),
+      makeOpen("d2", "Add circuit breaker for model calls in provider"),
+    ];
+    const result = compressLedger(ledger);
+    assert.equal(result.compressedCount, 0);
+    assert.equal(result.clustersProcessed, 0);
+    assert.deepEqual(result.retirementIds, []);
+  });
+
+  it("returns zeros for empty ledger", () => {
+    const result = compressLedger([]);
+    assert.equal(result.compressedCount, 0);
+    assert.equal(result.clustersProcessed, 0);
+    assert.deepEqual(result.retirementIds, []);
+  });
+
+  it("is idempotent — running twice produces same result", () => {
+    const lesson = "Fix the governance canary breach detection false negative evaluation path";
+    const ledger = [
+      makeOpen("d1", lesson, 1),
+      makeOpen("d2", lesson, 2),
+      makeOpen("d3", lesson, 3),
+    ];
+    const first = compressLedger(ledger);
+    assert.equal(first.compressedCount, 2);
+
+    // Second run — duplicates already closed → no new retirements
+    const second = compressLedger(ledger);
+    assert.equal(second.compressedCount, 0, "second compression run must retire nothing new");
+  });
+
+  it("negative path: only one open entry per fingerprint is not compressed", () => {
+    const lesson = "Fix something important in the carry forward pipeline accounting";
+    const ledger = [
+      makeOpen("d1", lesson, 1),
+      { ...makeOpen("d2", lesson, 2), closedAt: "2025-01-01T00:00:00Z" }, // already closed
+    ];
+    const result = compressLedger(ledger);
+    assert.equal(result.compressedCount, 0, "single open entry must not be compressed");
+    assert.equal(ledger[0].closedAt, null, "only open entry must remain open");
   });
 });

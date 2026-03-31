@@ -167,3 +167,73 @@ export function validatePlanEvidenceCoupling(plan: unknown): { valid: boolean; e
 
   return { valid: errors.length === 0, errors };
 }
+
+// ── Unambiguous envelope check (deterministic fast-path gate) ─────────────────
+
+/**
+ * Check whether an evidence envelope is both structurally complete AND
+ * unambiguous enough to allow the deterministic fast-path to skip premium AI
+ * review.
+ *
+ * "Complete" means validateEvidenceEnvelope passes.
+ * "Unambiguous" means all of the following hold:
+ *   - verificationEvidence.build  === "pass"
+ *   - verificationEvidence.tests  === "pass"
+ *   - verificationEvidence.lint   is "pass" or "n/a" (not "fail")
+ *   - verificationPassed          === true
+ *   - status                      === "done"
+ *   - No pre-review issues remain unaddressed (preReviewIssues must be absent or empty)
+ *
+ * If the original plan carries riskLevel="high", this gate always returns
+ * unambiguous=false — high-risk plans require full AI review regardless of
+ * evidence quality.
+ *
+ * @param envelope  — EvidenceEnvelope passed from the evolution executor
+ * @param opts      — optional { planRiskLevel?: string }
+ * @returns {{ unambiguous: boolean; reasons: string[] }}
+ */
+export function isEnvelopeUnambiguous(
+  envelope: unknown,
+  opts: { planRiskLevel?: string } = {}
+): { unambiguous: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // High-risk plans always require AI review.
+  if (opts.planRiskLevel === "high") {
+    reasons.push("plan riskLevel=high always requires full AI review");
+    return { unambiguous: false, reasons };
+  }
+
+  // Structural completeness is required first.
+  const structuralCheck = validateEvidenceEnvelope(envelope);
+  if (!structuralCheck.valid) {
+    reasons.push(...structuralCheck.errors.map(e => `structural: ${e}`));
+    return { unambiguous: false, reasons };
+  }
+
+  const e = envelope as Record<string, unknown>;
+  const ve = e.verificationEvidence as Record<string, unknown> | undefined;
+
+  if (e.status !== "done") {
+    reasons.push(`status must be "done", got "${e.status}"`);
+  }
+  if (e.verificationPassed !== true) {
+    reasons.push("verificationPassed must be true");
+  }
+  if (!ve || ve.build !== "pass") {
+    reasons.push(`verificationEvidence.build must be "pass", got "${ve?.build}"`);
+  }
+  if (!ve || ve.tests !== "pass") {
+    reasons.push(`verificationEvidence.tests must be "pass", got "${ve?.tests}"`);
+  }
+  if (ve && ve.lint === "fail") {
+    reasons.push('verificationEvidence.lint must not be "fail"');
+  }
+  // Pre-review issues that are unfixed make the result ambiguous.
+  const preReviewIssues = Array.isArray(e.preReviewIssues) ? e.preReviewIssues : [];
+  if (preReviewIssues.length > 0) {
+    reasons.push(`preReviewIssues present (${preReviewIssues.length} unfixed) — not unambiguous`);
+  }
+
+  return { unambiguous: reasons.length === 0, reasons };
+}

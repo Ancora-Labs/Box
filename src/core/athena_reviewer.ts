@@ -38,10 +38,12 @@ import {
 import { checkForbiddenCommands } from "./verification_command_registry.js";
 import { validateEvidenceEnvelope } from "./evidence_envelope.js";
 import type { EvidenceEnvelope } from "./evidence_envelope.js";
+import { isEnvelopeUnambiguous } from "./evidence_envelope.js";
 import {
   loadLedgerMeta,
   autoCloseVerifiedDebt,
   saveLedgerFull,
+  compressLedger,
 } from "./carry_forward_ledger.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 
@@ -723,6 +725,83 @@ export function computeDecisionQualityLabelWithEvidence(
     evidenceReason: completeness.reason,
     evidenceMissing: [],
   };
+}
+
+/**
+ * Reason codes for postmortem closure field validation.
+ * Used by validatePostmortemClosureFields to distinguish missing from empty input.
+ *
+ * @enum {string}
+ */
+export const POSTMORTEM_CLOSURE_VALIDATION_REASON = Object.freeze({
+  /** All required closure fields are non-empty and valid. */
+  OK: "OK",
+  /** One or more required closure fields are missing entirely. */
+  MISSING_FIELD:   "MISSING_FIELD",
+  /** One or more required closure fields are present but empty. */
+  EMPTY_FIELD:     "EMPTY_FIELD",
+} as const);
+
+/**
+ * Required non-empty fields in the postmortem closure evidence record.
+ * The AI postmortem path must populate all three fields with non-trivial content.
+ *
+ *   expectedOutcome — what the plan intended to achieve (non-empty string)
+ *   actualOutcome   — what actually happened (non-empty string)
+ *   deviation       — "none" | "minor" | "major" (non-empty, one of known values)
+ */
+const POSTMORTEM_CLOSURE_REQUIRED_FIELDS = ["expectedOutcome", "actualOutcome", "deviation"] as const;
+const VALID_DEVIATION_VALUES = new Set(["none", "minor", "major"]);
+
+/**
+ * Validate that a postmortem record has all required closure evidence fields
+ * populated with non-empty, non-trivial values.
+ *
+ * This gate enforces quality on the AI postmortem closure path before the
+ * record is persisted to history.  A postmortem without these fields cannot
+ * be used for carry-forward lesson extraction or decision quality scoring.
+ *
+ * @param postmortem — postmortem object returned by the AI or deterministic path
+ * @returns {{ valid: boolean, reason: string, emptyFields: string[] }}
+ */
+export function validatePostmortemClosureFields(postmortem: any): {
+  valid: boolean;
+  reason: string;
+  emptyFields: string[];
+} {
+  if (!postmortem || typeof postmortem !== "object") {
+    return { valid: false, reason: POSTMORTEM_CLOSURE_VALIDATION_REASON.MISSING_FIELD, emptyFields: ["postmortem"] };
+  }
+
+  const emptyFields: string[] = [];
+
+  for (const field of POSTMORTEM_CLOSURE_REQUIRED_FIELDS) {
+    const value = postmortem[field];
+    if (value === null || value === undefined) {
+      emptyFields.push(field);
+    } else if (typeof value === "string" && value.trim() === "") {
+      emptyFields.push(field);
+    }
+  }
+
+  // deviation must be one of the known values when present
+  const deviation = typeof postmortem.deviation === "string" ? postmortem.deviation.trim() : "";
+  if (deviation.length > 0 && !VALID_DEVIATION_VALUES.has(deviation) && !emptyFields.includes("deviation")) {
+    // invalid value treated as empty for gating purposes
+    emptyFields.push("deviation");
+  }
+
+  if (emptyFields.length > 0) {
+    return {
+      valid: false,
+      reason: emptyFields.some(f => postmortem[f] === null || postmortem[f] === undefined)
+        ? POSTMORTEM_CLOSURE_VALIDATION_REASON.MISSING_FIELD
+        : POSTMORTEM_CLOSURE_VALIDATION_REASON.EMPTY_FIELD,
+      emptyFields,
+    };
+  }
+
+  return { valid: true, reason: POSTMORTEM_CLOSURE_VALIDATION_REASON.OK, emptyFields: [] };
 }
 
 /**
@@ -2042,6 +2121,7 @@ function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
 
 /**
  * Attempt to auto-close any carry-forward debt items resolved by the current task.
+ * Also compresses duplicate open debt entries after auto-close.
  * Non-fatal: logs and swallows errors so postmortem flow is never blocked.
  *
  * @param {object} config
@@ -2057,11 +2137,20 @@ async function attemptCarryForwardAutoClose(
   try {
     const { entries: debtLedger, cycleCounter } = await loadLedgerMeta(config);
     const closed = autoCloseVerifiedDebt(debtLedger, [{ taskText, verificationEvidence: evidenceStr }]);
-    if (closed > 0) {
+    // Compress duplicate open entries after auto-close
+    const compression = compressLedger(debtLedger);
+    if (closed > 0 || compression.compressedCount > 0) {
       await saveLedgerFull(config, debtLedger, cycleCounter);
-      await appendProgress(config,
-        `[ATHENA] ${closed} carry-forward debt item(s) auto-closed by postmortem evidence`
-      );
+      if (closed > 0) {
+        await appendProgress(config,
+          `[ATHENA] ${closed} carry-forward debt item(s) auto-closed by postmortem evidence`
+        );
+      }
+      if (compression.compressedCount > 0) {
+        await appendProgress(config,
+          `[ATHENA] ${compression.compressedCount} duplicate debt item(s) compressed across ${compression.clustersProcessed} cluster(s)`
+        );
+      }
     }
   } catch (err) {
     try {
@@ -2133,11 +2222,13 @@ export async function runAthenaPostmortem(
     : [];
 
   // ── Deterministic fast-path: skip AI call for clean passes ──────────────
+  // Strict low-risk closure path (Task 3): bypass premium AI review only when
+  // the evidence envelope is complete AND unambiguous per isEnvelopeUnambiguous.
   const forceAi = config?.athena?.forceAiPostmortem === true;
-  const isCleanPass = workerStatus === "done"
-    && verificationPassed === true
-    && workerResult?.verificationEvidence?.build === "pass"
-    && workerResult?.verificationEvidence?.tests === "pass";
+  const envelopeCheck = isEnvelopeUnambiguous(workerResult, {
+    planRiskLevel: String(originalPlan?.riskLevel || "").toLowerCase(),
+  });
+  const isCleanPass = envelopeCheck.unambiguous;
 
   if (isCleanPass && !forceAi) {
     const postmortem = computeDeterministicPostmortem(workerResult, originalPlan, dql);
@@ -2340,6 +2431,22 @@ ${recurrenceContext}
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
+
+  // ── Postmortem closure field validation (Task 1 gate) ──────────────────────
+  // Require non-empty expectedOutcome, actualOutcome, and deviation before
+  // persisting. Empty fields degrade the postmortem and prevent carry-forward
+  // lesson extraction and decision quality scoring from using it.
+  const closureValidation = validatePostmortemClosureFields(postmortem);
+  if (!closureValidation.valid) {
+    await appendProgress(config,
+      `[ATHENA] Postmortem closure validation FAILED — ${closureValidation.reason} — empty fields: ${closureValidation.emptyFields.join(", ")}`
+    );
+    (postmortem as any).closureFieldsValid = false;
+    (postmortem as any).closureValidationReason = closureValidation.reason;
+    (postmortem as any).closureValidationEmptyFields = closureValidation.emptyFields;
+  } else {
+    (postmortem as any).closureFieldsValid = true;
+  }
 
   // Classify defect channel
   const dc = classifyDefectChannel({

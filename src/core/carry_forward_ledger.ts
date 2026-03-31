@@ -403,3 +403,104 @@ export function createReviewerDebtIfNeeded(
   });
   return existing;
 }
+
+// ── Duplicate clustering and ledger compression ───────────────────────────────
+
+/**
+ * Cluster open debt entries by their fingerprint.
+ *
+ * Returns a Map from fingerprint → array of open entries with that fingerprint,
+ * limited to clusters that contain more than one entry (true duplicates).
+ * Entries without a fingerprint are ignored (they cannot be deduplicated safely).
+ *
+ * @param {any[]} ledger
+ * @returns {Map<string, any[]>} fingerprint → array of duplicate open entries
+ */
+export function clusterDuplicateDebts(ledger: any[]): any[][] {
+  const map = new Map<string, any[]>();
+
+  for (const entry of (ledger || [])) {
+    if (entry.closedAt) continue; // only cluster open entries
+    const fp = entry.fingerprint || computeFingerprint(String(entry.lesson || ""));
+    if (!fp) continue;
+
+    if (!map.has(fp)) {
+      map.set(fp, []);
+    }
+    map.get(fp)!.push(entry);
+  }
+
+  // Remove singletons — only return actual duplicates
+  for (const [fp, entries] of map) {
+    if (entries.length <= 1) map.delete(fp);
+  }
+
+  return Array.from(map.values());
+}
+
+/**
+ * Compress unresolved debt by collapsing duplicate open entries (same fingerprint)
+ * into a single canonical item and retiring the redundant copies.
+ *
+ * Algorithm:
+ *   1. Group open entries by fingerprint.
+ *   2. For each group with ≥ 2 open entries:
+ *      - Keep the oldest entry (lowest openedCycle, then first insertion order).
+ *        It becomes the canonical actionable item with an updated `lesson` that
+ *        records the cluster size for operator visibility.
+ *      - Close the remaining entries with retirement evidence so they no longer
+ *        appear in SLA overdue counts.
+ *   3. Return the mutated ledger (in-place), a count of retired entries, and
+ *      a summary of clusters processed.
+ *
+ * This operation is idempotent: running twice produces the same result because
+ * the redundant entries are already closed after the first run.
+ *
+ * @param {any[]} ledger — carry-forward ledger (mutated in place)
+ * @returns {{ compressedCount: number, clustersProcessed: number, retirementIds: string[] }}
+ */
+export function compressLedger(ledger: any[]): {
+  compressedCount: number;
+  clustersProcessed: number;
+  retirementIds: string[];
+} {
+  if (!Array.isArray(ledger) || ledger.length === 0) {
+    return { compressedCount: 0, clustersProcessed: 0, retirementIds: [] };
+  }
+
+  const clusters = clusterDuplicateDebts(ledger);
+  let compressedCount = 0;
+  let clustersProcessed = 0;
+  const retirementIds: string[] = [];
+  const retiredAt = new Date().toISOString();
+
+  for (const entries of clusters) {
+    // Sort by openedCycle ascending, then by array index (first insertion wins)
+    const sorted = [...entries].sort((a, b) => {
+      const cycleDiff = (a.openedCycle || 0) - (b.openedCycle || 0);
+      return cycleDiff !== 0 ? cycleDiff : ledger.indexOf(a) - ledger.indexOf(b);
+    });
+
+    const canonical = sorted[0];
+    const duplicates = sorted.slice(1);
+    const fp = canonical.fingerprint || canonical.clusterFingerprint || "";
+
+    // Annotate canonical with cluster metadata for operator visibility
+    if (duplicates.length > 0) {
+      canonical.clusterSize = duplicates.length + 1;
+      canonical.clusterFingerprint = fp;
+    }
+
+    // Retire each duplicate with retirement evidence
+    for (const dup of duplicates) {
+      dup.closedAt = retiredAt;
+      dup.closureEvidence = `retired-by-compression: canonical-id=${canonical.id} cluster-fingerprint=${fp} cluster-size=${duplicates.length + 1}`;
+      retirementIds.push(dup.id);
+      compressedCount++;
+    }
+
+    clustersProcessed++;
+  }
+
+  return { compressedCount, clustersProcessed, retirementIds };
+}

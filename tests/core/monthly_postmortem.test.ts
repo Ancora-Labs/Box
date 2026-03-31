@@ -1089,3 +1089,61 @@ describe("generateMonthlyPostmortem — staleUnresolvedDebts field", () => {
     }
   });
 });
+
+// ── Task 1: Postmortem closure field validation ───────────────────────────────
+
+import {
+  POSTMORTEM_CLOSURE_VALIDATION_REASON,
+  validatePostmortemClosureFields,
+} from "../../src/core/athena_reviewer.js";
+
+describe("validatePostmortemClosureFields — used in monthly postmortem workflow (Task 1)", () => {
+  it("accepts a fully populated postmortem with all closure fields", () => {
+    const pm = {
+      expectedOutcome: "Deploy new feature to staging environment",
+      actualOutcome:   "Feature deployed successfully, all checks passed.",
+      deviation:       "none",
+    };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, true, "fully populated postmortem must pass closure validation");
+    assert.equal(r.reason, POSTMORTEM_CLOSURE_VALIDATION_REASON.OK);
+  });
+
+  it("rejects postmortem with empty expectedOutcome — cannot extract lessons without it", () => {
+    const pm = { expectedOutcome: "", actualOutcome: "Build passed", deviation: "none" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("expectedOutcome"),
+      "expectedOutcome must be listed as empty field");
+    assert.equal(r.reason, POSTMORTEM_CLOSURE_VALIDATION_REASON.EMPTY_FIELD);
+  });
+
+  it("rejects postmortem with empty actualOutcome — deviation score requires it", () => {
+    const pm = { expectedOutcome: "Deploy feature", actualOutcome: "", deviation: "none" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("actualOutcome"),
+      "actualOutcome must be listed as empty field");
+  });
+
+  it("rejects postmortem with empty deviation — required for defect channel classification", () => {
+    const pm = { expectedOutcome: "Deploy feature", actualOutcome: "Build passed", deviation: "" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false);
+    assert.ok(r.emptyFields.includes("deviation"),
+      "deviation must be listed as empty field");
+  });
+
+  it("negative path: undefined postmortem returns MISSING_FIELD reason", () => {
+    const r = validatePostmortemClosureFields(undefined);
+    assert.equal(r.valid, false);
+    assert.equal(r.reason, POSTMORTEM_CLOSURE_VALIDATION_REASON.MISSING_FIELD);
+  });
+
+  it("negative path: deviation='unknown-value' is rejected as invalid", () => {
+    const pm = { expectedOutcome: "Deploy", actualOutcome: "Deployed", deviation: "unknown-value" };
+    const r = validatePostmortemClosureFields(pm);
+    assert.equal(r.valid, false,
+      "only 'none', 'minor', 'major' are valid deviation values");
+  });
+});
