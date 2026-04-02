@@ -2236,9 +2236,9 @@ describe("verification_gate — carry-forward backlog closure (#1-#5)", () => {
   });
 
   it("CF-005: ALL_POST_MERGE_PLACEHOLDERS contains both placeholder constants", () => {
-    assert.ok(ALL_POST_MERGE_PLACEHOLDERS.has(POST_MERGE_SHA_PLACEHOLDER),
+    assert.ok(ALL_POST_MERGE_PLACEHOLDERS.includes(POST_MERGE_SHA_PLACEHOLDER),
       "ALL_POST_MERGE_PLACEHOLDERS must include POST_MERGE_SHA_PLACEHOLDER");
-    assert.ok(ALL_POST_MERGE_PLACEHOLDERS.has(POST_MERGE_OUTPUT_PLACEHOLDER),
+    assert.ok(ALL_POST_MERGE_PLACEHOLDERS.includes(POST_MERGE_OUTPUT_PLACEHOLDER),
       "ALL_POST_MERGE_PLACEHOLDERS must include POST_MERGE_OUTPUT_PLACEHOLDER");
   });
 

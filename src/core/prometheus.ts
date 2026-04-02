@@ -38,7 +38,7 @@ import {
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
 import { validateAllPlans, PLAN_VIOLATION_SEVERITY, PACKET_VIOLATION_CODE } from "./plan_contract_validator.js";
-import { section, compilePrompt, markCacheableSegments, PROMPT_BUDGET_PARTITION } from "./prompt_compiler.js";
+import { section, compilePrompt as _compilePrompt, markCacheableSegments as _markCacheableSegments, PROMPT_BUDGET_PARTITION } from "./prompt_compiler.js";
 import { computeFingerprint, classifyCarryForwardByRecurrence } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
 import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
@@ -215,7 +215,7 @@ function buildResearchPromptSection(
   // richest planning signal and must not be truncated.
   const sourcePreviewLimit = isStale ? 5 : 15;
   const topicLines = topics.map((topic, i) => `${i + 1}. ${topic}`).join("\n");
-  const hiddenTopicCount = 0; // all topics always shown
+  const _hiddenTopicCount = 0; // all topics always shown
   const sourceSignals = (Array.isArray(scoutObj.sources) ? scoutObj.sources : [])
     .slice(0, sourcePreviewLimit)
     .map((source, i: number) => {
@@ -273,36 +273,36 @@ async function getLatestResearchArtifactUpdatedAtMs(stateDir: string): Promise<n
  * Prometheus now reads files autonomously via allowAll tools.
  * Kept as empty array for backward compatibility with any code referencing it.
  */
-const PRIORITY_SOURCE_FILES: string[] = [];
+const _PRIORITY_SOURCE_FILES: string[] = [];
 
 /**
  * DEPRECATED — Prometheus now reads files autonomously.
  */
-const LARGE_FILE_HEAD_LINES = 600;
+const _LARGE_FILE_HEAD_LINES = 600;
 
 /**
  * DEPRECATED — Prometheus now reads files autonomously.
  */
-const SOURCE_CODE_SECTION_MAX_CHARS = 600_000;
+const _SOURCE_CODE_SECTION_MAX_CHARS = 600_000;
 
 /**
  * DEPRECATED — Prometheus reads files autonomously via allowAll tools.
  * Returns empty string. Kept for backward compatibility.
  */
-async function buildSourceCodeSection(_repoRoot: string): Promise<string> {
+async function _buildSourceCodeSection(_repoRoot: string): Promise<string> {
   return "";
 }
 
 /**
  * Key state files — DEPRECATED. Prometheus reads these autonomously.
  */
-const STATE_FILES_TO_INJECT: Array<{ file: string; label: string; maxChars: number }> = [];
+const _STATE_FILES_TO_INJECT: Array<{ file: string; label: string; maxChars: number }> = [];
 
 /**
  * DEPRECATED — Prometheus reads state files autonomously via allowAll tools.
  * Returns empty string. Kept for backward compatibility.
  */
-async function buildSystemStateSection(_stateDir: string): Promise<string> {
+async function _buildSystemStateSection(_stateDir: string): Promise<string> {
   return "";
 }
 
@@ -3079,7 +3079,7 @@ Consider whether the root causes are:
   } catch { /* non-fatal — proceed without pattern analysis */ }
 
   // ── Build real file listing for prompt (prevents fabricated target_files) ─
-  let repoFileListingSection = "";
+  let _repoFileListingSection = "";
   try {
     const listDir = async (dir: string, prefix: string) => {
       try {
@@ -3109,7 +3109,7 @@ Consider whether the root causes are:
     if (testCoreFiles.length) sections.push(`### tests/core/ (test files)\n${testCoreFiles.join("\n")}`);
     if (testFiles.length) sections.push(`### tests/ (root test files)\n${testFiles.join("\n")}`);
     if (sections.length) {
-      repoFileListingSection = `\n\n## EXISTING REPOSITORY FILES\nYou MUST only reference paths from this list in target_files. Do NOT invent new module names.\n${sections.join("\n")}\n`;
+      _repoFileListingSection = `\n\n## EXISTING REPOSITORY FILES\nYou MUST only reference paths from this list in target_files. Do NOT invent new module names.\n${sections.join("\n")}\n`;
     }
   } catch { /* non-fatal */ }
 

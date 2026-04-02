@@ -48,8 +48,8 @@ import {
 } from "./carry_forward_ledger.js";
 import {
   estimatePlanExecutionTokens,
-  estimatePlanTokens,
-  getUsableModelContextTokens,
+  estimatePlanTokens as _estimatePlanTokens,
+  getUsableModelContextTokens as _getUsableModelContextTokens,
   buildTokenFirstBatches,
 } from "./worker_batch_planner.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
