@@ -18,7 +18,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { appendFileSync } from "node:fs";
-import { writeJson, spawnAsync } from "./fs_utils.js";
+import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs } from "./agent_loader.js";
 import { section, compilePrompt } from "./prompt_compiler.js";
