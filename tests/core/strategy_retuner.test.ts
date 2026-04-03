@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateRetune, applyRetune, evaluateSloRetune } from "../../src/core/strategy_retuner.js";
+import { evaluateRetune, applyRetune, evaluateSloRetune, evaluatePolicyRetuneFromDeltas } from "../../src/core/strategy_retuner.js";
 import { SLO_METRIC } from "../../src/core/slo_checker.js";
 
 describe("strategy_retuner", () => {
@@ -240,5 +240,31 @@ describe("evaluateSloRetune", () => {
     const rec = result.recommendations[0];
     assert.ok(rec);
     assert.equal(rec.trigger, `sustainedSLOBreach:${SLO_METRIC.DISPATCH_LATENCY}`);
+  });
+});
+
+describe("evaluatePolicyRetuneFromDeltas", () => {
+  it("returns shouldRetune=true when at least one policy delta is non-improving", () => {
+    const result = evaluatePolicyRetuneFromDeltas([
+      { policyId: "glob-false-fail", delta: -0.01 },
+      { policyId: "lint-failure", delta: 0.2 },
+    ]);
+    assert.equal(result.shouldRetune, true);
+    assert.deepEqual(result.policiesToRetire, ["glob-false-fail"]);
+  });
+
+  it("returns shouldRetune=false when all deltas exceed threshold", () => {
+    const result = evaluatePolicyRetuneFromDeltas(
+      [{ policyId: "lint-failure", delta: 0.2 }],
+      { degradeThreshold: 0.1 }
+    );
+    assert.equal(result.shouldRetune, false);
+    assert.deepEqual(result.policiesToRetire, []);
+  });
+
+  it("negative path: handles invalid input deterministically", () => {
+    const result = evaluatePolicyRetuneFromDeltas(null as any);
+    assert.equal(result.shouldRetune, false);
+    assert.deepEqual(result.policiesToRetire, []);
   });
 });

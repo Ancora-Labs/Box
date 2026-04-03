@@ -238,3 +238,19 @@ export function evaluateSloRetune(config, sloHistory, opts: { minConsecutiveBrea
     hasSustainedBreaches: signatures.length > 0,
   };
 }
+
+export function evaluatePolicyRetuneFromDeltas(
+  deltas: Array<{ policyId: string; delta: number }>,
+  opts: { degradeThreshold?: number } = {},
+): { shouldRetune: boolean; policiesToRetire: string[] } {
+  const degradeThreshold = Number.isFinite(Number(opts.degradeThreshold)) ? Number(opts.degradeThreshold) : 0;
+  const list = Array.isArray(deltas) ? deltas : [];
+  const policiesToRetire = list
+    .filter((item) => Number(item?.delta) <= degradeThreshold)
+    .map((item) => String(item?.policyId || "").trim())
+    .filter(Boolean);
+  return {
+    shouldRetune: policiesToRetire.length > 0,
+    policiesToRetire,
+  };
+}

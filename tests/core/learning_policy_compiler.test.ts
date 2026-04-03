@@ -477,6 +477,8 @@ import {
   filterRetiredPolicies,
   RETIREMENT_MIN_CLOSURES,
   RETIREMENT_MIN_CLEAN_CYCLES,
+  computePolicyOutcomeDelta,
+  applyPolicyDecay,
 } from "../../src/core/learning_policy_compiler.js";
 
 describe("buildPolicyClosureEvidence", () => {
@@ -592,6 +594,34 @@ describe("filterRetiredPolicies", () => {
     const { active, retired } = filterRetiredPolicies(null as any, [], []);
     assert.deepEqual(active, []);
     assert.deepEqual(retired, []);
+  });
+});
+
+describe("policy outcome delta and decay", () => {
+  it("computePolicyOutcomeDelta returns measurable delta payload", () => {
+    const result = computePolicyOutcomeDelta("glob-false-fail", 0.25, 0.45, 4);
+    assert.equal(result.policyId, "glob-false-fail");
+    assert.equal(result.baseline, 0.25);
+    assert.equal(result.current, 0.45);
+    assert.equal(result.delta, 0.2);
+    assert.equal(result.cycleWindow, 4);
+  });
+
+  it("applyPolicyDecay retires policies with repeated non-improving deltas", () => {
+    const policies = [{ id: "glob-false-fail", _inactiveCycles: 2 }];
+    const deltas = [{ policyId: "glob-false-fail", baseline: 0.4, current: 0.39, delta: -0.01, cycleWindow: 3 }];
+    const result = applyPolicyDecay(policies, deltas, { minDelta: 0.01, maxInactiveCycles: 3 });
+    assert.equal(result.active.length, 0);
+    assert.equal(result.retired.length, 1);
+    assert.ok(typeof result.retired[0]._retiredAt === "string");
+  });
+
+  it("negative path: improving delta resets inactive cycle count", () => {
+    const policies = [{ id: "lint-failure", _inactiveCycles: 2 }];
+    const deltas = [{ policyId: "lint-failure", baseline: 0.2, current: 0.35, delta: 0.15, cycleWindow: 3 }];
+    const result = applyPolicyDecay(policies, deltas, { minDelta: 0.01, maxInactiveCycles: 3 });
+    assert.equal(result.retired.length, 0);
+    assert.equal(result.active[0]._inactiveCycles, 0);
   });
 });
 

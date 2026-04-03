@@ -26,6 +26,9 @@ import {
   CLOSURE_YIELD_LOW_THRESHOLD,
   routeModelWithRealizedROI,
   EXPLORATION_BOUND,
+  loadBenchmarkContracts,
+  validateBenchmarkSample,
+  assessHardTaskEscalation,
 } from "../../src/core/model_policy.js";
 
 describe("model_policy — complexity tiers", () => {
@@ -835,5 +838,130 @@ describe("routeModelWithRealizedROI", () => {
     assert.ok(result.reason.includes("roi="), `reason should include roi=, got: ${result.reason}`);
     assert.ok(result.reason.includes("tier="), `reason should include tier=, got: ${result.reason}`);
     await fs.rm((config as any).paths.stateDir, { recursive: true, force: true });
+  });
+});
+
+describe("benchmark contract ingestion", () => {
+  async function makeTmpConfigWithContracts() {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "benchmark-contracts-"));
+    const payload = {
+      schemaVersion: 1,
+      updatedAt: "2026-04-03T00:00:00.000Z",
+      contracts: [
+        {
+          name: "SWE-bench",
+          version: "1.0",
+          requiredFields: ["benchmarkName", "taskId", "status", "model", "tokensIn", "tokensOut", "elapsedMs", "evaluatedAt"],
+          statusEnum: ["success", "partial", "failed"]
+        }
+      ]
+    };
+    await fs.writeFile(path.join(dir, "benchmark_contracts.json"), JSON.stringify(payload, null, 2), "utf8");
+    return { config: { paths: { stateDir: dir } }, dir };
+  }
+
+  it("loads benchmark contracts from state", async () => {
+    const { config, dir } = await makeTmpConfigWithContracts();
+    try {
+      const contracts = await loadBenchmarkContracts(config);
+      assert.equal(contracts.length, 1);
+      assert.equal(contracts[0].name, "SWE-bench");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates a schema-conformant benchmark sample", async () => {
+    const { config, dir } = await makeTmpConfigWithContracts();
+    try {
+      const contracts = await loadBenchmarkContracts(config);
+      const sample = {
+        benchmarkName: "SWE-bench",
+        taskId: "task-1",
+        status: "success",
+        model: "Claude Sonnet 4.6",
+        tokensIn: 1000,
+        tokensOut: 250,
+        elapsedMs: 12000,
+        evaluatedAt: "2026-04-03T00:00:00.000Z"
+      };
+      const result = validateBenchmarkSample(sample as any, contracts);
+      assert.equal(result.valid, true);
+      assert.deepEqual(result.errors, []);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("negative path: rejects sample with missing required fields", async () => {
+    const { config, dir } = await makeTmpConfigWithContracts();
+    try {
+      const contracts = await loadBenchmarkContracts(config);
+      const sample = {
+        benchmarkName: "SWE-bench",
+        status: "success"
+      };
+      const result = validateBenchmarkSample(sample as any, contracts);
+      assert.equal(result.valid, false);
+      assert.ok(result.errors.some((e) => e.startsWith("missing_field:taskId")));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("assessHardTaskEscalation", () => {
+  it("does not escalate non-hard tasks", () => {
+    const result = assessHardTaskEscalation({ complexity: "low", estimatedLines: 20 }, { recentROI: 0.9 });
+    assert.equal(result.hardTask, false);
+    assert.equal(result.escalate, false);
+    assert.equal(result.severity, "none");
+  });
+
+  it("requires escalation for hard tasks with weak benchmark + weak outcomes", () => {
+    const benchmarkGroundTruth = {
+      entries: [
+        {
+          recommendations: [
+            { implementationStatus: "pending", benchmarkScore: 0.55, capacityGain: 0.05 },
+            { implementationStatus: "pending", benchmarkScore: 0.60, capacityGain: 0.02 },
+          ],
+        },
+      ],
+    };
+    const result = assessHardTaskEscalation(
+      { complexity: "critical", estimatedLines: 4000 },
+      { recentROI: 0.2 },
+      {
+        benchmarkGroundTruth,
+        outcomeMetrics: { sampleCount: 4, successRate: 0.25, recentROI: 0.2 },
+      }
+    );
+    assert.equal(result.hardTask, true);
+    assert.equal(result.escalate, true);
+    assert.equal(result.severity, "required");
+  });
+
+  it("negative path: returns recommended escalation (not required) for medium uncertainty hard task", () => {
+    const benchmarkGroundTruth = {
+      entries: [
+        {
+          recommendations: [
+            { implementationStatus: "implemented", benchmarkScore: 0.69, capacityGain: 0.12 },
+          ],
+        },
+      ],
+    };
+    const result = assessHardTaskEscalation(
+      { complexity: "high", estimatedLines: 3200 },
+      { recentROI: 0.45 },
+      {
+        benchmarkGroundTruth,
+        outcomeMetrics: { sampleCount: 7, successRate: 0.5, recentROI: 0.45 },
+      }
+    );
+    assert.equal(result.hardTask, true);
+    assert.equal(result.escalate, true);
+    assert.equal(result.severity, "recommended");
   });
 });
