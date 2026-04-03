@@ -297,8 +297,10 @@ export function isNonSpecificVerification(value: string): boolean {
   const v = String(value).trim();
   // Specific: references a test file by extension
   if (/\.(test|spec)\.(ts|js|tsx|jsx)/i.test(v)) return false;
-  // Specific: references a tests/ directory path
-  if (/\/tests?\/[^\s]/.test(v)) return false;
+  // Specific: references a tests/ directory path (with or without leading slash/= separator)
+  if (/(^|[/\\=])tests?\/[^\s]/i.test(v)) return false;
+  // Specific: contains a --testPathPattern= argument pointing to a path
+  if (/--testPathPattern=[^\s]/i.test(v)) return false;
   // Specific: contains a description separator used by the output format
   if (/[—\-–]\s*test[:\s]/i.test(v)) return false;
   // Non-specific: matches a known bare CLI command (no file argument)
