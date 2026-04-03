@@ -12,10 +12,13 @@ dist/
 # Runtime state
 state/*.json
 state/*.txt
+state/*.jsonl
+state/*.pid
+state/*.md
+state/synth_clean/
+state/synth_fetch/
+tmp_research/
 # Schema and reference documents in state/ are committed (not runtime state)
-!state/carry_forward_backlog.json
-!state/diagnostics_schema.json
-
 # Logs
 *.log
 npm-debug.log*
