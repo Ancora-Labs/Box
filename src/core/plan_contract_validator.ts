@@ -156,11 +156,17 @@ export interface PacketDensityMetrics {
 }
 
 export function computePacketDensityMetrics(plan: any): PacketDensityMetrics {
+  // Use NaN when the field is absent/null so isThinPacketForAdmission can distinguish
+  // "field missing" from "field explicitly set to a low value".
+  const rawTokens = plan?.estimatedExecutionTokens;
+  const estimatedExecutionTokens = rawTokens != null && rawTokens !== ""
+    ? Number(rawTokens)
+    : NaN;
   return {
     taskChars: String(plan?.task || "").trim().length,
     targetFiles: Array.isArray(plan?.target_files) ? plan.target_files.filter(Boolean).length : 0,
     acceptanceCriteria: Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria.filter(Boolean).length : 0,
-    estimatedExecutionTokens: Number(plan?.estimatedExecutionTokens || 0),
+    estimatedExecutionTokens,
   };
 }
 
@@ -168,12 +174,15 @@ export function isThinPacketForAdmission(
   metrics: PacketDensityMetrics,
   thresholds: PacketDensityThresholds,
 ): boolean {
+  // estimatedExecutionTokens=NaN means the field was absent — treat as unknown, not thin.
+  // Only reject when the field is explicitly present AND below threshold.
+  const tokensThin = Number.isFinite(metrics.estimatedExecutionTokens)
+    && metrics.estimatedExecutionTokens < thresholds.minExecutionTokens;
   return (
     metrics.taskChars < thresholds.minTaskChars
     || metrics.targetFiles < thresholds.minTargetFiles
     || metrics.acceptanceCriteria < thresholds.minAcceptanceCriteria
-    || !Number.isFinite(metrics.estimatedExecutionTokens)
-    || metrics.estimatedExecutionTokens < thresholds.minExecutionTokens
+    || tokensThin
   );
 }
 

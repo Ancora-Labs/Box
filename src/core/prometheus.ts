@@ -3790,6 +3790,25 @@ ${compiledCycleDelta}`;
           `[PROMETHEUS][DENSITY] Rejected ${rejectedThinPackets.length} thin packet(s) after auto-bundling`
         );
       }
+      // Safety valve: if all plans were rejected, restore them with a warning rather
+      // than producing 0 plans (which causes a trust-boundary deadlock and kills the cycle).
+      // Thin-packet enforcement is advisory when it would leave nothing to dispatch.
+      if (rawParsedInput.plans.length === 0 && rejectedThinPackets.length > 0) {
+        await appendProgress(
+          config,
+          `[PROMETHEUS][DENSITY] All packets rejected — restoring ${rejectedThinPackets.length} packet(s) with thin-packet warning to avoid deadlock`
+        );
+        // Re-parse original plans from the pre-filter state; mark them as needing densification
+        // but allow dispatch so the cycle is not killed.
+        const bundledPlans = bundled.plans;
+        rawParsedInput.plans = bundledPlans.map((plan: any) => ({
+          ...plan,
+          _thinPacketWarning: plan._thinPacketRejected
+            ? plan._thinPacketReason
+            : undefined,
+          _thinPacketRejected: false,
+        }));
+      }
     }
 
     // ── Decomposition cap gate ────────────────────────────────────────────
