@@ -72,6 +72,7 @@ describe("worker_runner artifact hard-block gate", () => {
   it("checkPostMergeArtifact: accepts valid evidence with SHA and test block", () => {
     const output = [
       "Merged abc1234 into main",
+      "CLEAN_TREE_STATUS=clean",
       "VERIFICATION_REPORT: BUILD=pass; TESTS=pass",
       "===NPM TEST OUTPUT START===",
       "# tests 12 # pass 12 # fail 0",
@@ -111,6 +112,7 @@ describe("worker_runner — precomputedArtifact single-evaluation contract", () 
   it("checkPostMergeArtifact is deterministic: same output produces identical evidence", () => {
     const output = [
       "BOX_MERGED_SHA=abc1234",
+      "CLEAN_TREE_STATUS=clean",
       "===NPM TEST OUTPUT START===",
       "# tests 10 pass 10 fail 0",
       "===NPM TEST OUTPUT END===",
@@ -122,7 +124,7 @@ describe("worker_runner — precomputedArtifact single-evaluation contract", () 
 
   it("precomputedArtifact passed to validateWorkerContract is reflected in evidence", () => {
     const artifact = checkPostMergeArtifact(
-      "BOX_MERGED_SHA=aaa1111\n===NPM TEST OUTPUT START===\n# tests 3 pass 3 fail 0\n===NPM TEST OUTPUT END==="
+      "BOX_MERGED_SHA=aaa1111\nCLEAN_TREE_STATUS=clean\n===NPM TEST OUTPUT START===\n# tests 3 pass 3 fail 0\n===NPM TEST OUTPUT END==="
     );
     assert.equal(artifact.hasArtifact, true, "pre-condition: artifact must be complete");
 
