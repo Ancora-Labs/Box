@@ -38,6 +38,7 @@ import {
   runInterventionOptimizer,
   buildInterventionsFromPlan,
   buildPolicyImpactByInterventionId,
+  scoreInterventionsAgainstRubric,
   buildBudgetFromConfig,
 } from "../../src/core/intervention_optimizer.js";
 
@@ -597,6 +598,39 @@ describe("buildPolicyImpactByInterventionId", () => {
   it("negative: returns empty map for non-array inputs", () => {
     assert.deepEqual(buildPolicyImpactByInterventionId(null as any, []), {});
     assert.deepEqual(buildPolicyImpactByInterventionId([], null as any), {});
+  });
+});
+
+describe("scoreInterventionsAgainstRubric", () => {
+  it("scores interventions with policy attribution and combined score", () => {
+    const interventions = [
+      makeIntervention({ id: "inv-a" }),
+      makeIntervention({ id: "inv-b" }),
+    ];
+    const rows = scoreInterventionsAgainstRubric(
+      interventions as any,
+      {
+        "inv-a": { architecture: 0.8, speed: 0.6, security: 0.9 },
+        "inv-b": { architecture: 0.4, speed: 0.4, security: 0.4 },
+      },
+      {
+        cycleId: "cycle-101",
+        outcomeByInterventionId: { "inv-a": 0.8, "inv-b": 0.3 },
+        policyByInterventionId: { "inv-a": "glob-false-fail", "inv-b": "lint-failure" },
+      },
+    );
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].cycleId, "cycle-101");
+    assert.ok(rows[0].combinedScore >= rows[1].combinedScore);
+  });
+
+  it("negative: skips interventions without policy attribution", () => {
+    const rows = scoreInterventionsAgainstRubric(
+      [makeIntervention({ id: "inv-z" })] as any,
+      { "inv-z": { architecture: 0.9 } },
+      { outcomeByInterventionId: { "inv-z": 0.9 }, policyByInterventionId: {} },
+    );
+    assert.equal(rows.length, 0);
   });
 });
 

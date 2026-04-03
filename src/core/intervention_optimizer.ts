@@ -815,6 +815,71 @@ export function buildPolicyImpactByInterventionId(
   return policyImpactMap;
 }
 
+export function scoreInterventionsAgainstRubric(
+  interventions: any[],
+  rubricByInterventionId: Record<string, Record<string, number>>,
+  opts: {
+    outcomeByInterventionId?: Record<string, number>;
+    cycleId?: string;
+    policyByInterventionId?: Record<string, string>;
+  } = {},
+): Array<{
+  interventionId: string;
+  cycleId: string;
+  policyId: string;
+  dimensionScores: Record<string, number>;
+  rubricScore: number;
+  outcomeScore: number;
+  combinedScore: number;
+  scoredAt: string;
+}> {
+  if (!Array.isArray(interventions) || interventions.length === 0) return [];
+  const cycleId = String(opts.cycleId || new Date().toISOString());
+  const outcomeByInterventionId = opts.outcomeByInterventionId && typeof opts.outcomeByInterventionId === "object"
+    ? opts.outcomeByInterventionId
+    : {};
+  const policyByInterventionId = opts.policyByInterventionId && typeof opts.policyByInterventionId === "object"
+    ? opts.policyByInterventionId
+    : {};
+  const rows: Array<{
+    interventionId: string;
+    cycleId: string;
+    policyId: string;
+    dimensionScores: Record<string, number>;
+    rubricScore: number;
+    outcomeScore: number;
+    combinedScore: number;
+    scoredAt: string;
+  }> = [];
+  for (let i = 0; i < interventions.length; i++) {
+    const intervention = interventions[i];
+    const interventionId = String(intervention?.id || `intervention-${i + 1}`);
+    const policyId = String(policyByInterventionId[interventionId] || "");
+    if (!policyId) continue;
+    const dimensions = rubricByInterventionId && typeof rubricByInterventionId === "object"
+      ? (rubricByInterventionId[interventionId] || {})
+      : {};
+    const values = Object.values(dimensions).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    const rubricScore = values.length > 0
+      ? Math.round(((values.reduce((sum, value) => sum + Math.max(0, Math.min(1, value)), 0) / values.length)) * 1000) / 1000
+      : 0;
+    const rawOutcome = Number(outcomeByInterventionId[interventionId]);
+    const outcomeScore = Number.isFinite(rawOutcome) ? Math.max(0, Math.min(1, rawOutcome)) : 0;
+    const combinedScore = Math.round(((rubricScore * 0.6) + (outcomeScore * 0.4)) * 1000) / 1000;
+    rows.push({
+      interventionId,
+      cycleId,
+      policyId,
+      dimensionScores: dimensions,
+      rubricScore,
+      outcomeScore,
+      combinedScore,
+      scoredAt: new Date().toISOString(),
+    });
+  }
+  return rows;
+}
+
 // ── Prometheus plan → Intervention adapter ────────────────────────────────────
 
 /**

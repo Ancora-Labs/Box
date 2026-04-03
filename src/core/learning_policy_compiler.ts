@@ -10,6 +10,7 @@
  * Integration: called by orchestrator after postmortem, before next cycle start.
  */
 import { computeDecayedPolicyEffectiveness } from "./lesson_halflife.js";
+import { EQUAL_DIMENSION_SET } from "./plan_contract_validator.js";
 
 /**
  * Known lesson patterns that can be compiled into policy checks.
@@ -993,6 +994,135 @@ export function buildPolicyImpactAttribution(
     halfLifeWeight,
     decayedEffectiveness,
     shouldRetire,
+  };
+}
+
+export const POLICY_MUTATION_EVIDENCE_WINDOW = 3;
+export const POLICY_MUTATION_MIN_COMBINED_SCORE = 0.55;
+
+export interface InterventionRubricScore {
+  interventionId: string;
+  cycleId: string;
+  policyId: string;
+  dimensionScores: Record<string, number>;
+  rubricScore: number;
+  outcomeScore: number;
+  combinedScore: number;
+  scoredAt: string;
+}
+
+export interface PolicyMutationDecision {
+  policyId: string;
+  evidenceCount: number;
+  rubricScore: number;
+  outcomeScore: number;
+  combinedScore: number;
+  mutate: boolean;
+  reason: string;
+}
+
+export interface PolicyMutationResult {
+  routed: ReturnType<typeof deriveRoutingAdjustments>;
+  promptConstraints: ReturnType<typeof buildPromptHardConstraints>;
+  decisions: PolicyMutationDecision[];
+  deferred: Array<{ policyId: string; reason: string }>;
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function normalizeDimensionScores(input: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const dim of EQUAL_DIMENSION_SET) {
+    const v = Number(input?.[dim]);
+    out[dim] = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+  }
+  return out;
+}
+
+export function buildInterventionRubricScore(
+  interventionId: string,
+  cycleId: string,
+  policyId: string,
+  dimensionScores: Record<string, number>,
+  outcomeScore: number,
+): InterventionRubricScore {
+  const normalized = normalizeDimensionScores(dimensionScores);
+  const rubricAverage = EQUAL_DIMENSION_SET.reduce((sum, dim) => sum + normalized[dim], 0) / EQUAL_DIMENSION_SET.length;
+  const boundedOutcome = Math.max(0, Math.min(1, Number.isFinite(Number(outcomeScore)) ? Number(outcomeScore) : 0));
+  const combined = (rubricAverage * 0.6) + (boundedOutcome * 0.4);
+  return {
+    interventionId: String(interventionId || "").trim(),
+    cycleId: String(cycleId || "").trim(),
+    policyId: String(policyId || "").trim(),
+    dimensionScores: normalized,
+    rubricScore: round3(rubricAverage),
+    outcomeScore: round3(boundedOutcome),
+    combinedScore: round3(combined),
+    scoredAt: new Date().toISOString(),
+  };
+}
+
+export function decidePolicyMutationsFromEvidenceWindow(
+  activePolicies: any[],
+  scoredInterventions: InterventionRubricScore[],
+  opts: { evidenceWindowCycles?: number; minCombinedScore?: number } = {},
+): PolicyMutationResult {
+  const policies = Array.isArray(activePolicies) ? activePolicies : [];
+  const evidence = Array.isArray(scoredInterventions) ? scoredInterventions : [];
+  const evidenceWindowCycles = Math.max(1, Math.floor(Number(opts.evidenceWindowCycles ?? POLICY_MUTATION_EVIDENCE_WINDOW)));
+  const minCombinedScore = Number.isFinite(Number(opts.minCombinedScore))
+    ? Number(opts.minCombinedScore)
+    : POLICY_MUTATION_MIN_COMBINED_SCORE;
+
+  const decisions: PolicyMutationDecision[] = [];
+  const deferred: Array<{ policyId: string; reason: string }> = [];
+  const mutablePolicies: any[] = [];
+
+  for (const policy of policies) {
+    const policyId = String(policy?.id || "");
+    if (!policyId) continue;
+    const forPolicy = evidence
+      .filter((entry) => String(entry?.policyId || "") === policyId)
+      .slice(-evidenceWindowCycles);
+    if (forPolicy.length < evidenceWindowCycles) {
+      deferred.push({
+        policyId,
+        reason: `insufficient_evidence_window:${forPolicy.length}/${evidenceWindowCycles}`,
+      });
+      decisions.push({
+        policyId,
+        evidenceCount: forPolicy.length,
+        rubricScore: 0,
+        outcomeScore: 0,
+        combinedScore: 0,
+        mutate: false,
+        reason: "insufficient_evidence_window",
+      });
+      continue;
+    }
+    const rubricScore = round3(forPolicy.reduce((sum, entry) => sum + Number(entry.rubricScore || 0), 0) / forPolicy.length);
+    const outcomeScore = round3(forPolicy.reduce((sum, entry) => sum + Number(entry.outcomeScore || 0), 0) / forPolicy.length);
+    const combinedScore = round3(forPolicy.reduce((sum, entry) => sum + Number(entry.combinedScore || 0), 0) / forPolicy.length);
+    const mutate = combinedScore >= minCombinedScore;
+    decisions.push({
+      policyId,
+      evidenceCount: forPolicy.length,
+      rubricScore,
+      outcomeScore,
+      combinedScore,
+      mutate,
+      reason: mutate ? "window_passed" : "combined_score_below_threshold",
+    });
+    if (mutate) mutablePolicies.push(policy);
+  }
+
+  return {
+    routed: deriveRoutingAdjustments(mutablePolicies),
+    promptConstraints: buildPromptHardConstraints(mutablePolicies),
+    decisions,
+    deferred,
   };
 }
 

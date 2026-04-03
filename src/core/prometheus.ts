@@ -45,6 +45,9 @@ import {
   isCycleSpecificExclusionJustification,
   EQUAL_DIMENSION_SET,
   normalizeLeverageRank,
+  buildThinPacketRejectionReason,
+  computePacketDensityMetrics,
+  isThinPacketForAdmission,
 } from "./plan_contract_validator.js";
 import {
   section,
@@ -3763,20 +3766,19 @@ ${compiledCycleDelta}`;
     rawParsedInput._packetDensificationPostBundle = postBundleDensity;
     if (postBundleDensity.thinCount > 0) {
       const rejectedThinPackets: Array<{ index: number; reason: string }> = [];
+      const densityThresholds = {
+        minTaskChars: PROMETHEUS_PROMPT_DENSITY_MIN.minTaskChars,
+        minTargetFiles: PROMETHEUS_PROMPT_DENSITY_MIN.minTargetFiles,
+        minAcceptanceCriteria: PROMETHEUS_PROMPT_DENSITY_MIN.minAcceptanceCriteria,
+        minExecutionTokens: PROMETHEUS_PROMPT_DENSITY_MIN.minExecutionTokens,
+      };
       rawParsedInput.plans = rawParsedInput.plans.filter((plan: any, i: number) => {
-        const taskChars = String(plan?.task || "").trim().length;
-        const targetCount = Array.isArray(plan?.target_files) ? plan.target_files.filter(Boolean).length : 0;
-        const acCount = Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria.filter(Boolean).length : 0;
-        const estimatedTokens = Number(plan?.estimatedExecutionTokens || 0);
-        const thin = (
-          taskChars < PROMETHEUS_PROMPT_DENSITY_MIN.minTaskChars
-          || targetCount < PROMETHEUS_PROMPT_DENSITY_MIN.minTargetFiles
-          || acCount < PROMETHEUS_PROMPT_DENSITY_MIN.minAcceptanceCriteria
-          || !Number.isFinite(estimatedTokens)
-          || estimatedTokens < PROMETHEUS_PROMPT_DENSITY_MIN.minExecutionTokens
-        );
+        const metrics = computePacketDensityMetrics(plan);
+        const thin = isThinPacketForAdmission(metrics, densityThresholds);
         if (!thin) return true;
-        const reason = `thin_packet_rejected: taskChars=${taskChars}/${PROMETHEUS_PROMPT_DENSITY_MIN.minTaskChars}, targetFiles=${targetCount}/${PROMETHEUS_PROMPT_DENSITY_MIN.minTargetFiles}, acceptanceCriteria=${acCount}/${PROMETHEUS_PROMPT_DENSITY_MIN.minAcceptanceCriteria}, estimatedExecutionTokens=${estimatedTokens}/${PROMETHEUS_PROMPT_DENSITY_MIN.minExecutionTokens}`;
+        const reason = buildThinPacketRejectionReason(metrics, densityThresholds);
+        plan._thinPacketRejected = true;
+        plan._thinPacketReason = reason;
         rejectedThinPackets.push({ index: i, reason });
         return false;
       });

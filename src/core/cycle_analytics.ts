@@ -973,3 +973,47 @@ export function summarizeBenchmarkSchemaCoverage(
   };
 }
 
+export function buildPolicyInterventionAttributionLedger(
+  history: any[],
+  newEntries: any[],
+  opts: { evidenceWindowCycles?: number } = {},
+): {
+  history: any[];
+  decisions: Array<{ policyId: string; mutate: boolean; reason: string; evidenceCount: number }>;
+} {
+  const existing = Array.isArray(history) ? history : [];
+  const incoming = Array.isArray(newEntries) ? newEntries : [];
+  const evidenceWindowCycles = Math.max(1, Math.floor(Number(opts.evidenceWindowCycles ?? 3)));
+  const merged = [...existing, ...incoming];
+  const byPolicy = new Map<string, any[]>();
+  for (const entry of merged) {
+    const policyId = String(entry?.policyId || "").trim();
+    if (!policyId) continue;
+    const list = byPolicy.get(policyId) || [];
+    list.push(entry);
+    byPolicy.set(policyId, list);
+  }
+  const decisions: Array<{ policyId: string; mutate: boolean; reason: string; evidenceCount: number }> = [];
+  for (const [policyId, entries] of byPolicy.entries()) {
+    const window = entries.slice(-evidenceWindowCycles);
+    if (window.length < evidenceWindowCycles) {
+      decisions.push({
+        policyId,
+        mutate: false,
+        reason: "insufficient_evidence_window",
+        evidenceCount: window.length,
+      });
+      continue;
+    }
+    const avgCombined = window.reduce((sum, row) => sum + Number(row?.combinedScore || 0), 0) / window.length;
+    const mutate = avgCombined >= 0.55;
+    decisions.push({
+      policyId,
+      mutate,
+      reason: mutate ? "window_passed" : "combined_score_below_threshold",
+      evidenceCount: window.length,
+    });
+  }
+  return { history: merged, decisions };
+}
+

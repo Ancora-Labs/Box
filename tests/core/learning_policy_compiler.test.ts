@@ -1,6 +1,20 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { compileLessonsToPolicies, validatePlanAgainstPolicies, COMPILABLE_PATTERNS, hardGateRecurrenceToPolicies, checkCarryForwardGate, deriveRoutingAdjustments, buildPromptHardConstraints, REASON_CODES, compileCurriculumToPolicies, CURRICULUM_PROMOTION_THRESHOLD } from "../../src/core/learning_policy_compiler.js";
+import {
+  compileLessonsToPolicies,
+  validatePlanAgainstPolicies,
+  COMPILABLE_PATTERNS,
+  hardGateRecurrenceToPolicies,
+  checkCarryForwardGate,
+  deriveRoutingAdjustments,
+  buildPromptHardConstraints,
+  REASON_CODES,
+  compileCurriculumToPolicies,
+  CURRICULUM_PROMOTION_THRESHOLD,
+  buildInterventionRubricScore,
+  decidePolicyMutationsFromEvidenceWindow,
+  POLICY_MUTATION_EVIDENCE_WINDOW,
+} from "../../src/core/learning_policy_compiler.js";
 
 describe("learning_policy_compiler", () => {
   describe("compileLessonsToPolicies", () => {
@@ -743,5 +757,93 @@ describe("compileCurriculumToPolicies", () => {
   it("negative: skips items with lesson shorter than 5 characters", () => {
     const items = [{ lesson: "hi", weight: 0.9, researchBacked: true }];
     assert.deepEqual(compileCurriculumToPolicies(items), []);
+  });
+});
+
+describe("policy mutation evidence window", () => {
+  it("requires full 3-cycle evidence window before mutating", () => {
+    const policies = [{ id: "glob-false-fail", severity: "critical" }];
+    const evidence = [
+      buildInterventionRubricScore("inv-1", "cycle-1", "glob-false-fail", {
+        architecture: 0.7,
+        speed: 0.7,
+        "task-quality": 0.7,
+        "prompt-quality": 0.7,
+        "parser-quality": 0.7,
+        "worker-specialization": 0.7,
+        "model-task-fit": 0.7,
+        "learning-loop": 0.7,
+        "cost-efficiency": 0.7,
+        security: 0.7,
+      }, 0.8),
+      buildInterventionRubricScore("inv-2", "cycle-2", "glob-false-fail", {
+        architecture: 0.8,
+        speed: 0.8,
+        "task-quality": 0.8,
+        "prompt-quality": 0.8,
+        "parser-quality": 0.8,
+        "worker-specialization": 0.8,
+        "model-task-fit": 0.8,
+        "learning-loop": 0.8,
+        "cost-efficiency": 0.8,
+        security: 0.8,
+      }, 0.8),
+    ];
+    const result = decidePolicyMutationsFromEvidenceWindow(policies, evidence);
+    assert.equal(result.routed.length, 0);
+    assert.equal(result.promptConstraints.length, 0);
+    assert.equal(result.deferred.length, 1);
+    assert.ok(result.deferred[0].reason.includes("insufficient_evidence_window"));
+  });
+
+  it("mutates only after 3-cycle evidence window passes threshold", () => {
+    const policies = [{ id: "glob-false-fail", severity: "critical" }];
+    const evidence = [
+      buildInterventionRubricScore("inv-1", "cycle-1", "glob-false-fail", {
+        architecture: 0.8,
+        speed: 0.8,
+        "task-quality": 0.8,
+        "prompt-quality": 0.8,
+        "parser-quality": 0.8,
+        "worker-specialization": 0.8,
+        "model-task-fit": 0.8,
+        "learning-loop": 0.8,
+        "cost-efficiency": 0.8,
+        security: 0.8,
+      }, 0.8),
+      buildInterventionRubricScore("inv-2", "cycle-2", "glob-false-fail", {
+        architecture: 0.7,
+        speed: 0.7,
+        "task-quality": 0.7,
+        "prompt-quality": 0.7,
+        "parser-quality": 0.7,
+        "worker-specialization": 0.7,
+        "model-task-fit": 0.7,
+        "learning-loop": 0.7,
+        "cost-efficiency": 0.7,
+        security: 0.7,
+      }, 0.8),
+      buildInterventionRubricScore("inv-3", "cycle-3", "glob-false-fail", {
+        architecture: 0.7,
+        speed: 0.7,
+        "task-quality": 0.7,
+        "prompt-quality": 0.7,
+        "parser-quality": 0.7,
+        "worker-specialization": 0.7,
+        "model-task-fit": 0.7,
+        "learning-loop": 0.7,
+        "cost-efficiency": 0.7,
+        security: 0.7,
+      }, 0.7),
+    ];
+    const result = decidePolicyMutationsFromEvidenceWindow(
+      policies,
+      evidence,
+      { evidenceWindowCycles: POLICY_MUTATION_EVIDENCE_WINDOW },
+    );
+    assert.equal(result.deferred.length, 0);
+    assert.equal(result.routed.length, 1);
+    assert.equal(result.promptConstraints.length, 1);
+    assert.equal(result.decisions[0].mutate, true);
   });
 });

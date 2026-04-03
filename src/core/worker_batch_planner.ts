@@ -3,6 +3,11 @@ import { enforceModelPolicy } from "./model_policy.js";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
 import { enforceLaneDiversity, selectWorkerByFitScore, LanePerformanceLedger } from "./capability_pool.js";
 import { compactSingletonWaves } from "./dag_scheduler.js";
+import {
+  buildThinPacketRejectionReason,
+  computePacketDensityMetrics,
+  isThinPacketForAdmission,
+} from "./plan_contract_validator.js";
 
 const CHARS_PER_TOKEN = 4;
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 100000;
@@ -435,19 +440,15 @@ export function autoBundleThinRelatedPackets(
   const minTaskChars = Number(opts.minTaskChars ?? 120);
   const minExecutionTokens = Number(opts.minExecutionTokens ?? 8000);
 
-  const isThin = (plan: any): boolean => {
-    const taskChars = String(plan?.task || "").trim().length;
-    const targetCount = Array.isArray(plan?.target_files) ? plan.target_files.filter(Boolean).length : 0;
-    const acCount = Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria.filter(Boolean).length : 0;
-    const estimatedTokens = Number(plan?.estimatedExecutionTokens || 0);
-    return (
-      taskChars < minTaskChars
-      || targetCount < minTargetFiles
-      || acCount < minAcceptanceCriteria
-      || !Number.isFinite(estimatedTokens)
-      || estimatedTokens < minExecutionTokens
-    );
+  const densityThresholds = {
+    minTargetFiles,
+    minAcceptanceCriteria,
+    minTaskChars,
+    minExecutionTokens,
   };
+  const isThin = (plan: any): boolean => (
+    isThinPacketForAdmission(computePacketDensityMetrics(plan), densityThresholds)
+  );
 
   const normalizedTargetFiles = (plan: any): string[] => (
     Array.isArray(plan?.target_files) ? plan.target_files : []
@@ -506,6 +507,11 @@ export function autoBundleThinRelatedPackets(
       _autoBundledThinPacket: true,
       _autoBundledFromCount: bundlePlans.length,
     };
+    const mergedMetrics = computePacketDensityMetrics(merged);
+    if (isThinPacketForAdmission(mergedMetrics, densityThresholds)) {
+      merged._thinPacketRejected = true;
+      merged._thinPacketReason = buildThinPacketRejectionReason(mergedMetrics, densityThresholds);
+    }
     out.push(merged);
     consumed.add(i);
     bundledCount += 1;

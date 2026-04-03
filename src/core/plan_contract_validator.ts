@@ -141,6 +141,54 @@ export const AMBIGUOUS_TASK_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
  */
 export const MANDATORY_EXCLUSION_JUSTIFICATION_MIN_LENGTH = 12;
 
+export interface PacketDensityThresholds {
+  minTargetFiles: number;
+  minAcceptanceCriteria: number;
+  minTaskChars: number;
+  minExecutionTokens: number;
+}
+
+export interface PacketDensityMetrics {
+  taskChars: number;
+  targetFiles: number;
+  acceptanceCriteria: number;
+  estimatedExecutionTokens: number;
+}
+
+export function computePacketDensityMetrics(plan: any): PacketDensityMetrics {
+  return {
+    taskChars: String(plan?.task || "").trim().length,
+    targetFiles: Array.isArray(plan?.target_files) ? plan.target_files.filter(Boolean).length : 0,
+    acceptanceCriteria: Array.isArray(plan?.acceptance_criteria) ? plan.acceptance_criteria.filter(Boolean).length : 0,
+    estimatedExecutionTokens: Number(plan?.estimatedExecutionTokens || 0),
+  };
+}
+
+export function isThinPacketForAdmission(
+  metrics: PacketDensityMetrics,
+  thresholds: PacketDensityThresholds,
+): boolean {
+  return (
+    metrics.taskChars < thresholds.minTaskChars
+    || metrics.targetFiles < thresholds.minTargetFiles
+    || metrics.acceptanceCriteria < thresholds.minAcceptanceCriteria
+    || !Number.isFinite(metrics.estimatedExecutionTokens)
+    || metrics.estimatedExecutionTokens < thresholds.minExecutionTokens
+  );
+}
+
+export function buildThinPacketRejectionReason(
+  metrics: PacketDensityMetrics,
+  thresholds: PacketDensityThresholds,
+): string {
+  return (
+    `thin_packet_rejected: taskChars=${metrics.taskChars}/${thresholds.minTaskChars}, ` +
+    `targetFiles=${metrics.targetFiles}/${thresholds.minTargetFiles}, ` +
+    `acceptanceCriteria=${metrics.acceptanceCriteria}/${thresholds.minAcceptanceCriteria}, ` +
+    `estimatedExecutionTokens=${metrics.estimatedExecutionTokens}/${thresholds.minExecutionTokens}`
+  );
+}
+
 /** Canonical 10 planning dimensions used by Prometheus/critic leverage scoring. */
 export const EQUAL_DIMENSION_SET = Object.freeze([
   "architecture",

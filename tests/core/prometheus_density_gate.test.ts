@@ -1,7 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { autoBundleThinRelatedPackets } from "../../src/core/worker_batch_planner.js";
-import { validatePlanContract, PACKET_VIOLATION_CODE, PLAN_VIOLATION_SEVERITY } from "../../src/core/plan_contract_validator.js";
+import {
+  validatePlanContract,
+  PACKET_VIOLATION_CODE,
+  PLAN_VIOLATION_SEVERITY,
+  computePacketDensityMetrics,
+  buildThinPacketRejectionReason,
+  isThinPacketForAdmission,
+} from "../../src/core/plan_contract_validator.js";
 
 describe("prometheus density admission contract", () => {
   it("auto-bundles thin related packets into a denser packet", () => {
@@ -81,6 +88,27 @@ describe("prometheus density admission contract", () => {
     const violation = result.violations.find((v) => v.code === PACKET_VIOLATION_CODE.THIN_PACKET_REJECTED);
     assert.ok(violation);
     assert.equal(violation?.severity, PLAN_VIOLATION_SEVERITY.CRITICAL);
+  });
+
+  it("thin packet rejection reason is deterministic and shared", () => {
+    const plan = {
+      task: "short",
+      target_files: ["src/core/prometheus.ts"],
+      acceptance_criteria: ["one"],
+      estimatedExecutionTokens: 1200,
+    };
+    const thresholds = {
+      minTargetFiles: 2,
+      minAcceptanceCriteria: 2,
+      minTaskChars: 120,
+      minExecutionTokens: 8000,
+    };
+    const metrics = computePacketDensityMetrics(plan);
+    assert.equal(isThinPacketForAdmission(metrics, thresholds), true);
+    const reason = buildThinPacketRejectionReason(metrics, thresholds);
+    assert.ok(reason.includes("thin_packet_rejected:"));
+    assert.ok(reason.includes("taskChars="));
+    assert.ok(reason.includes("estimatedExecutionTokens="));
   });
 });
 
