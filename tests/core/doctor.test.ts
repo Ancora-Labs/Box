@@ -24,7 +24,7 @@ describe("doctor", () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-doctor-"));
     const result = await runDoctor({
       paths: { stateDir: tmpDir },
-      env: { githubToken: "x", targetRepo: "CanerDoqdu/Box", copilotCliCommand: "node", claudeApiKey: "" }
+      env: { githubToken: "x", targetRepo: "CanerDoqdu/Box", copilotCliCommand: "node" }
     });
     assert.equal(typeof result.ok, "boolean");
     assert.equal(typeof result.checks.node, "boolean");

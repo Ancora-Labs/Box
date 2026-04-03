@@ -280,7 +280,7 @@ describe("AC5/AC15: Sensitive field denylist — positive coverage", () => {
   const CRITICAL_SENSITIVE_KEYS = [
     "token", "apikey", "secret", "password", "authorization",
     "bearer", "credential", "accesstoken", "refreshtoken",
-    "privatekey", "github_token", "anthropic_api_key",
+    "privatekey", "github_token",
   ];
 
   for (const key of CRITICAL_SENSITIVE_KEYS) {

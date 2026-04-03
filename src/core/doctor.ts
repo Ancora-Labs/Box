@@ -25,7 +25,6 @@ export async function runDoctor(config) {
   const checks = {
     node: check("node --version"),
     docker: check("docker --version"),
-    claudeApiKey: Boolean(config.env?.claudeApiKey),
     githubToken: Boolean(config.env?.githubToken),
     targetRepo: Boolean(config.env?.targetRepo),
     stateDir: existsSync(stateDir),

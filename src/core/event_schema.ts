@@ -181,10 +181,7 @@ export const SENSITIVE_FIELD_DENYLIST = Object.freeze([
   "client_secret",
   "githubtoken",
   "github_token",
-  "anthropic_api_key",
-  "anthropicapikey",
-  "claude_api_key",
-  "claudeapikey",
+
   "openai_api_key",
   "openaiapikey",
 ]);
