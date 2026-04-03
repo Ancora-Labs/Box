@@ -2615,6 +2615,25 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
     // ── AI batch-metadata contract gate ─────────────────────────────────────
     // Athena must return explicit batch assignments. We do not synthesize
     // deterministic batch indexes at this seam.
+    //
+    // Auto-normalize _batchTotal: Athena sometimes sets _batchTotal to the
+    // per-batch plan count instead of the global batch count, producing
+    // inconsistent values across plans (e.g. 1,2). Repair by setting every
+    // plan's _batchTotal to max(_batchIndex) across all plans so all plans
+    // agree on a single consistent value before the gate fires.
+    {
+      const maxBatchIndex = Math.max(
+        ...handoff.plans.map((p: any) => Number(p?._batchIndex) || 0)
+      );
+      if (Number.isFinite(maxBatchIndex) && maxBatchIndex > 0) {
+        for (const p of handoff.plans as any[]) {
+          const bt = Number(p._batchTotal);
+          if (!Number.isFinite(bt) || bt !== maxBatchIndex) {
+            p._batchTotal = maxBatchIndex;
+          }
+        }
+      }
+    }
     const aiBatchCheck = validateAiProvidedBatchMetadata(handoff.plans);
     if (!aiBatchCheck.valid) {
       const blockReason = {
