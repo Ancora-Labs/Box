@@ -30,6 +30,17 @@ export const WORKER_CAPABILITIES: Readonly<Record<string, readonly string[]>> = 
   "observation-worker":    Object.freeze(["observation"]),
 });
 
+export function normalizeWorkerName(name: unknown): string {
+  const raw = String(name || "").trim().toLowerCase();
+  if (!raw) return "evolution-worker";
+  if (raw === "evolution worker" || raw === "evolution-worker") return "evolution-worker";
+  return raw.replace(/\s+/g, "-");
+}
+
+export function isSpecialistWorkerName(name: unknown): boolean {
+  return normalizeWorkerName(name) !== "evolution-worker";
+}
+
 export function getRoleRegistry(config) {
   const fallback = {
     ceoSupervisor: { id: "ceo-supervisor", name: "Jesus", model: "GPT-5.3-Codex" },

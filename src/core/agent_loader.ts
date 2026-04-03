@@ -136,6 +136,10 @@ export function buildAgentArgs({
   }
 
   let promptText = String(prompt);
+  const useDensePromptMode = String(process.env.BOX_PROMPT_DENSIFY_MODE || "").toLowerCase() === "true";
+  if (useDensePromptMode) {
+    promptText = `\n[DENSIFIED_PROMPT_MODE]\nPrioritize dense, high-leverage bundled work packets over thin micro-tasks.\n${promptText}`;
+  }
   if (promptText.length > PROMPT_FILE_THRESHOLD) {
     const slug = agentSlug || "agent";
     const promptFile = path.join(STATE_DIR, `prompt_${slug}_${Date.now()}.md`);

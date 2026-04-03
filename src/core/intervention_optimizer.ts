@@ -752,6 +752,7 @@ export function runInterventionOptimizer(interventions, budget, options: any = {
     generatedAt,
     budgetUnit:     BUDGET_UNIT,
     failureClassificationsApplied,
+    benchmarkTelemetryCount: Array.isArray(options?.benchmarkTelemetry) ? options.benchmarkTelemetry.length : 0,
     ...reconciled,
   };
 }

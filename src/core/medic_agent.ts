@@ -185,14 +185,14 @@ async function gatherDiagnosticContext(config: any, signal: MedicSignal): Promis
 
 // ── Verification: run npm test ───────────────────────────────────────────────
 
-function runVerification(repoRoot: string): { passed: boolean; output: string } {
+function runVerification(repoRoot: string, timeoutMs = 60 * 60 * 1000): { passed: boolean; output: string } {
   try {
     const result = spawnSync("npm", ["test"], {
       cwd: repoRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       shell: true,
-      timeout: 5 * 60 * 1000, // 5 min max for tests
+      timeout: timeoutMs,
       windowsHide: true,
     });
     const stdout = String(result.stdout || "");
@@ -310,7 +310,7 @@ export async function runMedic(config: any, signal: MedicSignal): Promise<MedicR
   // Run verification
   appendLiveLogSync(stateDir, `[${ts()}] Running verification (npm test)...\n`);
   await appendProgress(config, `[MEDIC] Running verification — patches: ${parsed.patches.join(", ")}`);
-  const verify = runVerification(repoRoot);
+  const verify = runVerification(repoRoot, Number(config?.runtime?.verificationCommandTimeoutMs || 60 * 60 * 1000));
   appendLiveLogSync(stateDir, `[${ts()}] Verification result: ${verify.passed ? "PASS" : "FAIL"}\n`);
 
   if (!verify.passed) {

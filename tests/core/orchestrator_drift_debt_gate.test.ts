@@ -216,6 +216,22 @@ describe("evaluatePreDispatchGovernanceGate — mandatory drift debt gate", () =
     assert.ok(result.reason?.startsWith("mandatory_drift_debt_unresolved:"));
   });
 
+  it("blocks for elevated-priority autonomous playbook drift even without src/core path", async () => {
+    const report: ArchitectureDriftReport = {
+      scannedDocs: ["docs/autonomous-dev-playbook.md"],
+      presentCount: 0,
+      staleCount: 1,
+      staleReferences: [
+        { docPath: "docs/autonomous-dev-playbook.md", referencedPath: "src/missing.ts", line: 8 },
+      ],
+      deprecatedTokenCount: 0,
+      deprecatedTokenRefs: [],
+    };
+    const result = await evaluatePreDispatchGovernanceGate(makeConfig(), [], "test-cycle", report);
+    assert.equal(result.blocked, true, "elevated-priority playbook drift debt must block dispatch");
+    assert.ok(result.reason?.startsWith("mandatory_drift_debt_unresolved:"));
+  });
+
   it("blocked result includes mandatoryDriftPaths listing the missing high-priority files", async () => {
     const report: ArchitectureDriftReport = {
       scannedDocs: ["docs/a.md"],

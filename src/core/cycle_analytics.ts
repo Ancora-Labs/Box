@@ -948,3 +948,28 @@ export function computeResearchCapacityGain(
   };
 }
 
+export function summarizeBenchmarkSchemaCoverage(
+  contracts: Array<{ name: string; requiredFields: string[] }>,
+  samples: Array<Record<string, unknown>>,
+): { totalSamples: number; validSamples: number; invalidSamples: number } {
+  const contractList = Array.isArray(contracts) ? contracts : [];
+  const sampleList = Array.isArray(samples) ? samples : [];
+  let validSamples = 0;
+  for (const sample of sampleList) {
+    const benchmarkName = String((sample as any)?.benchmarkName || "").trim().toLowerCase();
+    const contract = contractList.find((c) => String(c.name || "").trim().toLowerCase() === benchmarkName);
+    if (!contract) continue;
+    const required = Array.isArray(contract.requiredFields) ? contract.requiredFields : [];
+    const isValid = required.every((field) => {
+      const value = (sample as any)?.[field];
+      return !(value === null || value === undefined || (typeof value === "string" && String(value).trim().length === 0));
+    });
+    if (isValid) validSamples += 1;
+  }
+  return {
+    totalSamples: sampleList.length,
+    validSamples,
+    invalidSamples: Math.max(0, sampleList.length - validSamples),
+  };
+}
+

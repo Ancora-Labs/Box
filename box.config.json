@@ -44,7 +44,9 @@
       "node_modules/"
     ],
     "disableWaveParallelDispatch": false,
+    "dashboardEnabled": false,
     "prometheusAnalysisFreshnessMinutes": 60,
+    "jesusTimeoutMs": 1800000,
     "jesusDirectiveFreshnessMinutes": 30,
     "plannerMaxGenerations": 3,
     "maxTacticalCycles": 6,
@@ -102,7 +104,8 @@
     },
     "interBatchDelayMs": 90000,
     "maxCapacityMode": false,
-    "maxPlansPerDependencyBatch": 15,
+    "maxPlansPerDependencyBatch": 4,
+    "verificationCommandTimeoutMs": 3600000,
     "workerContextTokenLimit": 150000,
     "trustBoundaryMode": "warn",
     "planQualityMinScore": 0
@@ -149,7 +152,7 @@
     "specialistFillThreshold": 1,
     "preferFewestWorkers": true,
     "allowSameCycleFollowUps": false,
-    "requireDependencyAwareWaves": true,
+    "requireDependencyAwareWaves": false,
     "splitConflictingPlansAcrossBatches": false,
     "nucleusFrontierMode": true,
     "compactSingletonWaves": true
@@ -222,7 +225,7 @@
   },
   "copilot": {
     "strategy": "task-best",
-    "defaultModel": "Claude Sonnet 4.6",
+    "defaultModel": "GPT-5.3-Codex",
     "preferredModelsByTaskKind": {
       "scan": [
         "GPT-5.3-Codex",
@@ -237,8 +240,8 @@
         "Claude Sonnet 4.6"
       ],
       "implementation": [
-        "Claude Sonnet 4.6",
-        "GPT-5.3-Codex"
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
       ],
       "test": [
         "GPT-5.3-Codex",
@@ -249,12 +252,12 @@
         "Claude Sonnet 4.6"
       ],
       "security": [
-        "Claude Sonnet 4.6",
-        "GPT-5.3-Codex"
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
       ],
       "devops": [
-        "Claude Sonnet 4.6",
-        "GPT-5.3-Codex"
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
       ],
       "refactor": [
         "GPT-5.3-Codex",
@@ -269,8 +272,8 @@
         "Claude Sonnet 4.6"
       ],
       "production": [
-        "Claude Sonnet 4.6",
-        "GPT-5.3-Codex"
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
       ]
     },
     "preferredModelsByRole": {
@@ -291,7 +294,7 @@
         "Claude Sonnet 4.6"
       ]
     },
-    "opusModel": "Claude Sonnet 4.6",
+    "opusModel": "GPT-5.3-Codex",
     "allowOpusEscalation": false,
     "opusEscalationKeywords": [
       "critical",

@@ -97,6 +97,8 @@ export interface RemediationCandidate {
    *   low    — stale ref to docs, docker, scripts, or other non-src paths
    */
   priority: "high" | "medium" | "low";
+  /** Numeric priority score (higher = more urgent) used for deterministic ranking. */
+  priorityScore: number;
   /** Human-readable reason explaining the priority assignment. */
   reason: string;
   /** Ready-to-use task description string for the Prometheus planning prompt. */
@@ -115,6 +117,21 @@ function prioritizeStaleRef(referencedPath: string): "high" | "medium" | "low" {
   if (referencedPath.startsWith("src/core/")) return "high";
   if (referencedPath.startsWith("src/")) return "medium";
   return "low";
+}
+
+function computePriorityScore(
+  priority: "high" | "medium" | "low",
+  docPath: string,
+  referencedPath?: string
+): number {
+  const base = priority === "high" ? 300 : priority === "medium" ? 200 : 100;
+  const doc = String(docPath || "").toLowerCase();
+  const ref = String(referencedPath || "").toLowerCase();
+  let boost = 0;
+  if (doc.includes("autonomous-dev-playbook.md")) boost += 40;
+  if (doc.includes("architecture")) boost += 20;
+  if (ref.startsWith("src/core/")) boost += 25;
+  return base + boost;
 }
 
 /**
@@ -136,13 +153,21 @@ export function rankStaleRefsAsRemediationCandidates(
   const candidates: RemediationCandidate[] = [];
 
   for (const ref of report.staleReferences) {
-    const priority = prioritizeStaleRef(ref.referencedPath);
+    const basePriority = prioritizeStaleRef(ref.referencedPath);
+    // Stale refs in the autonomous-dev-playbook.md carry the same urgency as
+    // core infrastructure refs: they define the system's expected shape and broken
+    // references mislead workers regardless of the referenced path category.
+    const priority: "high" | "medium" | "low" = (
+      basePriority !== "high" &&
+      ref.docPath.toLowerCase().includes("autonomous-dev-playbook.md")
+    ) ? "high" : basePriority;
     candidates.push({
       type: "stale_ref",
       docPath: ref.docPath,
       referencedPath: ref.referencedPath,
       line: ref.line,
       priority,
+      priorityScore: computePriorityScore(priority, ref.docPath, ref.referencedPath),
       reason: `File \`${ref.referencedPath}\` referenced in \`${ref.docPath}\` does not exist`,
       suggestedTask: `Remove or update stale reference to \`${ref.referencedPath}\` in \`${ref.docPath}\` (line ${ref.line})`,
     });
@@ -156,15 +181,15 @@ export function rankStaleRefsAsRemediationCandidates(
       hint: ref.hint,
       line: ref.line,
       priority: "medium",
+      priorityScore: computePriorityScore("medium", ref.docPath),
       reason: `Deprecated token \`${ref.token}\` in \`${ref.docPath}\` — ${ref.hint}`,
       suggestedTask: `Replace deprecated \`${ref.token}\` in \`${ref.docPath}\` (line ${ref.line}): ${ref.hint}`,
     });
   }
 
-  const PRIORITY_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
   candidates.sort((a, b) => {
-    const pDiff = PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
-    if (pDiff !== 0) return pDiff;
+    const scoreDiff = b.priorityScore - a.priorityScore;
+    if (scoreDiff !== 0) return scoreDiff;
     return a.docPath.localeCompare(b.docPath);
   });
 

@@ -113,8 +113,8 @@ export const VERIFICATION_CMD_REWRITE_RULES: ReadonlyArray<{ match: RegExp; repl
   { match: /^npm\s+run\s+box:once$/i, replacement: DEFAULTS.test },
   { match: /^node\s+src\/cli\.js\s+start$/i, replacement: DEFAULTS.test },
   { match: /^node\s+src\/cli\.js\s+doctor$/i, replacement: DEFAULTS.test },
-  // Dashboard is a daemon — rewrite to headless test runner
-  { match: /^node\s+src\/dashboard\/live_dashboard\.js$/i, replacement: "node --test" },
+  // Dashboard is a daemon — rewrite to canonical test runner
+  { match: /^node\s+src\/dashboard\/live_dashboard\.js$/i, replacement: DEFAULTS.test },
 ]);
 
 /**

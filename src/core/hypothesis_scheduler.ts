@@ -497,6 +497,11 @@ export async function scheduleNextExperiment(config, cycleOutcomes = null) {
   }
 
   const budgetSnapshot = buildBudgetSnapshot(config, registry);
+
+  // Include bounded search controls in rationale for high-impact scheduling decisions.
+  // This keeps scheduler outcomes deterministic and explicit for downstream runners.
+  const schedulerSearchBudget = Number(config?.selfImprovement?.scheduler?.searchBudget ?? 2);
+  const schedulerDeliberationMode = String(config?.selfImprovement?.scheduler?.deliberationMode || "single-pass");
   const candidates = getExperimentsByStatus(registry, "planned");
 
   if (candidates.length === 0) {
@@ -625,7 +630,9 @@ export async function scheduleNextExperiment(config, cycleOutcomes = null) {
     `highImpact=${highImpact}`,
     `tierSlots=${budgetSnapshot.tierSlotUsed[selected.scopeTier]}/${budgetSnapshot.tierSlotLimits[selected.scopeTier]}`,
     `globalActive=${budgetSnapshot.currentActiveCount}/${budgetSnapshot.maxTotalActiveExperiments}`,
-    deferredIds.length > 0 ? `deferred=${deferredIds.length}` : null
+    deferredIds.length > 0 ? `deferred=${deferredIds.length}` : null,
+    `deliberationMode=${schedulerDeliberationMode}`,
+    `searchBudget=${schedulerSearchBudget}`,
   ].filter(Boolean).join("; ");
 
   const rationaleRecord = makeRationale(

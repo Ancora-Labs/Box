@@ -15,7 +15,13 @@ import {
   buildGovernanceLaneVerdict,
   mergeLaneVerdicts,
   LANE_MERGE_POLICY,
+  computeGateBlockRiskFromSignals,
+  GATE_BLOCK_RISK,
+  runAthenaPostmortem,
 } from "../../src/core/athena_reviewer.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const BASE_PLANS = [
   {
@@ -195,6 +201,69 @@ describe("normalizeAthenaReviewPayload", () => {
       "approved must be in missingFields when only inferred from summary text");
     assert.ok(!normalized.missingFields.includes("planReviews"),
       "planReviews must NOT be in missingFields when plan_reviews alias is present");
+  });
+});
+
+describe("computeGateBlockRiskFromSignals", () => {
+  it("returns high risk when freeze is active", () => {
+    const result = computeGateBlockRiskFromSignals({ freezeActive: true });
+    assert.equal(result.gateBlockRisk, GATE_BLOCK_RISK.HIGH);
+    assert.equal(result.requiresCorrection, true);
+    assert.ok(result.activeGateSignals.includes("governance_freeze_active"));
+  });
+
+  it("returns high risk when canary breach is active", () => {
+    const result = computeGateBlockRiskFromSignals({ canaryBreachActive: true });
+    assert.equal(result.gateBlockRisk, GATE_BLOCK_RISK.HIGH);
+    assert.equal(result.requiresCorrection, true);
+    assert.ok(result.activeGateSignals.includes("governance_canary_breach"));
+  });
+
+  it("returns medium risk when only critical debt gate is blocking", () => {
+    const result = computeGateBlockRiskFromSignals({ criticalDebtBlocked: true });
+    assert.equal(result.gateBlockRisk, GATE_BLOCK_RISK.MEDIUM);
+    assert.equal(result.requiresCorrection, true);
+    assert.ok(result.activeGateSignals.includes("critical_debt_overdue"));
+  });
+
+  it("returns low risk when no gate blockers are active", () => {
+    const result = computeGateBlockRiskFromSignals({});
+    assert.equal(result.gateBlockRisk, GATE_BLOCK_RISK.LOW);
+    assert.equal(result.requiresCorrection, false);
+    assert.equal(result.activeGateSignals.length, 0);
+  });
+});
+
+describe("runAthenaPostmortem — recurrence weighted intervention metadata", () => {
+  it("writes recurrence-weighted closure fields to persisted postmortem", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-athena-postmortem-meta-"));
+    try {
+      const config = {
+        paths: { stateDir, progressFile: path.join(stateDir, "progress.log"), policyFile: path.join(stateDir, "policy.json") },
+        env: { targetRepo: "CanerDoqdu/Box", copilotCliCommand: "__missing_copilot_binary__" },
+        roleRegistry: { qualityReviewer: { name: "Athena", model: "GPT-5.3-Codex" } },
+        athena: { forceAiPostmortem: false },
+      };
+      const workerResult = {
+        roleName: "quality-worker",
+        status: "done",
+        summary: "All checks passed cleanly for deterministic lane update.",
+        verificationPassed: true,
+        verificationEvidence: { lint: "pass", tests: "pass", build: "pass" },
+        preReviewIssues: [],
+      };
+      const originalPlan = {
+        task: "Harden postmortem closure tracking",
+        riskLevel: "low",
+      };
+      const result: any = await runAthenaPostmortem(config as any, workerResult as any, originalPlan as any);
+      assert.ok(typeof result.recurrenceWeightedPriority === "number");
+      assert.ok(typeof result.interventionId === "string");
+      assert.ok(["open", "closed"].includes(String(result.interventionClosureStatus)));
+      assert.ok("interventionDuplicateSuppressed" in result);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
   });
 });
 

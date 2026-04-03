@@ -2192,6 +2192,12 @@ async function runSingleCycle(config) {
     if (poolResult.diversityIndex > 0) {
       await appendProgress(config, `[CAPABILITY_POOL] Worker diversity index: ${poolResult.diversityIndex} (0=single-worker, 1=fully diversified)`);
     }
+    if (poolResult.specializationUtilization && !poolResult.specializationUtilization.specializationTargetsMet) {
+      await appendProgress(
+        config,
+        `[CAPABILITY_POOL] Specialist utilization below target: ${Math.round(poolResult.specializationUtilization.specializedShare * 100)}% < ${Math.round(poolResult.specializationUtilization.minSpecializedShare * 100)}%`
+      );
+    }
     // Apply pool assignment — update plan.role to the capability-assigned role when it improves on the default.
     // _originalRole preserves the Prometheus-suggested role for audit; _capabilityLane tracks the lane.
     for (const { plan, selection } of poolResult.assignments) {
@@ -3135,4 +3141,153 @@ async function mainLoop(config) {
     await safeUpdatePipelineProgress(config, "idle", "Cycle complete — waiting before next iteration");
     await sleep(RE_EVAL_SLEEP_MS);
   }
+}
+
+// ── appendCiFixContext ────────────────────────────────────────────────────────
+// Appends a structured ## CI_FAILURE_CONTEXT section to baseContext for ci-fix
+// tasks.  Tries GitHub Actions logs as primary source; falls back to reading
+// state/evo_run_latest.log.  Returns baseContext unchanged when evidence is
+// insufficient (no failed test identifiers found).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _CI_FIX_FIELD_MAX = 200;
+
+function _truncateCiField(s: string): string {
+  if (s.length <= _CI_FIX_FIELD_MAX) return s;
+  return s.slice(0, _CI_FIX_FIELD_MAX) + "...";
+}
+
+function _parseGhActionsLog(logText: string): {
+  failedTestIds: string[];
+  errors: string[];
+  stacks: string[];
+} {
+  const failedTestIds: string[] = [];
+  const errors: string[] = [];
+  const stacks: string[] = [];
+  for (const line of logText.split("\n")) {
+    const notOk = line.match(/not ok \d+ - (tests\/\S+)/);
+    if (notOk) { failedTestIds.push(notOk[1]); continue; }
+    const err = line.match(/^(\w*Error:.*)/);
+    if (err) { errors.push(err[1]); continue; }
+    const stack = line.match(/^\s*(at \S.*)/);
+    if (stack) stacks.push(stack[1].trim());
+  }
+  return { failedTestIds, errors, stacks };
+}
+
+function _parseStateArtifactLog(logText: string): {
+  headSha: string;
+  failedTestIds: string[];
+  errors: string[];
+  stacks: string[];
+} {
+  let headSha = "";
+  const failedTestIds: string[] = [];
+  const errors: string[] = [];
+  const stacks: string[] = [];
+  for (const line of logText.split("\n")) {
+    const cm = line.match(/^commit=(\S+)/);
+    if (cm) { headSha = cm[1]; continue; }
+    const fm = line.match(/^FAIL (tests\/\S+)/);
+    if (fm) { failedTestIds.push(fm[1]); continue; }
+    const em = line.match(/^(\w*Error:.*)/);
+    if (em) { errors.push(em[1]); continue; }
+    const sm = line.match(/^\s*(at \S.*)/);
+    if (sm) stacks.push(sm[1].trim());
+  }
+  return { headSha, failedTestIds, errors, stacks };
+}
+
+function _buildCiContextBlock(data: {
+  source: string;
+  headSha: string;
+  failedTestIds: string[];
+  errors: string[];
+  stacks: string[];
+}): string {
+  return [
+    "## CI_FAILURE_CONTEXT",
+    `commit_sha: ${data.headSha}`,
+    `failed_test_identifiers: ${data.failedTestIds.map(_truncateCiField).join(", ")}`,
+    `error_messages: ${data.errors.map(_truncateCiField).join("; ")}`,
+    `stack_traces: ${data.stacks.map(_truncateCiField).join("; ")}`,
+    `source: ${data.source}`,
+  ].join("\n");
+}
+
+/**
+ * Injects deterministic CI failure evidence into a worker context string for
+ * ci-fix tasks.  Fetches GitHub Actions job logs for the failed run identified
+ * in plan.githubCiContext.failedCiRuns[0], then falls back to reading
+ * state/evo_run_latest.log when the API is unavailable.
+ *
+ * Returns baseContext unchanged when no actionable evidence can be extracted.
+ */
+export async function appendCiFixContext(
+  config: any,
+  plan: any,
+  baseContext: string,
+): Promise<string> {
+  const failedCiRuns = plan?.githubCiContext?.failedCiRuns;
+  if (!Array.isArray(failedCiRuns) || failedCiRuns.length === 0) return baseContext;
+
+  const targetRepo = String(config?.env?.targetRepo ?? "");
+  const githubToken = String(config?.env?.githubToken ?? "");
+  const stateDir = String(config?.paths?.stateDir ?? "");
+
+  for (const run of failedCiRuns) {
+    const runId = run?.runId;
+    const headSha = String(run?.headSha ?? "");
+
+    // ── Primary: GitHub Actions logs ────────────────────────────────────────
+    try {
+      const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
+      if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
+
+      const jobsResp = await fetch(
+        `https://api.github.com/repos/${targetRepo}/actions/runs/${runId}/jobs`,
+        { headers },
+      );
+      if (jobsResp.ok) {
+        const jobsData = await jobsResp.json() as any;
+        const failedJobs = Array.isArray(jobsData.jobs)
+          ? jobsData.jobs.filter((j: any) => j.conclusion === "failure")
+          : [];
+        const logTexts: string[] = [];
+        for (const job of failedJobs) {
+          const logResp = await fetch(
+            `https://api.github.com/repos/${targetRepo}/actions/jobs/${job.id}/logs`,
+            { headers },
+          );
+          if (logResp.ok) logTexts.push(await logResp.text());
+        }
+        if (logTexts.length > 0) {
+          const parsed = _parseGhActionsLog(logTexts.join("\n"));
+          if (parsed.failedTestIds.length > 0) {
+            const block = _buildCiContextBlock({ source: "github_actions_logs", headSha, ...parsed });
+            return baseContext ? `${baseContext}\n\n${block}` : block;
+          }
+        }
+      }
+    } catch { /* fail-open */ }
+
+    // ── Fallback: state artifact log ────────────────────────────────────────
+    if (stateDir) {
+      try {
+        const logContent = await fs.readFile(path.join(stateDir, "evo_run_latest.log"), "utf8");
+        const parsed = _parseStateArtifactLog(logContent);
+        if (parsed.failedTestIds.length > 0) {
+          const block = _buildCiContextBlock({
+            source: "state_fallback_artifacts",
+            headSha: parsed.headSha || headSha,
+            ...parsed,
+          });
+          return baseContext ? `${baseContext}\n\n${block}` : block;
+        }
+      } catch { /* fail-open */ }
+    }
+  }
+
+  return baseContext;
 }

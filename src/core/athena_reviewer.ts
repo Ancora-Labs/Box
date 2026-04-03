@@ -36,7 +36,7 @@ import {
   LEADERSHIP_CONTRACT_TYPE,
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
-import { checkForbiddenCommands } from "./verification_command_registry.js";
+import { checkForbiddenCommands, normalizeCommandBatch } from "./verification_command_registry.js";
 import { validateEvidenceEnvelope } from "./evidence_envelope.js";
 import type { EvidenceEnvelope } from "./evidence_envelope.js";
 import { isEnvelopeUnambiguous } from "./evidence_envelope.js";
@@ -45,12 +45,13 @@ import {
   autoCloseVerifiedDebt,
   saveLedgerFull,
   compressLedger,
+  shouldBlockOnDebt,
 } from "./carry_forward_ledger.js";
+import { isFreezeActive } from "./governance_freeze.js";
+import { isGovernanceCanaryBreachActive } from "./governance_canary.js";
 import {
-  estimatePlanExecutionTokens,
   estimatePlanTokens as _estimatePlanTokens,
   getUsableModelContextTokens as _getUsableModelContextTokens,
-  buildTokenFirstBatches,
 } from "./worker_batch_planner.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 
@@ -1483,13 +1484,6 @@ export function normalizePatchedPlansForDispatch(plans: unknown[]): Record<strin
   return plans.map((plan) => {
     if (!plan || typeof plan !== "object") return plan as Record<string, unknown>;
     const p = plan as Record<string, unknown>;
-    const estimatedExecutionTokens = Number.isFinite(Number(p.estimatedExecutionTokens)) && Number(p.estimatedExecutionTokens) > 0
-      ? Math.floor(Number(p.estimatedExecutionTokens))
-      : Number.isFinite(Number(p.estimated_execution_tokens)) && Number(p.estimated_execution_tokens) > 0
-        ? Math.floor(Number(p.estimated_execution_tokens))
-        : Number.isFinite(Number(p.estimated_tokens)) && Number(p.estimated_tokens) > 0
-          ? Math.floor(Number(p.estimated_tokens))
-          : Math.max(1, estimatePlanExecutionTokens(p));
     return {
       ...p,
       // Normalise target_files alias so dispatch always finds the canonical field.
@@ -1501,8 +1495,40 @@ export function normalizePatchedPlansForDispatch(plans: unknown[]): Record<strin
       role: p.role && String(p.role).trim() ? String(p.role).trim() : "evolution-worker",
       // wave must be a positive integer; malformed values fall back to 1.
       wave: Number.isFinite(Number(p.wave)) && Number(p.wave) >= 1 ? Number(p.wave) : 1,
-      // token estimate powers context-capacity-aware plan packing.
-      estimatedExecutionTokens,
+    };
+  });
+}
+
+/**
+ * Sanitize patched plan verification commands to portable equivalents before
+ * handoff contract re-validation.
+ *
+ * Athena may return shell-glob or bash-style verification commands that are
+ * valid on some environments but forbidden on Windows dispatch workers.
+ * We deterministically normalize the command batch here so re-validation does
+ * not repeatedly fail on known-rewritable command forms.
+ */
+export function sanitizePatchedPlanVerificationCommands(
+  plans: Record<string, unknown>[]
+): Record<string, unknown>[] {
+  if (!Array.isArray(plans) || plans.length === 0) return [];
+
+  return plans.map((plan) => {
+    const verificationCommands = Array.isArray(plan.verification_commands)
+      ? plan.verification_commands.map((cmd) => String(cmd || "")).filter(Boolean)
+      : [];
+    const fallbackRaw = String(plan.verification || "").trim();
+    const rawBatch = verificationCommands.length > 0
+      ? verificationCommands
+      : (fallbackRaw ? [fallbackRaw] : ["npm test"]);
+
+    const sanitizedBatch = normalizeCommandBatch(rawBatch);
+    const fallbackCommand = sanitizedBatch[0] || "npm test";
+
+    return {
+      ...plan,
+      verification: fallbackCommand,
+      verification_commands: sanitizedBatch.length > 0 ? sanitizedBatch : [fallbackCommand],
     };
   });
 }
@@ -1540,9 +1566,10 @@ export function preparePatchedPlansForDispatch(plans: unknown[]): {
   code: string;
 } {
   const normalized = normalizePatchedPlansForDispatch(Array.isArray(plans) ? plans : []);
-  const check = revalidatePatchedPlansAfterNormalization(normalized);
+  const sanitized = sanitizePatchedPlanVerificationCommands(normalized);
+  const check = revalidatePatchedPlansAfterNormalization(sanitized);
   return {
-    plans: normalized,
+    plans: sanitized,
     valid: check.valid,
     violations: check.violations,
     code: check.code,
@@ -1550,96 +1577,68 @@ export function preparePatchedPlansForDispatch(plans: unknown[]): {
 }
 
 /**
- * Deterministic token-first rebatch after Athena review.
+ * Validate Athena AI-provided batch metadata contract.
  *
- * Runs once after preparePatchedPlansForDispatch. Takes the normalized
- * patchedPlans and writes _batchIndex + _batchTotal onto every plan so the
- * orchestrator can dispatch batches in order without calling buildRoleExecutionBatches.
- *
- * Rules:
- *  - Plans without any explicit dependencies are compacted to wave 1 so the
- *    whole set can be globally packed.
- *  - Within each wave, plans are packed greedily into context-capacity batches
- *    (token-first, role-agnostic).
- *  - A new batch is opened only when usable context tokens would be exceeded.
- *  - The dominant role in each batch wins; mixed batches fall back to evolution-worker.
- *
- * Idempotent: already-reindexed plans (with _batchIndex) pass through unchanged.
- *
- * @param plans  — output of preparePatchedPlansForDispatch (normalized)
- * @param config — BOX config (for model context window resolution)
- * @returns new array with _batchIndex, _batchTotal, _batchWave added to each plan
+ * Athena must explicitly return batch assignments in patchedPlans. The
+ * orchestrator uses these assignments directly and should not synthesize
+ * deterministic batch indexes at this handoff seam.
  */
-export async function rebatchPatchedPlansTokenFirst(
-  plans: Record<string, unknown>[],
-  config?: object
-): Promise<Record<string, unknown>[]> {
-  if (!Array.isArray(plans) || plans.length === 0) return [];
-
-  // Already reindexed — idempotent pass-through
-  if (Number.isFinite(Number(plans[0]?._batchIndex))) return plans;
-
-  // Load calibration state for token estimate accuracy
-  let calOpts: { calibrationState?: object } | undefined;
-  try {
-    const { readCalibrationState } = await import("./token_calibration.js");
-    calOpts = { calibrationState: await readCalibrationState(config || {}) };
-  } catch {
-    // Calibration is advisory — fall through without it
+export function validateAiProvidedBatchMetadata(
+  plans: Record<string, unknown>[]
+): { valid: boolean; violations: string[] } {
+  if (!Array.isArray(plans) || plans.length === 0) {
+    return { valid: true, violations: [] };
   }
 
-  const batches = buildTokenFirstBatches(plans, config, calOpts);
-  if (batches.length === 0) return plans;
+  const violations: string[] = [];
+  const indices = new Set<number>();
+  const totals = new Set<number>();
 
-  const normalizeBatchWorkerRole = (roleValue: unknown) => {
-    const requestedRole = String(roleValue || "evolution-worker").trim() || "evolution-worker";
-    return ["prometheus", "athena", "jesus"].includes(requestedRole.toLowerCase())
-      ? "evolution-worker"
-      : requestedRole;
-  };
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i] as any;
+    const batchIndex = Number(p?._batchIndex);
+    const batchTotal = Number(p?._batchTotal);
+    const wave = Number(p?._batchWave);
+    const workerRole = String(p?._batchWorkerRole || "").trim();
 
-  // Build plan → batch assignment lookup
-  const planToBatch = new Map<Record<string, unknown>, {
-    index: number;
-    total: number;
-    wave: number;
-    role: string;
-  }>();
-  for (let bi = 0; bi < batches.length; bi++) {
-    const batch = batches[bi];
-    const batchPlans = Array.isArray(batch.plans) ? batch.plans : [];
-    const batchRole = normalizeBatchWorkerRole(batch.role);
-    for (const p of batchPlans) {
-      planToBatch.set(p as Record<string, unknown>, {
-        index: bi + 1,
-        total: batches.length,
-        wave: Number(batch.wave) || 1,
-        role: batchRole,
-      });
+    if (!Number.isFinite(batchIndex) || batchIndex <= 0 || !Number.isInteger(batchIndex)) {
+      violations.push(`plan[${i}] "${String(p?.task || "").slice(0, 60)}": missing/invalid _batchIndex`);
+    } else {
+      indices.add(batchIndex);
+    }
+
+    if (!Number.isFinite(batchTotal) || batchTotal <= 0 || !Number.isInteger(batchTotal)) {
+      violations.push(`plan[${i}] "${String(p?.task || "").slice(0, 60)}": missing/invalid _batchTotal`);
+    } else {
+      totals.add(batchTotal);
+      if (Number.isFinite(batchIndex) && batchIndex > batchTotal) {
+        violations.push(`plan[${i}] "${String(p?.task || "").slice(0, 60)}": _batchIndex exceeds _batchTotal`);
+      }
+    }
+
+    if (!Number.isFinite(wave) || wave <= 0 || !Number.isInteger(wave)) {
+      violations.push(`plan[${i}] "${String(p?.task || "").slice(0, 60)}": missing/invalid _batchWave`);
+    }
+
+    if (!workerRole) {
+      violations.push(`plan[${i}] "${String(p?.task || "").slice(0, 60)}": missing _batchWorkerRole`);
     }
   }
 
-  // Tag original plans with batch metadata.
-  // buildTokenFirstBatches may have created new plan object refs (via spread);
-  // fall back to position matching for plans not found in the map.
-  const tagged = plans.map((plan, i) => {
-    const meta = planToBatch.get(plan) ?? {
-      index: i + 1,
-      total: plans.length,
-      wave: Number(plan.wave) || 1,
-      role: normalizeBatchWorkerRole(plan.role),
-    };
-    return {
-      ...plan,
-      role: meta.role,
-      _batchIndex: meta.index,
-      _batchTotal: meta.total,
-      _batchWave: meta.wave,
-      _batchWorkerRole: meta.role,
-    };
-  });
+  if (totals.size > 1) {
+    violations.push(`inconsistent _batchTotal across patchedPlans: ${[...totals].sort((a, b) => a - b).join(",")}`);
+  }
 
-  return tagged;
+  const declaredTotal = totals.size === 1 ? [...totals][0] : 0;
+  if (declaredTotal > 0) {
+    for (let i = 1; i <= declaredTotal; i++) {
+      if (!indices.has(i)) {
+        violations.push(`missing batch index ${i} in patchedPlans`);
+      }
+    }
+  }
+
+  return { valid: violations.length === 0, violations };
 }
 
 /**
@@ -1909,6 +1908,144 @@ export function rankPlansByROI(plans: any[]): any[] {
 /** Minimum quality score for a plan to pass the deterministic pre-gate. */
 export const PLAN_QUALITY_MIN_SCORE = 40;
 
+// ── Governance gate-feasibility risk scoring ──────────────────────────────────
+
+export const GATE_BLOCK_RISK = Object.freeze({
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high",
+} as const);
+
+type GateBlockRiskValue = typeof GATE_BLOCK_RISK[keyof typeof GATE_BLOCK_RISK];
+
+export interface GateBlockRiskAssessment {
+  gateBlockRisk: GateBlockRiskValue;
+  reason: string;
+  activeGateSignals: string[];
+  requiresCorrection: boolean;
+}
+
+function gateSignalFromReason(reason: string): string {
+  const prefix = String(reason || "").split(":")[0].trim().toLowerCase();
+  if (!prefix) return "unknown_governance_block";
+  return prefix;
+}
+
+export function computeGateBlockRiskFromSignals(signals: {
+  freezeActive?: boolean;
+  canaryBreachActive?: boolean;
+  criticalDebtBlocked?: boolean;
+}): GateBlockRiskAssessment {
+  const activeGateSignals: string[] = [];
+  if (signals.freezeActive) activeGateSignals.push("governance_freeze_active");
+  if (signals.canaryBreachActive) activeGateSignals.push("governance_canary_breach");
+  if (signals.criticalDebtBlocked) activeGateSignals.push("critical_debt_overdue");
+
+  if (signals.freezeActive || signals.canaryBreachActive) {
+    return {
+      gateBlockRisk: GATE_BLOCK_RISK.HIGH,
+      reason: "Active governance freeze/canary breach indicates dispatch infeasibility",
+      activeGateSignals,
+      requiresCorrection: true,
+    };
+  }
+
+  if (signals.criticalDebtBlocked) {
+    return {
+      gateBlockRisk: GATE_BLOCK_RISK.MEDIUM,
+      reason: "Critical carry-forward debt gate indicates dispatch infeasibility",
+      activeGateSignals,
+      requiresCorrection: true,
+    };
+  }
+
+  return {
+    gateBlockRisk: GATE_BLOCK_RISK.LOW,
+    reason: "No active governance gate blocks detected",
+    activeGateSignals: [],
+    requiresCorrection: false,
+  };
+}
+
+export async function assessGovernanceGateBlockRisk(config): Promise<GateBlockRiskAssessment> {
+  try {
+    const { evaluatePreDispatchGovernanceGate } = await import("./orchestrator.js");
+    const dryRunDecision = await evaluatePreDispatchGovernanceGate(
+      config,
+      [],
+      `athena-review-dry-run-${Date.now()}`,
+      null
+    );
+    if (dryRunDecision && typeof dryRunDecision.blocked === "boolean") {
+      if (!dryRunDecision.blocked) {
+        return {
+          gateBlockRisk: GATE_BLOCK_RISK.LOW,
+          reason: "Dry-run governance gate passed at review-time",
+          activeGateSignals: [],
+          requiresCorrection: false,
+        };
+      }
+      const reasonSignal = gateSignalFromReason(String(dryRunDecision.reason || ""));
+      const highRiskSignals = new Set([
+        "governance_freeze_active",
+        "governance_canary_breach",
+      ]);
+      const mediumRiskSignals = new Set([
+        "critical_debt_overdue",
+        "mandatory_drift_debt_unresolved",
+        "plan_evidence_coupling_invalid",
+        "dependency_readiness_incomplete",
+        "rolling_yield_throttle",
+      ]);
+      const risk = highRiskSignals.has(reasonSignal)
+        ? GATE_BLOCK_RISK.HIGH
+        : mediumRiskSignals.has(reasonSignal)
+          ? GATE_BLOCK_RISK.MEDIUM
+          : GATE_BLOCK_RISK.HIGH;
+      return {
+        gateBlockRisk: risk,
+        reason: `Dry-run governance gate blocked dispatch: ${String(dryRunDecision.reason || "unknown")}`,
+        activeGateSignals: [reasonSignal],
+        requiresCorrection: true,
+      };
+    }
+  } catch (err) {
+    await appendProgress(config, `[ATHENA][WARN] governance dry-run evaluation failed: ${String((err as Error)?.message || err)}`);
+  }
+
+  const signals = {
+    freezeActive: false,
+    canaryBreachActive: false,
+    criticalDebtBlocked: false,
+  };
+
+  try {
+    const freeze = isFreezeActive(config);
+    signals.freezeActive = freeze.active === true;
+  } catch (err) {
+    await appendProgress(config, `[ATHENA][WARN] freeze state read failed: ${String((err as Error)?.message || err)}`);
+  }
+
+  try {
+    const canary = await isGovernanceCanaryBreachActive(config);
+    signals.canaryBreachActive = canary?.breachActive === true;
+  } catch (err) {
+    await appendProgress(config, `[ATHENA][WARN] canary state read failed: ${String((err as Error)?.message || err)}`);
+  }
+
+  try {
+    const { entries: debtLedger, cycleCounter } = await loadLedgerMeta(config);
+    const debtGate = shouldBlockOnDebt(debtLedger, cycleCounter, {
+      maxCriticalOverdue: config?.carryForward?.maxCriticalOverdue,
+    });
+    signals.criticalDebtBlocked = debtGate.shouldBlock === true;
+  } catch (err) {
+    await appendProgress(config, `[ATHENA][WARN] carry-forward gate state read failed: ${String((err as Error)?.message || err)}`);
+  }
+
+  return computeGateBlockRiskFromSignals(signals);
+}
+
 /**
  * Minimum quality score that qualifies all plans for the HIGH_QUALITY_LOW_RISK
  * auto-approve fast-path (no prior cached fingerprint required).
@@ -1939,6 +2076,8 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   }
 
   const plans = Array.isArray(prometheusAnalysis.plans) ? prometheusAnalysis.plans : [];
+  const gateRisk = await assessGovernanceGateBlockRisk(config);
+  const gateRiskLine = `Current governance gate feasibility risk: gateBlockRisk=${gateRisk.gateBlockRisk}; signals=${gateRisk.activeGateSignals.join("|") || "none"}; requiresCorrection=${gateRisk.requiresCorrection}`;
 
   // ── Deterministic plan quality pre-gate ────────────────────────────────────
   const qualityMinScore = typeof config?.runtime?.planQualityMinScore === "number"
@@ -1992,7 +2131,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   const allPlansLowRisk = plans.every(
     p => String(p.riskLevel || "low").trim().toLowerCase() !== "high"
   );
-  if (allPlansLowRisk && config?.runtime?.disablePlanReviewCache !== true) {
+  if (allPlansLowRisk && !gateRisk.requiresCorrection && config?.runtime?.disablePlanReviewCache !== true) {
     const batchFingerprint = computePlanBatchFingerprint(plans);
     let cachedReviewExists = false;
     try {
@@ -2128,7 +2267,6 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
        before_state="${truncatePromptText(p.before_state || p.beforeState || "", 120)}"
        after_state="${truncatePromptText(p.after_state || p.afterState || "", 120)}"
        acceptance_criteria=${acceptancePreview}${ac.length > 3 ? ` (+${ac.length - 3} more)` : ""}
-       estimatedExecutionTokens=${Number.isFinite(Number(p.estimatedExecutionTokens)) ? Number(p.estimatedExecutionTokens) : "unknown"}
        premortem=${summarizePremortemForPrompt(p)}
        verification="${truncatePromptText(p.verification || "NONE", 120)}"`;
   }).join("\n");
@@ -2145,6 +2283,7 @@ Prometheus has produced a plan. Your job is to validate it AND FIX any issues yo
 2. If you find fixable issues (dependency conflicts, missing numeric thresholds, vague acceptance criteria, wave conflicts, missing fields), FIX THEM DIRECTLY and return the corrected plans in "patchedPlans".
 3. Set "approved": true if you were able to fix all issues. Only set "approved": false if there are UNFIXABLE structural problems (e.g., the entire plan is fundamentally wrong, or the task is impossible).
 4. List what you fixed in "appliedFixes" and anything you could NOT fix in "unresolvedIssues".
+5. Batch-packaging directive (MANDATORY): read all tasks and regroup them into execution packets that maximize useful model context usage without overloading the model; prefer fewer dense packets, merge strongly related tasks, and keep strict sequential order where dependencies exist.
 
 **Quality criteria for each plan item:**
 1. Is the goal measurable? (not vague like "improve" or "refactor")
@@ -2153,7 +2292,7 @@ Prometheus has produced a plan. Your job is to validate it AND FIX any issues yo
 4. Are file paths and scope specified?
 5. Are dependencies between plans correct? (if two plans touch the same file, prefer explicit ordering dependencies first; only split into different waves when cross-role parallel execution would create a write race)
 5b. Premium request efficiency: if low/medium-risk plans can be executed by the same role without dependency conflict, keep them in the SAME wave and use dependencies for order instead of creating extra singleton waves.
-5c. Token-capacity efficiency: use estimatedExecutionTokens to avoid tiny batches; prefer filling one worker context meaningfully before splitting.
+5c. Token-capacity efficiency: avoid tiny packets; prefer filling one worker context meaningfully before splitting.
 6. Do acceptance_criteria contain measurable numeric thresholds where applicable?
 7. For HIGH-RISK plans (riskLevel=high): does the pre-mortem cover failure paths, mitigations, and guardrails?
 
@@ -2167,7 +2306,6 @@ Prometheus has produced a plan. Your job is to validate it AND FIX any issues yo
 - Vague acceptance criteria → rewrite with numeric threshold (e.g., "fallback rate < 5%")
 - Missing verification → add a concrete test command
 - Missing scope → fill from target_files
-- Missing estimatedExecutionTokens → add a realistic positive integer per plan
 
 ## PROMETHEUS PLAN TO REVIEW
 
@@ -2181,6 +2319,8 @@ ${plansSummary}
 Execution Strategy: ${JSON.stringify(prometheusAnalysis.executionStrategy || {}, null, 2).slice(0, 1500)}
 
 Request Budget: ${JSON.stringify(prometheusAnalysis.requestBudget || {}, null, 2).slice(0, 500)}
+
+Governance Gate State: ${gateRiskLine}
 
 ## OUTPUT FORMAT
 
@@ -2207,7 +2347,10 @@ Respond with your assessment, then:
       "acceptance_criteria": ["measurable criteria with numeric thresholds"],
       "verification": "concrete test command",
       "riskLevel": "low",
-      "estimatedExecutionTokens": 12000
+      "_batchIndex": 1,
+      "_batchTotal": 2,
+      "_batchWave": 1,
+      "_batchWorkerRole": "evolution-worker"
     }
   ],
   "planReviews": [
@@ -2229,7 +2372,8 @@ Respond with your assessment, then:
 }
 ===END===
 
-IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Even if no changes were needed, return the original plans as-is in patchedPlans. This ensures the orchestrator always has a validated plan set.`;
+IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Even if no changes were needed, return the original plans as-is in patchedPlans.
+IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _batchIndex, _batchTotal, _batchWave, _batchWorkerRole. Do NOT omit them.`;
 
   let heartbeatTimer: NodeJS.Timeout | null;
   try {
@@ -2366,9 +2510,28 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
     patchedPlans: Array.isArray(d.patchedPlans) ? d.patchedPlans : null,
     appliedFixes: Array.isArray(d.appliedFixes) ? d.appliedFixes : [],
     unresolvedIssues: Array.isArray(d.unresolvedIssues) ? d.unresolvedIssues : [],
+    gateBlockRisk: gateRisk.gateBlockRisk,
+    gateBlockRiskReason: gateRisk.reason,
+    gateBlockSignals: gateRisk.activeGateSignals,
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
+
+  // Penalize and require correction when active governance state indicates dispatch infeasibility.
+  if (gateRisk.requiresCorrection) {
+    const penalty = gateRisk.gateBlockRisk === GATE_BLOCK_RISK.HIGH ? 4 : 2;
+    result.overallScore = Math.max(1, Number(result.overallScore || 1) - penalty);
+
+    const correction = `Pre-dispatch governance state infeasible (${gateRisk.activeGateSignals.join(", ") || "unknown"}) — resolve active gate before dispatch`;
+    if (!result.corrections.includes(correction)) result.corrections.push(correction);
+    if (!result.unresolvedIssues.includes(correction)) result.unresolvedIssues.push(correction);
+
+    result.approved = false;
+    (result as any).reason = {
+      code: "ACTIVE_GOVERNANCE_GATE_INFEASIBLE",
+      message: `${gateRisk.reason}; gateBlockRisk=${gateRisk.gateBlockRisk}; signals=${gateRisk.activeGateSignals.join(", ") || "none"}`
+    };
+  }
 
   // ── Patched-plan validation gate ─────────────────────────────────────────
   // Block approval when Athena's patchedPlans contain unresolved target-file placeholders
@@ -2432,19 +2595,38 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
       };
     }
 
-    // ── Token-first deterministic rebatch ───────────────────────────────────
-    // After contract validation, repack plans into minimal context-capacity
-    // batches (token-first, wave-aware). Writes _batchIndex/_batchTotal/_batchWave
-    // onto each plan so the orchestrator can dispatch in correct order without
-    // running buildRoleExecutionBatches role-split logic.
-    const rebatched = await rebatchPatchedPlansTokenFirst(handoff.plans, config);
-    const batchCount = rebatched.length > 0
-      ? Math.max(...rebatched.map(p => Number(p._batchTotal ?? 1)))
+    // ── AI batch-metadata contract gate ─────────────────────────────────────
+    // Athena must return explicit batch assignments. We do not synthesize
+    // deterministic batch indexes at this seam.
+    const aiBatchCheck = validateAiProvidedBatchMetadata(handoff.plans);
+    if (!aiBatchCheck.valid) {
+      const blockReason = {
+        code: "ATHENA_BATCH_METADATA_MISSING",
+        message: `Athena patchedPlans missing/invalid AI batch metadata: ${aiBatchCheck.violations.join(" | ")}`
+      };
+      await appendProgress(config, `[ATHENA] AI batch contract FAILED — ${blockReason.message}`);
+      chatLog(stateDir, athenaName, `AI batch contract failed: ${aiBatchCheck.violations.join(" | ")}`);
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "athena_reviewer",
+        title: "Patched plans missing AI batch metadata",
+        message: `code=${blockReason.code} violations=${aiBatchCheck.violations.slice(0, 3).join(" | ")}`
+      });
+      return {
+        ...result,
+        approved: false,
+        corrections: [...corrections, ...aiBatchCheck.violations],
+        reason: blockReason,
+      };
+    }
+
+    const batchCount = handoff.plans.length > 0
+      ? Math.max(...handoff.plans.map(p => Number((p as any)._batchTotal ?? 1)))
       : 0;
     await appendProgress(config,
-      `[ATHENA] Token-first rebatch: ${handoff.plans.length} plan(s) → ${batchCount} batch(es)`
+      `[ATHENA] AI-provided batching accepted: ${handoff.plans.length} plan(s) across ${batchCount} batch(es)`
     );
-    result.patchedPlans = rebatched;
+    result.patchedPlans = handoff.plans;
   }
 
   await writeJson(path.join(stateDir, "athena_plan_review.json"), {
@@ -2552,6 +2734,28 @@ function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
     decisionQualityStatus: dql.status,
     reviewedAt: new Date().toISOString(),
     model: "deterministic"
+  };
+}
+
+function scoreRecurrenceWeightedPriority(postmortem: any): number {
+  const rec = Number(postmortem?.recurrenceCount || 1);
+  const followUp = postmortem?.followUpNeeded === true || String(postmortem?.followUpTask || "").trim().length > 0 ? 1 : 0;
+  const unresolved = postmortem?.interventionClosedAt ? 0 : 1;
+  const severityWeight = String(postmortem?.deviation || "").toLowerCase() === "major" ? 3
+    : String(postmortem?.deviation || "").toLowerCase() === "minor" ? 2
+      : 1;
+  return (rec * 10) + (followUp * 5) + (unresolved * 3) + severityWeight;
+}
+
+function buildPostmortemInterventionClosure(postmortem: any, recurrences: any[]): any {
+  const normalizedTask = String(postmortem?.followUpTask || "").trim().toLowerCase();
+  const duplicate = recurrences.find((r: any) => String(r?.tag || "").toLowerCase() === String(postmortem?.defectChannelTag || "").toLowerCase());
+  return {
+    interventionId: postmortem?.interventionId || `pm-${Date.now().toString(36)}`,
+    duplicateSuppressed: Boolean(duplicate),
+    recurrenceCount: Number(duplicate?.count || postmortem?.recurrenceCount || 1),
+    closureStatus: postmortem?.followUpNeeded === true && !postmortem?.interventionClosedAt ? "open" : "closed",
+    closureTrackedTask: normalizedTask || null,
   };
 }
 
@@ -2683,10 +2887,22 @@ export async function runAthenaPostmortem(
       const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
       history = migrated.ok ? extractPostmortemEntries(migrated.data) : [];
     }
-    history.push(postmortem);
+    const deterministicRecurrences = detectRecurrences(history, { window: 50, threshold: 2 });
+    const closureMeta = buildPostmortemInterventionClosure(postmortem, deterministicRecurrences);
+    const enrichedPostmortem = {
+      ...postmortem,
+      recurrenceCount: closureMeta.recurrenceCount,
+      recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...postmortem, ...closureMeta }),
+      interventionId: closureMeta.interventionId,
+      interventionDuplicateSuppressed: closureMeta.duplicateSuppressed,
+      interventionClosureStatus: closureMeta.closureStatus,
+      interventionClosureTrackedTask: closureMeta.closureTrackedTask,
+    };
+
+    history.push(enrichedPostmortem);
     if (history.length > 50) history.splice(0, history.length - 50);
     await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
-    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
+    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), enrichedPostmortem);
 
     // Auto-close any carry-forward debt items resolved by this task.
     const evFast = workerResult?.verificationEvidence;
@@ -2695,7 +2911,7 @@ export async function runAthenaPostmortem(
       : String(workerResult?.summary || "").slice(0, 500);
     await attemptCarryForwardAutoClose(config, String(originalPlan?.task || "").trim(), evidenceFast);
 
-    return postmortem;
+    return enrichedPostmortem;
   }
 
   const planTask = originalPlan?.task || "unknown task";
@@ -2767,11 +2983,22 @@ export async function runAthenaPostmortem(
     };
     await appendProgress(config, `[ATHENA] Duplicate result detected for ${workerName} — reusing last postmortem (review-on-delta)`);
     chatLog(stateDir, athenaName, `Duplicate result: ${workerName} — AI call skipped`);
-    pastPostmortems.push(dupPm);
+    const dupRecurrences = detectRecurrences(pastPostmortems, { window: 50, threshold: 2 });
+    const dupClosureMeta = buildPostmortemInterventionClosure(dupPm, dupRecurrences);
+    const enrichedDupPm = {
+      ...dupPm,
+      recurrenceCount: dupClosureMeta.recurrenceCount,
+      recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...dupPm, ...dupClosureMeta }),
+      interventionId: dupClosureMeta.interventionId,
+      interventionDuplicateSuppressed: dupClosureMeta.duplicateSuppressed,
+      interventionClosureStatus: dupClosureMeta.closureStatus,
+      interventionClosureTrackedTask: dupClosureMeta.closureTrackedTask,
+    };
+    pastPostmortems.push(enrichedDupPm);
     if (pastPostmortems.length > 50) pastPostmortems.splice(0, pastPostmortems.length - 50);
     await writeJson(postmortemsFilePath, addSchemaVersion(pastPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
-    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), dupPm);
-    return dupPm;
+    await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), enrichedDupPm);
+    return enrichedDupPm;
   }
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
@@ -2897,12 +3124,23 @@ ${recurrenceContext}
 
   // Append to postmortem history (keep last 50)
   const history = Array.isArray(pastPostmortems) ? pastPostmortems : [];
-  history.push(postmortem);
+  const recurrences = detectRecurrences(history, { window: 50, threshold: 2 });
+  const closureMeta = buildPostmortemInterventionClosure(postmortem, recurrences);
+  const enrichedPostmortem = {
+    ...postmortem,
+    recurrenceCount: closureMeta.recurrenceCount,
+    recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...postmortem, ...closureMeta }),
+    interventionId: closureMeta.interventionId,
+    interventionDuplicateSuppressed: closureMeta.duplicateSuppressed,
+    interventionClosureStatus: closureMeta.closureStatus,
+    interventionClosureTrackedTask: closureMeta.closureTrackedTask,
+  };
+  history.push(enrichedPostmortem);
   if (history.length > 50) history.splice(0, history.length - 50);
   await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
 
   // Also write latest for dashboard visibility
-  await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
+  await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), enrichedPostmortem);
 
   // Auto-close any carry-forward debt items resolved by this task.
   const evAi = workerResult?.verificationEvidence;
@@ -2912,13 +3150,13 @@ ${recurrenceContext}
   await attemptCarryForwardAutoClose(config, String(originalPlan?.task || "").trim(), evidenceAi);
 
   await appendProgress(config,
-    `[ATHENA] Postmortem: ${workerName} — score=${postmortem.qualityScore}/10 deviation=${postmortem.deviation} recommendation=${postmortem.recommendation} decisionQualityLabel=${postmortem.decisionQualityLabel}`
+    `[ATHENA] Postmortem: ${workerName} — score=${enrichedPostmortem.qualityScore}/10 deviation=${enrichedPostmortem.deviation} recommendation=${enrichedPostmortem.recommendation} decisionQualityLabel=${enrichedPostmortem.decisionQualityLabel}`
   );
   chatLog(stateDir, athenaName,
-    `Postmortem: ${workerName} score=${postmortem.qualityScore}/10 → ${postmortem.recommendation}`
+    `Postmortem: ${workerName} score=${enrichedPostmortem.qualityScore}/10 → ${enrichedPostmortem.recommendation}`
   );
 
-  return postmortem;
+  return enrichedPostmortem;
 }
 
 // ── Reviewer Precision/Recall ─────────────────────────────────────────────────

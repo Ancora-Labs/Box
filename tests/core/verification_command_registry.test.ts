@@ -101,9 +101,9 @@ describe("verification_command_registry", () => {
       assert.equal(rewriteVerificationCommand("node src/cli.js doctor"), "npm test");
     });
 
-    it("rewrites dashboard daemon to node --test", () => {
-      assert.equal(rewriteVerificationCommand("node src/dashboard/live_dashboard.js"), "node --test");
-    });
+  it("rewrites dashboard daemon to node --test", () => {
+      assert.equal(rewriteVerificationCommand("node src/dashboard/live_dashboard.js"), "npm test");
+  });
 
     it("passes through canonical npm test unchanged", () => {
       assert.equal(rewriteVerificationCommand("npm test"), "npm test");

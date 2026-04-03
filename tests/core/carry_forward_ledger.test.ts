@@ -1054,4 +1054,17 @@ describe("classifyCarryForwardByRecurrence — recurrence classification", () =>
     assert.equal(lowRecurrence.length, 1, "item with no history is low-recurrence");
     assert.equal(highRecurrence.length, 0);
   });
+
+  it("negative path: duplicate-suppressed history entries do not inflate recurrence", () => {
+    const task = "Fix duplicate suppression drift";
+    const pending = [{ followUpTask: task }];
+    const all = [
+      { followUpTask: task, interventionDuplicateSuppressed: true },
+      { followUpTask: task, interventionDuplicateSuppressed: false },
+    ];
+    const result = classifyCarryForwardByRecurrence(pending, all, { recurrenceThreshold: 2 });
+    assert.equal(result.highRecurrence.length, 0);
+    assert.equal(result.lowRecurrence.length, 1);
+    assert.equal((result.lowRecurrence[0] as any)._recurrenceCount, 1);
+  });
 });

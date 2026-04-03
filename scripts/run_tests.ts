@@ -20,17 +20,29 @@ async function collectTestFiles(dir: string, out: string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const testFiles: string[] = [];
-  await collectTestFiles(TEST_ROOT, testFiles);
-  testFiles.sort();
+  // Accept explicit test file paths via CLI args (e.g. `npm test -- tests/core/foo.test.ts`)
+  const cliFiles = process.argv.slice(2).filter((arg) => arg.endsWith(".test.ts"));
 
-  if (testFiles.length === 0) {
-    console.log("No .test.ts files found under tests/.");
-    process.exit(1);
+  let relativeFiles: string[];
+
+  if (cliFiles.length > 0) {
+    // Targeted mode: only run the specified test files
+    relativeFiles = cliFiles.map((f) => path.relative(ROOT, path.resolve(ROOT, f)));
+  } else {
+    // Full suite: collect all test files
+    const testFiles: string[] = [];
+    await collectTestFiles(TEST_ROOT, testFiles);
+    testFiles.sort();
+
+    if (testFiles.length === 0) {
+      console.log("No .test.ts files found under tests/.");
+      process.exit(1);
+    }
+
+    relativeFiles = testFiles.map((filePath) => path.relative(ROOT, filePath));
   }
 
-  const relativeFiles = testFiles.map((filePath) => path.relative(ROOT, filePath));
-  const args = ["--import", "tsx", "--test", ...relativeFiles];
+  const args = ["--import", "tsx", "--test", "--test-force-exit", "--test-concurrency=1", ...relativeFiles];
 
   const child = spawn(process.execPath, args, {
     cwd: ROOT,

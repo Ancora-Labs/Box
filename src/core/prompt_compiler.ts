@@ -448,3 +448,63 @@ export function compileActionablePacketPrompt(sections, opts: any = {}) {
   const prompt = compileTieredPrompt(sections, opts);
   return { prompt, completeness };
 }
+
+/**
+ * Evaluate whether a planned packet set is dense enough to justify expensive
+ * worker invocations.
+ *
+ * A packet is flagged as thin when it lacks sufficient breadth (target files /
+ * acceptance criteria), depth (task text length), or estimated execution budget.
+ */
+export function analyzePacketDensification(
+  plans: Array<{
+    task?: string;
+    target_files?: string[];
+    acceptance_criteria?: string[];
+    estimatedExecutionTokens?: number;
+  }>,
+  opts: {
+    minTargetFiles?: number;
+    minAcceptanceCriteria?: number;
+    minTaskChars?: number;
+    minExecutionTokens?: number;
+  } = {}
+) {
+  const minTargetFiles = Number(opts.minTargetFiles ?? 2);
+  const minAcceptanceCriteria = Number(opts.minAcceptanceCriteria ?? 2);
+  const minTaskChars = Number(opts.minTaskChars ?? 120);
+  const minExecutionTokens = Number(opts.minExecutionTokens ?? 8000);
+
+  const normalizedPlans = Array.isArray(plans) ? plans : [];
+  const thinIndexes: number[] = [];
+
+  for (let i = 0; i < normalizedPlans.length; i++) {
+    const p = normalizedPlans[i] || {};
+    const taskChars = String(p.task || "").trim().length;
+    const targetCount = Array.isArray(p.target_files) ? p.target_files.filter(Boolean).length : 0;
+    const acCount = Array.isArray(p.acceptance_criteria) ? p.acceptance_criteria.filter(Boolean).length : 0;
+    const estimatedTokens = Number(p.estimatedExecutionTokens || 0);
+
+    const thin =
+      taskChars < minTaskChars
+      || targetCount < minTargetFiles
+      || acCount < minAcceptanceCriteria
+      || !Number.isFinite(estimatedTokens)
+      || estimatedTokens < minExecutionTokens;
+
+    if (thin) thinIndexes.push(i);
+  }
+
+  const total = normalizedPlans.length;
+  const denseCount = Math.max(0, total - thinIndexes.length);
+  const denseRatio = total > 0 ? Math.round((denseCount / total) * 1000) / 1000 : 1;
+
+  return {
+    total,
+    denseCount,
+    thinCount: thinIndexes.length,
+    thinIndexes,
+    denseRatio,
+    isDenseEnough: thinIndexes.length === 0,
+  };
+}

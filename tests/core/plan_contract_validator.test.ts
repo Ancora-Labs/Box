@@ -7,6 +7,8 @@ import {
   PACKET_VIOLATION_CODE,
   isNonSpecificVerification,
   isAmbiguousTask,
+  isCycleSpecificExclusionJustification,
+  MANDATORY_EXCLUSION_JUSTIFICATION_MIN_LENGTH,
   AMBIGUOUS_TASK_PATTERNS,
   MAX_ACCEPTANCE_CRITERIA_PER_TASK,
   MAX_FILES_IN_SCOPE_PER_TASK,
@@ -43,6 +45,19 @@ describe("plan_contract_validator", () => {
     it("treats non-CLI descriptive text as specific (benefit of doubt)", () => {
       // Descriptive assertion text is not a bare CLI command
       assert.equal(isNonSpecificVerification("All integration tests pass when auth module is loaded"), false);
+    });
+  });
+
+  describe("isCycleSpecificExclusionJustification", () => {
+    it("accepts justifications meeting minimum cycle-specific length", () => {
+      const text = "Blocked by governance freeze in this cycle.";
+      assert.equal(isCycleSpecificExclusionJustification(text), true);
+      assert.ok(text.trim().length >= MANDATORY_EXCLUSION_JUSTIFICATION_MIN_LENGTH);
+    });
+
+    it("negative path: rejects too-short justifications", () => {
+      assert.equal(isCycleSpecificExclusionJustification("too short"), false);
+      assert.equal(isCycleSpecificExclusionJustification("   "), false);
     });
   });
 

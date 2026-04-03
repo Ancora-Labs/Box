@@ -130,6 +130,25 @@ export const READ_JSON_REASON = Object.freeze({
 });
 
 /**
+ * readTextSafe — structured outcome contract for UTF-8 text file reads.
+ *
+ * Returns: { ok: boolean, data: string|null, reason: 'missing'|'invalid'|null, error: Error|null }
+ *   ok=true  → data contains file content, reason and error are null
+ *   ok=false → data is null, reason is READ_JSON_REASON.MISSING or .INVALID, error is the raw Error
+ *
+ * Never throws.
+ */
+export async function readTextSafe(filePath) {
+  try {
+    const data = await fs.readFile(filePath, "utf8");
+    return { ok: true, data, reason: null, error: null };
+  } catch (readErr) {
+    const reason = readErr.code === "ENOENT" ? READ_JSON_REASON.MISSING : READ_JSON_REASON.INVALID;
+    return { ok: false, data: null, reason, error: readErr };
+  }
+}
+
+/**
  * readJsonSafe — structured outcome contract for JSON file reads.
  *
  * Returns: { ok: boolean, data: any|null, reason: 'missing'|'invalid'|null, error: Error|null }
@@ -171,6 +190,26 @@ export async function readJsonSafe(filePath) {
  */
 export async function readJson(filePath, fallback) {
   const result = await readJsonSafe(filePath);
+  if (!result.ok) {
+    process.emit("box:readError", {
+      filePath,
+      reason: result.reason,
+      error: result.error,
+      timestamp: new Date().toISOString()
+    });
+    return fallback;
+  }
+  return result.data;
+}
+
+/**
+ * readText — backward-compatible convenience wrapper around readTextSafe.
+ *
+ * Emits a `box:readError` event on process for every read failure, ensuring
+ * no error is silently swallowed.
+ */
+export async function readText(filePath, fallback = "") {
+  const result = await readTextSafe(filePath);
   if (!result.ok) {
     process.emit("box:readError", {
       filePath,

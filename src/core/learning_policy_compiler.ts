@@ -756,3 +756,72 @@ export function compileCurriculumToPolicies(
   return policies;
 }
 
+export interface PolicyOutcomeDelta {
+  policyId: string;
+  baseline: number;
+  current: number;
+  delta: number;
+  cycleWindow: number;
+}
+
+export function computePolicyOutcomeDelta(
+  policyId: string,
+  baseline: number,
+  current: number,
+  cycleWindow = 3,
+): PolicyOutcomeDelta {
+  const safeBaseline = Number.isFinite(Number(baseline)) ? Number(baseline) : 0;
+  const safeCurrent = Number.isFinite(Number(current)) ? Number(current) : 0;
+  const delta = Math.round((safeCurrent - safeBaseline) * 1000) / 1000;
+  return {
+    policyId: String(policyId || "").trim(),
+    baseline: safeBaseline,
+    current: safeCurrent,
+    delta,
+    cycleWindow: Math.max(1, Math.floor(Number(cycleWindow) || 1)),
+  };
+}
+
+export function applyPolicyDecay(
+  policies: any[],
+  deltas: PolicyOutcomeDelta[],
+  opts: { minDelta?: number; maxInactiveCycles?: number } = {},
+): { active: any[]; retired: any[] } {
+  if (!Array.isArray(policies)) return { active: [], retired: [] };
+  const minDelta = Number.isFinite(Number(opts.minDelta)) ? Number(opts.minDelta) : 0.01;
+  const maxInactiveCycles = Number.isFinite(Number(opts.maxInactiveCycles)) ? Number(opts.maxInactiveCycles) : 3;
+  const deltaById = new Map((Array.isArray(deltas) ? deltas : []).map((d) => [d.policyId, d]));
+  const active: any[] = [];
+  const retired: any[] = [];
+
+  for (const policy of policies) {
+    const id = String(policy?.id || "");
+    const delta = deltaById.get(id);
+    if (!delta) {
+      active.push(policy);
+      continue;
+    }
+    const inactiveCycles = Number.isFinite(Number((policy as any)?._inactiveCycles))
+      ? Number((policy as any)?._inactiveCycles)
+      : 0;
+    const improvesCapacity = delta.delta >= minDelta;
+    if (improvesCapacity) {
+      active.push({ ...policy, _inactiveCycles: 0, _lastDelta: delta.delta });
+      continue;
+    }
+    const nextInactiveCycles = inactiveCycles + 1;
+    if (nextInactiveCycles >= maxInactiveCycles) {
+      retired.push({
+        ...policy,
+        _retiredAt: new Date().toISOString(),
+        _retirementReason: `No measurable capacity improvement for ${nextInactiveCycles} cycles (delta=${delta.delta})`,
+        _lastDelta: delta.delta,
+      });
+    } else {
+      active.push({ ...policy, _inactiveCycles: nextInactiveCycles, _lastDelta: delta.delta });
+    }
+  }
+
+  return { active, retired };
+}
+

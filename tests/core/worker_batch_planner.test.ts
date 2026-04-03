@@ -1152,6 +1152,20 @@ describe("buildTokenFirstBatches — specialist threshold routing", () => {
     assert.ok(reroutes.length > 0, "should have at least one reroute entry");
     assert.ok(reroutes[0].includes("governance-worker"), "reroute should mention governance-worker");
   });
+
+  it("separates same-role conflicting file plans into distinct token-first batches", () => {
+    const plans = [
+      { role: "evolution-worker", task: "Change orchestrator", filesInScope: ["src/core/orchestrator.ts"], wave: 1, priority: 1 },
+      { role: "evolution-worker", task: "Refine orchestrator", filesInScope: ["src/core/orchestrator.ts"], wave: 1, priority: 2 },
+      { role: "evolution-worker", task: "Change prometheus", filesInScope: ["src/core/prometheus.ts"], wave: 1, priority: 3 },
+    ];
+    const batches = buildTokenFirstBatches(plans, config);
+    const conflictCoBatched = batches.some((batch) => {
+      const tasks = (batch.plans as any[]).map((p: any) => p.task);
+      return tasks.includes("Change orchestrator") && tasks.includes("Refine orchestrator");
+    });
+    assert.equal(conflictCoBatched, false, "conflicting file plans must not be co-batched");
+  });
 });
 
 // ── buildTokenFirstBatches: calibration coefficient ────────────────────────────

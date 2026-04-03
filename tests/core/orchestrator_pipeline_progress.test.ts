@@ -118,6 +118,49 @@ describe("orchestrator pipeline progress — resilience", () => {
   });
 });
 
+describe("orchestrator bundled ci-fix context injection", () => {
+  let tmpDir;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-bundled-ci-fix-"));
+  });
+
+  afterEach(async () => {
+    mock.restoreAll();
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("runOnce keeps deterministic bundled ci-fix context path executable", async () => {
+    await fs.writeFile(path.join(tmpDir, "policy.json"), JSON.stringify({ blockedCommands: [] }, null, 2), "utf8");
+    await fs.writeFile(path.join(tmpDir, "progress.txt"), "", "utf8");
+
+    const config = {
+      paths: {
+        stateDir: tmpDir,
+        progressFile: path.join(tmpDir, "progress.txt"),
+        policyFile: path.join(tmpDir, "policy.json")
+      },
+      env: {
+        copilotCliCommand: "__missing_copilot_binary__",
+        targetRepo: "CanerDoqdu/Box"
+      },
+      roleRegistry: {
+        ceoSupervisor: { name: "Jesus", model: "Claude Sonnet 4.6" },
+        deepPlanner: { name: "Prometheus", model: "GPT-5.3-Codex" },
+        qualityReviewer: { name: "Athena", model: "Claude Sonnet 4.6" }
+      },
+      copilot: { leadershipAutopilot: false },
+      canary: { enabled: false },
+      systemGuardian: { enabled: false }
+    };
+
+    await assert.doesNotReject(
+      () => runOnce(config),
+      "orchestrator must execute without throwing when bundled ci-fix context path is present"
+    );
+  });
+});
+
 // ── Governance pre-dispatch gate tests (Tasks 4-7) ────────────────────────────
 
 describe("orchestrator governance pre-dispatch gate", () => {

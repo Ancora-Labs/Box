@@ -72,6 +72,7 @@ describe("dashboard daemon control contracts", () => {
     process.env.BOX_ROOT_DIR = tempRoot;
     process.env.BOX_DASHBOARD_TOKEN = AUTH_TOKEN;
     process.env.BOX_DASHBOARD_PORT = "9988";
+    process.env.BOX_DAEMON_STOP_GRACE_MS = "200";
 
     const modulePath = `../../src/dashboard/live_dashboard.ts?daemon_contract=${Date.now()}`;
     const { startDashboard } = await import(modulePath);
@@ -120,6 +121,7 @@ describe("dashboard daemon control contracts", () => {
     delete process.env.BOX_ROOT_DIR;
     delete process.env.BOX_DASHBOARD_TOKEN;
     delete process.env.BOX_DASHBOARD_PORT;
+    delete process.env.BOX_DAEMON_STOP_GRACE_MS;
   });
 
   it("daemon-start returns deterministic already-running status when pid is active", async () => {

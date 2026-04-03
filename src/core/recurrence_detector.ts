@@ -32,8 +32,8 @@ export const RECURRENCE_WINDOW = 20;
 export function detectRecurrences(postmortems, opts: any = {}) {
   if (!Array.isArray(postmortems) || postmortems.length === 0) return [];
 
-  const threshold = opts.threshold || RECURRENCE_THRESHOLD;
-  const windowSize = opts.window || RECURRENCE_WINDOW;
+  const threshold = Number(opts.threshold || RECURRENCE_THRESHOLD);
+  const windowSize = Number(opts.window || RECURRENCE_WINDOW);
   const recent = postmortems.slice(-windowSize);
 
   // Count by defectChannelTag (most specific)
@@ -42,6 +42,7 @@ export function detectRecurrences(postmortems, opts: any = {}) {
   const lessonCounts = new Map();
 
   for (const pm of recent) {
+    if (pm?.interventionDuplicateSuppressed === true) continue;
     const tag = pm.defectChannelTag || pm.defectChannel || "unknown";
     tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
 
@@ -62,7 +63,8 @@ export function detectRecurrences(postmortems, opts: any = {}) {
         count,
         channel: sample?.defectChannel || "unknown",
         tag,
-        severity: count >= threshold * 2 ? "critical" : "warning"
+        severity: count >= threshold * 2 ? "critical" : "warning",
+        recurrenceWeightedPriority: count * (tag === "unknown" ? 1 : 2),
       });
     }
   }
@@ -74,12 +76,13 @@ export function detectRecurrences(postmortems, opts: any = {}) {
         count,
         channel: "product",
         tag: null,
-        severity: count >= threshold * 2 ? "critical" : "warning"
+        severity: count >= threshold * 2 ? "critical" : "warning",
+        recurrenceWeightedPriority: count,
       });
     }
   }
 
-  return matches;
+  return matches.sort((a: any, b: any) => Number(b.recurrenceWeightedPriority || 0) - Number(a.recurrenceWeightedPriority || 0));
 }
 
 /**

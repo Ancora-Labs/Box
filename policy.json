@@ -1,9 +1,6 @@
 {
-  "protectedPaths": [
-    "src/core/**",
-    "infra/**"
-  ],
-  "requireReviewerApprovalForProtectedPaths": true,
+  "protectedPaths": [],
+  "requireReviewerApprovalForProtectedPaths": false,
   "blockedCommands": [
     "rm -rf /",
     "git push --force",

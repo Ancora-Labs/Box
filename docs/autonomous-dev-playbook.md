@@ -22,10 +22,10 @@ Bu kural pratikte su anlama gelir:
 ## 3. Katmanlar
 
 1. Orchestration Layer: `src/core/orchestrator.ts`
-2. Intelligence Layer: `src/core/prometheus.ts`, `src/providers/reviewer/copilot_reviewer.ts`
-3. Worker Layer: `src/core/worker_runner.ts`, `src/workers/run_task.ts`
+2. Intelligence Layer: `src/core/prometheus.ts`, `src/core/athena_reviewer.ts`
+3. Worker Layer: `src/core/worker_runner.ts`, `src/core/evolution_executor.ts`
 4. State Layer: `state/*.json`, `src/core/state_tracker.ts`
-5. Policy/Budget Layer: `src/core/policy_engine.ts`, `src/core/budget_controller.ts`
+5. Policy/Budget Layer: `src/core/learning_policy_compiler.ts`, `src/core/budget_controller.ts`
 
 ## 4. 7/24 Otonom Dongu
 
@@ -127,3 +127,9 @@ Working code changes + deterministic status markers.
 5. Cost dashboard ve call-throttle metriklerini sikilastirma
 6. Merge policy ve protected path kontrollerini sertlestirme
 7. End-to-end regression test senaryolari
+
+## 12. Drift Debt Onceliklendirme (Ghost-Path Koruma)
+
+- `docs/autonomous-dev-playbook.md` icindeki stale referanslar, planner tarafinda yuksek drift-debt onceligi alir.
+- Bu dosyada stale path birikmesi, ghost-path planning riskini artirdigi icin orchestrator pre-dispatch gate tarafinda bloklayici sinifta ele alinabilir.
+- Drift debt gorevleri deterministic olarak `tests/core/architecture_drift.test.ts` hedefleri ile uretilir ve kapanis bu test kaniti ile dogrulanir.

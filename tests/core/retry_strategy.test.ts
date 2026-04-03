@@ -28,6 +28,7 @@ import {
   RETRY_METRIC_SCHEMA,
   resolveRetryAction,
   buildRetryMetric,
+  recommendRetryDeliberationMode,
 } from "../../src/core/retry_strategy.js";
 
 import { FAILURE_CLASS } from "../../src/core/failure_classifier.js";
@@ -565,5 +566,21 @@ describe("buildRetryMetric", () => {
     // escalationTarget is preserved for downstream use (not null — it's the escalation fallback)
     const metric = buildRetryMetric(r.decision);
     assert.ok(typeof metric.escalationTarget === "string" || metric.escalationTarget === null);
+  });
+});
+
+describe("recommendRetryDeliberationMode", () => {
+  it("returns single-pass for first-attempt lightweight retry", () => {
+    const result = recommendRetryDeliberationMode({ retryAction: "retry", attempts: 0 });
+    assert.equal(result.mode, "single-pass");
+    assert.equal(result.reflection, false);
+    assert.equal(result.searchBudget, 0);
+  });
+
+  it("returns multi-attempt for rework retry path", () => {
+    const result = recommendRetryDeliberationMode({ retryAction: "rework", attempts: 0 });
+    assert.equal(result.mode, "multi-attempt");
+    assert.equal(result.reflection, true);
+    assert.ok(result.searchBudget >= 1);
   });
 });

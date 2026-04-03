@@ -153,3 +153,15 @@ export function selectCurriculumItems(
   items.sort((a, b) => b.weight - a.weight);
   return items.slice(0, limit);
 }
+
+export function applyLessonDecayWindow(
+  weight: number,
+  inactiveCycles: number,
+  opts: { decayPerCycle?: number } = {},
+): number {
+  const base = Number.isFinite(Number(weight)) ? Number(weight) : 0;
+  const cycles = Math.max(0, Math.floor(Number(inactiveCycles) || 0));
+  const decayPerCycle = Number.isFinite(Number(opts.decayPerCycle)) ? Number(opts.decayPerCycle) : 0.1;
+  const factor = Math.max(0, 1 - (decayPerCycle * cycles));
+  return Math.round(Math.max(0, Math.min(1, base * factor)) * 1000) / 1000;
+}

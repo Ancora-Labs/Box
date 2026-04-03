@@ -26,6 +26,7 @@ import {
   CLOSURE_YIELD_LOW_THRESHOLD,
   routeModelWithRealizedROI,
   EXPLORATION_BOUND,
+  decideDeliberationPolicy,
 } from "../../src/core/model_policy.js";
 
 describe("model_policy — complexity tiers", () => {
@@ -835,5 +836,30 @@ describe("routeModelWithRealizedROI", () => {
     assert.ok(result.reason.includes("roi="), `reason should include roi=, got: ${result.reason}`);
     assert.ok(result.reason.includes("tier="), `reason should include tier=, got: ${result.reason}`);
     await fs.rm((config as any).paths.stateDir, { recursive: true, force: true });
+  });
+});
+
+describe("decideDeliberationPolicy", () => {
+  it("returns single-pass policy for routine low-uncertainty tasks", () => {
+    const result = decideDeliberationPolicy(
+      { complexity: "low", estimatedLines: 60 },
+      { recentROI: 0.9 },
+      {}
+    );
+    assert.equal(result.mode, "single-pass");
+    assert.equal(result.attempts, 1);
+    assert.equal(result.boundedSearch, false);
+  });
+
+  it("returns multi-attempt policy for hard high-uncertainty tasks", () => {
+    const result = decideDeliberationPolicy(
+      { complexity: "critical", estimatedLines: 4200 },
+      { recentROI: 0.1 },
+      { outcomeMetrics: { sampleCount: 1, successRate: 0.1, recentROI: 0.1 } }
+    );
+    assert.equal(result.mode, "multi-attempt");
+    assert.ok(result.attempts >= 2);
+    assert.equal(result.reflection, true);
+    assert.ok(result.searchBudget >= 2);
   });
 });

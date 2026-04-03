@@ -307,17 +307,23 @@ async function fetchGitHubState(config) {
     pullRequests: Array.isArray(prs) ? prs.slice(0, 10).map(p => ({ number: p.number, title: p.title, state: p.state, draft: p.draft })) : [],
     repoInfo: repoInfo ? { name: (repoInfo as any).name, defaultBranch: (repoInfo as any).default_branch, openIssuesCount: (repoInfo as any).open_issues_count } : null,
     latestMainCi: latestMainRun ? {
+      runId: latestMainRun.id,
       conclusion: latestMainRun.conclusion,
       branch: latestMainRun.head_branch,
+      headSha: latestMainRun.head_sha,
       commit: latestMainRun.head_sha?.slice(0, 7),
-      updatedAt: latestMainRun.updated_at
+      updatedAt: latestMainRun.updated_at,
+      htmlUrl: latestMainRun.html_url
     } : null,
     failedCiRuns: recentFailures.map(r => ({
+      runId: r.id,
       name: r.name,
       branch: r.head_branch,
+      headSha: r.head_sha,
       commit: r.head_sha?.slice(0, 7),
       conclusion: r.conclusion,
-      updatedAt: r.updated_at
+      updatedAt: r.updated_at,
+      htmlUrl: r.html_url
     })),
     recentlyMergedPrs: Array.isArray(mergedPrs)
       ? mergedPrs.filter(p => p.merged_at).slice(0, 10).map(p => ({
@@ -917,6 +923,10 @@ ${workersList}`;
     model: jesusModel,
     repo: config.env?.targetRepo,
     githubStateHash: ghFingerprint,
+    githubCiContext: {
+      latestMainCi: githubState.latestMainCi || null,
+      failedCiRuns: Array.isArray(githubState.failedCiRuns) ? githubState.failedCiRuns : []
+    },
     capacityDelta,
     expectedOutcome,
   };

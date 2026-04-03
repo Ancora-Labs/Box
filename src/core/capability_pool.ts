@@ -89,6 +89,10 @@ const DEFAULT_CAPABILITY_MAP = Object.freeze({
   "observation":          { lane: "observation",     fallback: "evolution-worker" },
 });
 
+export const DEFAULT_SPECIALIZATION_TARGETS = Object.freeze({
+  minSpecializedShare: 0.35,
+});
+
 /**
  * @typedef {object} WorkerSelection
  * @property {string} role — selected worker role name
@@ -212,7 +216,20 @@ export function assignWorkersToPlans(
   lanePerformance?: LanePerformanceLedger,
   opts: AssignWorkersOptions = {}
 ) {
-  if (!Array.isArray(plans)) return { assignments: [], diversityIndex: 0, diversityCheck: { meetsMinimum: true, activeLaneCount: 0, warning: "" } };
+  if (!Array.isArray(plans)) {
+    return {
+      assignments: [],
+      diversityIndex: 0,
+      diversityCheck: { meetsMinimum: true, activeLaneCount: 0, warning: "" },
+      specializationUtilization: {
+        specializedCount: 0,
+        total: 0,
+        specializedShare: 0,
+        minSpecializedShare: DEFAULT_SPECIALIZATION_TARGETS.minSpecializedShare,
+        specializationTargetsMet: true,
+      },
+    };
+  }
 
   const assignments = plans.map(plan => ({
     plan,
@@ -234,6 +251,12 @@ export function assignWorkersToPlans(
     : 1;
   const diversityIndex = Math.round((1 - maxShare) * 100) / 100;
   const activeLaneCount = laneCounts.size;
+  const specializedCount = assignments.filter(a => String(a.selection?.role || "") !== "Evolution Worker").length;
+  const specializedShare = assignments.length > 0
+    ? Math.round((specializedCount / assignments.length) * 1000) / 1000
+    : 0;
+  const minSpecializedShare = Number(config?.workerPool?.specializationTargets?.minSpecializedShare ?? DEFAULT_SPECIALIZATION_TARGETS.minSpecializedShare);
+  const specializationTargetsMet = assignments.length === 0 ? true : specializedShare >= minSpecializedShare;
 
   const pool = { assignments, diversityIndex, activeLaneCount, laneCounts: Object.fromEntries(laneCounts) };
 
@@ -243,7 +266,17 @@ export function assignWorkersToPlans(
   const minLanes = opts.diversityThreshold ?? 2;
   const diversityCheck = enforceLaneDiversity(pool, { minLanes });
 
-  return { ...pool, diversityCheck };
+  return {
+    ...pool,
+    diversityCheck,
+    specializationUtilization: {
+      specializedCount,
+      total: assignments.length,
+      specializedShare,
+      minSpecializedShare,
+      specializationTargetsMet,
+    },
+  };
 }
 
 /**

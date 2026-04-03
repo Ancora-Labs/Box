@@ -526,6 +526,36 @@ export function buildRetryMetric(decision) {
   };
 }
 
+/**
+ * Recommend deliberation mode for a retry path.
+ * Keeps routine retries single-pass while escalating complex retries to
+ * bounded multi-attempt mode.
+ */
+export function recommendRetryDeliberationMode(decision: {
+  retryAction?: string;
+  failureClass?: string;
+  attempts?: number;
+}) {
+  const action = String(decision?.retryAction || "");
+  const attempts = Number(decision?.attempts || 0);
+  const hardAction = action === RETRY_ACTION.REWORK || action === RETRY_ACTION.SPLIT;
+  const highAttempts = attempts >= 1;
+
+  if (hardAction || highAttempts) {
+    return {
+      mode: "multi-attempt",
+      reflection: true,
+      searchBudget: hardAction ? 2 : 1,
+    };
+  }
+
+  return {
+    mode: "single-pass",
+    reflection: false,
+    searchBudget: 0,
+  };
+}
+
 // ── State persistence helpers ─────────────────────────────────────────────────
 
 import path from "node:path";

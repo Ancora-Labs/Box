@@ -172,12 +172,6 @@ export function getUsableModelContextTokens(config, modelName) {
 }
 
 export function estimatePlanTokens(plan, calibrationCoefficient?: number) {
-  const explicitEstimate = Number(
-    plan?.estimatedExecutionTokens
-    ?? plan?.estimated_execution_tokens
-    ?? plan?.estimated_tokens
-  );
-
   const payload = [
     plan?.task,
     plan?.context,
@@ -206,19 +200,13 @@ export function estimatePlanTokens(plan, calibrationCoefficient?: number) {
   const reasoningOverhead = Math.ceil(payloadTokens * 0.3 * riskMultiplier); // model reasoning space
   const heuristicEstimate = Math.max(1, payloadTokens + baseOverhead + fileReadOverhead + reasoningOverhead);
 
-  // If planner/reviewer provides an explicit estimate, trust it but never go below
-  // heuristic floor to avoid over-packing worker context.
-  const rawEstimate = (Number.isFinite(explicitEstimate) && explicitEstimate > 0)
-    ? Math.max(heuristicEstimate, Math.floor(explicitEstimate))
-    : heuristicEstimate;
-
   // Apply calibration coefficient if provided (from token_calibration EWMA).
   // coefficient > 1 means we historically underestimate → inflate.
   // coefficient < 1 means we historically overestimate → deflate.
   const coeff = Number.isFinite(calibrationCoefficient) && (calibrationCoefficient as number) > 0
     ? calibrationCoefficient as number
     : 1.0;
-  return Math.max(1, Math.round(rawEstimate * coeff));
+  return Math.max(1, Math.round(heuristicEstimate * coeff));
 }
 
 /**
@@ -417,6 +405,27 @@ function buildSharedBranchName(roleName, plans) {
   const roleSlug = slugify(roleName);
   const firstTask = slugify(plans?.[0]?.task || plans?.[0]?.title || "batch").slice(0, 24);
   return `box/${roleSlug}-${firstTask || "batch"}`;
+}
+
+function hasConflictFiles(plan: any, existing: any): boolean {
+  const filesA = Array.isArray(plan?.filesInScope)
+    ? plan.filesInScope
+    : Array.isArray(plan?.target_files)
+      ? plan.target_files
+      : Array.isArray(plan?.targetFiles)
+        ? plan.targetFiles
+        : [];
+  const filesB = Array.isArray(existing?.filesInScope)
+    ? existing.filesInScope
+    : Array.isArray(existing?.target_files)
+      ? existing.target_files
+      : Array.isArray(existing?.targetFiles)
+        ? existing.targetFiles
+        : [];
+  if (filesA.length === 0 || filesB.length === 0) return false;
+  const normalize = (v: any) => String(v || "").trim().toLowerCase();
+  const bSet = new Set(filesB.map(normalize).filter(Boolean));
+  return filesA.map(normalize).some((file) => bSet.has(file));
 }
 
 /**
@@ -956,12 +965,12 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
  * conflict splitting and additional reshaping), this function performs a direct
  * token-first pack with strict role isolation:
  *  - never merge different roles into one batch
- *  - within each (wave, role) bucket, fill context capacity before opening
- *    the next batch
+ *  - within each role bucket, fill context capacity before opening the next batch
  *
- * Wave boundaries are still hard barriers: wave N fully completes before wave N+1.
- * Plans without any explicit dependency declarations are all collapsed to wave 1
- * so they can be packed together.
+ * Wave barriers are disabled — all plans are packed into the fewest batches
+ * possible regardless of wave assignments.  Dependency ordering is enforced
+ * via the worker prompt (execution order within a batch) instead of code-level
+ * wave boundaries.
  *
  * This minimises premium request consumption by filling each model context window
  * before opening a new batch.  3 small tasks with no dependencies → 1 batch.
@@ -979,24 +988,17 @@ export function buildTokenFirstBatches(
   if (!Array.isArray(plans) || plans.length === 0) return [];
 
   // ── Wave compaction ────────────────────────────────────────────────────────
-  // When no plan has explicit dependencies the whole plan set can run in one
-  // wave; collapse all plan wave fields to 1 to enable maximum consolidation.
-  const hasAnyDeps = plans.some(p => hasExplicitDependencies(p));
-  const workingPlans: any[] = hasAnyDeps
-    ? plans
-    : plans.map(p => ({ ...p, wave: 1 }));
+  // Wave barriers are fully disabled.  All plans collapse to wave 1 so they
+  // can be packed purely by role + token capacity.
+  const workingPlans: any[] = plans.map(p => ({ ...p, wave: 1 }));
 
-  // ── Group by wave × role ──────────────────────────────────────────────────
+  // ── Group by role ─────────────────────────────────────────────────────────
   // Different roles must never be merged into the same worker batch.
-  const byWaveRole = new Map<string, { wave: number; role: string; plans: any[] }>();
+  const byRole = new Map<string, { role: string; plans: any[] }>();
   for (const plan of workingPlans) {
-    const w = Number.isFinite(Number(plan.wave)) && Number(plan.wave) >= 1
-      ? Number(plan.wave)
-      : 1;
     const role = String(plan.role || "evolution-worker").trim() || "evolution-worker";
-    const key = `${w}::${role}`;
-    if (!byWaveRole.has(key)) byWaveRole.set(key, { wave: w, role, plans: [] });
-    byWaveRole.get(key)!.plans.push(plan);
+    if (!byRole.has(role)) byRole.set(role, { role, plans: [] });
+    byRole.get(role)!.plans.push(plan);
   }
 
   const defaultModel = (config as any)?.copilot?.defaultModel || "Claude Sonnet 4.6";
@@ -1015,43 +1017,41 @@ export function buildTokenFirstBatches(
   };
 
   // ── Specialist-threshold routing ──────────────────────────────────────────
-  // For each (wave, role) group where the role is a specialist (not evolution-worker),
+  // For each role group where the role is a specialist (not evolution-worker),
   // check if total estimated tokens fill at least specialistFillThreshold of usable
   // context.  If not, reroute those plans to evolution-worker for co-packing.
   const specialistThreshold = resolveSpecialistFillThreshold(config);
   const minSpecialistTokens = Math.floor(usableTokens * specialistThreshold);
   const reroutedRoles: string[] = [];
 
-  for (const [key, group] of byWaveRole) {
+  for (const [key, group] of byRole) {
     if (SPECIALIST_EXEMPT_ROLES.has(group.role)) continue;
     const groupCoeff = getCoeff(group.role);
     const groupTokens = group.plans.reduce((sum, p) => sum + estimatePlanTokens(p, groupCoeff), 0);
     if (groupTokens < minSpecialistTokens) {
       // Below threshold — reroute to evolution-worker
-      reroutedRoles.push(`${group.role}(wave${group.wave},${groupTokens}tok)`);
-      const evoKey = `${group.wave}::evolution-worker`;
-      if (!byWaveRole.has(evoKey)) {
-        byWaveRole.set(evoKey, { wave: group.wave, role: "evolution-worker", plans: [] });
+      reroutedRoles.push(`${group.role}(${groupTokens}tok)`);
+      const evoKey = "evolution-worker";
+      if (!byRole.has(evoKey)) {
+        byRole.set(evoKey, { role: "evolution-worker", plans: [] });
       }
       // Tag plans with original role for observability, then move them
       for (const plan of group.plans) {
         plan._originalSpecialistRole = group.role;
         plan.role = "evolution-worker";
-        byWaveRole.get(evoKey)!.plans.push(plan);
+        byRole.get(evoKey)!.plans.push(plan);
       }
-      byWaveRole.delete(key);
+      byRole.delete(key);
     }
   }
 
-  // Sort groups: ascending wave, then role (deterministic)
-  const sortedGroups = [...byWaveRole.values()].sort((a, b) => {
-    const waveDelta = a.wave - b.wave;
-    if (waveDelta !== 0) return waveDelta;
-    return a.role.localeCompare(b.role);
-  });
+  // Sort groups: ascending role name (deterministic)
+  const sortedGroups = [...byRole.values()].sort((a, b) =>
+    a.role.localeCompare(b.role)
+  );
 
   for (const group of sortedGroups) {
-    const { wave: waveNum, role, plans: groupPlans } = group;
+    const { role, plans: groupPlans } = group;
 
     // Sort by priority within group (lower number = higher priority = dispatched first)
     groupPlans.sort((a, b) => Number(a.priority ?? 99) - Number(b.priority ?? 99));
@@ -1065,7 +1065,8 @@ export function buildTokenFirstBatches(
       const planTokens = estimatePlanTokens(plan, roleCoeff);
       let placed = false;
       for (const batch of batches) {
-        if (batch.tokens + planTokens <= usableTokens) {
+        const hasConflict = batch.plans.some(existing => hasConflictFiles(plan, existing));
+        if (!hasConflict && batch.tokens + planTokens <= usableTokens) {
           batch.plans.push(plan);
           batch.tokens += planTokens;
           placed = true;
@@ -1096,7 +1097,7 @@ export function buildTokenFirstBatches(
         contextUtilizationPercent: utilization,
         taskKind,
         sharedBranch,
-        wave: waveNum,
+        wave: 1,
         roleBatchIndex: index + 1,
         roleBatchTotal: batches.length,
         githubFinalizer: index === batches.length - 1,

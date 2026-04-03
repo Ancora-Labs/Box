@@ -37,6 +37,8 @@ const GITHUB_API_VERSION = process.env.BOX_GITHUB_API_VERSION || "2022-11-28";
 const COPILOT_USAGE_REFRESH_MS = Number(process.env.BOX_COPILOT_USAGE_REFRESH_MS || "3600000");
 const PR_DELTA_REFRESH_MS = Number(process.env.BOX_PR_DELTA_REFRESH_MS || "3600000");
 const DASHBOARD_PROJECT_LABEL = String(process.env.BOX_DASHBOARD_PROJECT_LABEL || "").trim();
+const DAEMON_STOP_GRACE_MS = Math.max(0, Number(process.env.BOX_DAEMON_STOP_GRACE_MS || "6000"));
+const DAEMON_STOP_POLL_MS = 100;
 
 // Bearer token required for all mutation (POST) endpoints.
 // If not set, mutation endpoints are hard-blocked (fail-safe).
@@ -526,9 +528,9 @@ async function stopDaemon() {
     const stopFile = path.join(STATE_DIR, "daemon.stop.json");
     await fs.writeFile(stopFile, JSON.stringify({ requestedAt: new Date().toISOString(), reason: "dashboard-stop" }), "utf8");
   } catch { /* best effort */ }
-  // Wait up to 6s for graceful exit
-  for (let waited = 0; waited < 6000; waited += 500) {
-    await new Promise(r => setTimeout(r, 500));
+  // Wait for graceful exit; timeout is configurable for deterministic tests.
+  for (let waited = 0; waited < DAEMON_STOP_GRACE_MS; waited += DAEMON_STOP_POLL_MS) {
+    await new Promise(r => setTimeout(r, DAEMON_STOP_POLL_MS));
     if (!isProcessAlive(pid)) {
       return { ok: true, message: `Daemon pid=${pid} stopped gracefully` };
     }

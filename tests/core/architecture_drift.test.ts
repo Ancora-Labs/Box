@@ -342,7 +342,7 @@ describe("architecture_drift — deprecated token detection (Task 5)", () => {
 
     await fs.writeFile(
       path.join(rootDir, "docs", "clean.md"),
-      "Use evaluatePreDispatchGovernanceGate and GOVERNANCE_GATE_EVALUATED.\n",
+      "Use evaluatePreDispatchGovernanceGate and runAthenaPlanReview.\n",
       "utf8"
     );
 
@@ -403,6 +403,7 @@ describe("rankStaleRefsAsRemediationCandidates", () => {
     const candidates = rankStaleRefsAsRemediationCandidates(report);
     assert.equal(candidates.length, 1);
     assert.equal(candidates[0].priority, "high");
+    assert.ok(candidates[0].priorityScore >= 300);
     assert.equal(candidates[0].type, "stale_ref");
     assert.ok(candidates[0].referencedPath === "src/core/orchestrator.ts");
   });
@@ -418,6 +419,7 @@ describe("rankStaleRefsAsRemediationCandidates", () => {
     };
     const candidates = rankStaleRefsAsRemediationCandidates(report);
     assert.equal(candidates[0].priority, "medium");
+    assert.ok(candidates[0].priorityScore >= 200 && candidates[0].priorityScore < 300);
   });
 
   it("assigns low priority to stale docker/scripts/docs references", () => {
@@ -431,6 +433,24 @@ describe("rankStaleRefsAsRemediationCandidates", () => {
     };
     const candidates = rankStaleRefsAsRemediationCandidates(report);
     assert.equal(candidates[0].priority, "low");
+    assert.ok(candidates[0].priorityScore >= 100 && candidates[0].priorityScore < 200);
+  });
+
+  it("boosts autonomous-dev-playbook drift findings ahead of equally-prioritized docs", () => {
+    const report: ArchitectureDriftReport = {
+      scannedDocs: ["docs/autonomous-dev-playbook.md", "docs/ops.md"],
+      presentCount: 0,
+      staleCount: 2,
+      staleReferences: [
+        { docPath: "docs/ops.md", referencedPath: "src/core/missing_ops.ts", line: 3 },
+        { docPath: "docs/autonomous-dev-playbook.md", referencedPath: "src/core/missing_playbook.ts", line: 7 },
+      ],
+      deprecatedTokenCount: 0,
+      deprecatedTokenRefs: [],
+    };
+    const candidates = rankStaleRefsAsRemediationCandidates(report);
+    assert.equal(candidates[0].docPath, "docs/autonomous-dev-playbook.md");
+    assert.ok(candidates[0].priorityScore > candidates[1].priorityScore);
   });
 
   it("assigns medium priority to all deprecated token findings", () => {

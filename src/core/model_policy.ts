@@ -68,6 +68,40 @@ export interface RoutingHistory {
   recentROI?: number;
 }
 
+export interface RoutingOutcomeMetrics {
+  /** Total observed samples used to compute successRate/recentROI. */
+  sampleCount: number;
+  /** Ratio of done outcomes in [0, 1]. */
+  successRate: number;
+  /** ROI-like proxy from outcomes in [0, 1]. */
+  recentROI: number;
+}
+
+export const HARD_TASK_UNCERTAINTY_THRESHOLDS = Object.freeze({
+  minObservedSamples: 6,
+  minSuccessRate: 0.55,
+  minRecentROI: 0.30,
+  minBenchmarkScore: 0.70,
+  minCapacityGain: 0.10,
+});
+
+export interface HardTaskEscalationSignal {
+  hardTask: boolean;
+  escalate: boolean;
+  severity: "none" | "recommended" | "required";
+  reason: string;
+  uncertaintyScore: number;
+}
+
+export interface DeliberationPolicy {
+  mode: "single-pass" | "multi-attempt";
+  attempts: number;
+  reflection: boolean;
+  boundedSearch: boolean;
+  searchBudget: number;
+  reason: string;
+}
+
 /**
  * Check if a model is absolutely banned.
  * @param {string} modelName - Model name or slug
@@ -853,5 +887,254 @@ export async function routeModelWithRealizedROI(
     uncertainty,
     meetsQualityFloor:  base.meetsQualityFloor,
     explorationLimited,
+  };
+}
+
+// ── Benchmark contract telemetry ingestion ──────────────────────────────────────
+
+export interface BenchmarkContract {
+  name: string;
+  version: string;
+  requiredFields: string[];
+  statusEnum: string[];
+}
+
+export interface BenchmarkSample {
+  benchmarkName: string;
+  taskId: string;
+  status: string;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  elapsedMs: number;
+  evaluatedAt: string;
+}
+
+export async function loadBenchmarkContracts(config: object): Promise<BenchmarkContract[]> {
+  const stateDir = (config as any)?.paths?.stateDir || "state";
+  const raw = await readJson(path.join(stateDir, "benchmark_contracts.json"), { contracts: [] });
+  const contracts = Array.isArray((raw as any)?.contracts) ? (raw as any).contracts : [];
+  return contracts
+    .filter((c: any) => c && typeof c === "object")
+    .map((c: any) => ({
+      name: String(c.name || "").trim(),
+      version: String(c.version || "").trim(),
+      requiredFields: Array.isArray(c.requiredFields) ? c.requiredFields.map((f: any) => String(f || "").trim()).filter(Boolean) : [],
+      statusEnum: Array.isArray(c.statusEnum) ? c.statusEnum.map((v: any) => String(v || "").trim().toLowerCase()).filter(Boolean) : [],
+    }))
+    .filter((c: BenchmarkContract) => c.name.length > 0);
+}
+
+export function validateBenchmarkSample(sample: BenchmarkSample, contracts: BenchmarkContract[]): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+  const benchmarkName = String(sample?.benchmarkName || "").trim();
+  const contract = Array.isArray(contracts)
+    ? contracts.find((c) => c.name.toLowerCase() === benchmarkName.toLowerCase())
+    : undefined;
+  if (!contract) {
+    errors.push(`unknown_benchmark:${benchmarkName || "missing"}`);
+    return { valid: false, errors };
+  }
+  for (const field of contract.requiredFields) {
+    const value = (sample as any)?.[field];
+    const missing = value === null || value === undefined || (typeof value === "string" && String(value).trim().length === 0);
+    if (missing) errors.push(`missing_field:${field}`);
+  }
+  const status = String(sample?.status || "").trim().toLowerCase();
+  if (!contract.statusEnum.includes(status)) errors.push(`invalid_status:${status || "missing"}`);
+  return { valid: errors.length === 0, errors };
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function deriveLatestBenchmarkSignal(benchmarkGroundTruth: any): {
+  sampleCount: number;
+  avgBenchmarkScore: number;
+  avgCapacityGain: number;
+  unresolvedRatio: number;
+} {
+  const entries = Array.isArray(benchmarkGroundTruth?.entries) ? benchmarkGroundTruth.entries : [];
+  const latest = entries.length > 0 ? entries[0] : null;
+  const recs = Array.isArray(latest?.recommendations) ? latest.recommendations : [];
+  if (recs.length === 0) {
+    return { sampleCount: 0, avgBenchmarkScore: 0, avgCapacityGain: 0, unresolvedRatio: 0 };
+  }
+
+  let scoreCount = 0;
+  let scoreSum = 0;
+  let gainCount = 0;
+  let gainSum = 0;
+  let unresolved = 0;
+
+  for (const rec of recs) {
+    if (!rec || typeof rec !== "object") continue;
+    const status = String((rec as any).implementationStatus || "pending").toLowerCase().trim();
+    if (status !== "implemented" && status !== "implemented_correctly") unresolved++;
+    const score = Number((rec as any).benchmarkScore);
+    if (Number.isFinite(score)) {
+      scoreSum += score;
+      scoreCount++;
+    }
+    const gain = Number((rec as any).capacityGain);
+    if (Number.isFinite(gain)) {
+      gainSum += gain;
+      gainCount++;
+    }
+  }
+
+  const avgBenchmarkScore = scoreCount > 0 ? scoreSum / scoreCount : 0;
+  const avgCapacityGain = gainCount > 0 ? gainSum / gainCount : 0;
+  const unresolvedRatio = recs.length > 0 ? unresolved / recs.length : 0;
+
+  return {
+    sampleCount: recs.length,
+    avgBenchmarkScore: Math.round(avgBenchmarkScore * 1000) / 1000,
+    avgCapacityGain: Math.round(avgCapacityGain * 1000) / 1000,
+    unresolvedRatio: Math.round(unresolvedRatio * 1000) / 1000,
+  };
+}
+
+/**
+ * Determine whether routing for a hard task should escalate to a stronger model.
+ *
+ * Binds three deterministic signals:
+ * 1) task hardness (T3 / critical-scale hints),
+ * 2) observed outcome metrics (ROI + completion rate),
+ * 3) benchmark ground-truth quality/capacity signals.
+ */
+export function assessHardTaskEscalation(
+  taskHints: TaskHints = {},
+  history: RoutingHistory = {},
+  signals: {
+    benchmarkGroundTruth?: any;
+    outcomeMetrics?: Partial<RoutingOutcomeMetrics> | null;
+    thresholds?: Partial<typeof HARD_TASK_UNCERTAINTY_THRESHOLDS>;
+  } = {}
+): HardTaskEscalationSignal {
+  const complexity = String(taskHints.complexity || "").toLowerCase().trim();
+  const lines = Number(taskHints.estimatedLines || 0);
+  const duration = Number(taskHints.estimatedDurationMinutes || 0);
+  const hardTask =
+    OPUS_ALLOWED_COMPLEXITIES.has(complexity) ||
+    lines >= OPUS_MIN_ESTIMATED_LINES ||
+    duration >= OPUS_MIN_DURATION_MINUTES;
+
+  if (!hardTask) {
+    return {
+      hardTask: false,
+      escalate: false,
+      severity: "none",
+      reason: "not-hard-task",
+      uncertaintyScore: 0,
+    };
+  }
+
+  const t = {
+    ...HARD_TASK_UNCERTAINTY_THRESHOLDS,
+    ...(signals.thresholds || {}),
+  };
+
+  const outcomeSampleCount = Number(signals.outcomeMetrics?.sampleCount ?? 0);
+  const outcomeSuccessRate = clamp01(Number(signals.outcomeMetrics?.successRate ?? 0));
+  const outcomeROI = Number.isFinite(Number(signals.outcomeMetrics?.recentROI))
+    ? clamp01(Number(signals.outcomeMetrics?.recentROI))
+    : clamp01(Number(history.recentROI || 0));
+
+  const benchmark = deriveLatestBenchmarkSignal(signals.benchmarkGroundTruth || null);
+  const lowSamples = outcomeSampleCount > 0 && outcomeSampleCount < t.minObservedSamples;
+  const noSamples = outcomeSampleCount === 0;
+  const weakSuccess = outcomeSampleCount > 0 && outcomeSuccessRate < t.minSuccessRate;
+  const weakROI = outcomeROI > 0 && outcomeROI < t.minRecentROI;
+  const weakBenchmarkScore =
+    benchmark.sampleCount > 0 &&
+    benchmark.avgBenchmarkScore > 0 &&
+    benchmark.avgBenchmarkScore < t.minBenchmarkScore;
+  const weakCapacityGain =
+    benchmark.sampleCount > 0 &&
+    benchmark.avgCapacityGain > 0 &&
+    benchmark.avgCapacityGain < t.minCapacityGain;
+  const highUnresolvedBenchmark = benchmark.sampleCount > 0 && benchmark.unresolvedRatio >= 0.6;
+
+  const penalties = [
+    noSamples ? 0.35 : 0,
+    lowSamples ? 0.20 : 0,
+    weakSuccess ? 0.25 : 0,
+    weakROI ? 0.20 : 0,
+    weakBenchmarkScore ? 0.15 : 0,
+    weakCapacityGain ? 0.10 : 0,
+    highUnresolvedBenchmark ? 0.15 : 0,
+  ];
+  const uncertaintyScore = Math.round(Math.min(1, penalties.reduce((a, b) => a + b, 0)) * 1000) / 1000;
+
+  if (uncertaintyScore >= 0.60 || (noSamples && highUnresolvedBenchmark)) {
+    return {
+      hardTask: true,
+      escalate: true,
+      severity: "required",
+      reason: `hard-task-uncertainty-required(score=${uncertaintyScore})`,
+      uncertaintyScore,
+    };
+  }
+  if (uncertaintyScore >= 0.35) {
+    return {
+      hardTask: true,
+      escalate: true,
+      severity: "recommended",
+      reason: `hard-task-uncertainty-recommended(score=${uncertaintyScore})`,
+      uncertaintyScore,
+    };
+  }
+  return {
+    hardTask: true,
+    escalate: false,
+    severity: "none",
+    reason: `hard-task-uncertainty-low(score=${uncertaintyScore})`,
+    uncertaintyScore,
+  };
+}
+
+/**
+ * Determine whether a task should run in lean single-pass mode or bounded
+ * multi-attempt deliberation mode.
+ *
+ * Routine work remains single-pass. Only high-uncertainty hard tasks are
+ * upgraded to multi-attempt reflection/search mode.
+ */
+export function decideDeliberationPolicy(
+  taskHints: TaskHints = {},
+  history: RoutingHistory = {},
+  signals: {
+    benchmarkGroundTruth?: any;
+    outcomeMetrics?: Partial<RoutingOutcomeMetrics> | null;
+  } = {}
+): DeliberationPolicy {
+  const hard = assessHardTaskEscalation(taskHints, history, signals);
+  if (!hard.hardTask || !hard.escalate) {
+    return {
+      mode: "single-pass",
+      attempts: 1,
+      reflection: false,
+      boundedSearch: false,
+      searchBudget: 0,
+      reason: hard.reason,
+    };
+  }
+
+  const required = hard.severity === "required";
+  return {
+    mode: "multi-attempt",
+    attempts: required ? 3 : 2,
+    reflection: true,
+    boundedSearch: true,
+    searchBudget: required ? 3 : 2,
+    reason: hard.reason,
   };
 }

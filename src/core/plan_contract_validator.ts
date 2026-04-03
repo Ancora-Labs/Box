@@ -131,6 +131,12 @@ export const AMBIGUOUS_TASK_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
 ]);
 
 /**
+ * Minimum length for an exclusion justification to be considered cycle-specific.
+ * Shared with mandatoryTaskCoverage validation in Prometheus.
+ */
+export const MANDATORY_EXCLUSION_JUSTIFICATION_MIN_LENGTH = 12;
+
+/**
  * Determine whether a task description is ambiguous/underspecified.
  * Returns true when the description matches a known generic-vocabulary pattern.
  *
@@ -141,6 +147,17 @@ export function isAmbiguousTask(value: string): boolean {
   if (!value || !String(value).trim()) return true;
   const v = String(value).trim();
   return AMBIGUOUS_TASK_PATTERNS.some(pattern => pattern.test(v));
+}
+
+/**
+ * Validate that an exclusion justification is concrete enough for cycle-specific
+ * auditing (not just a generic placeholder).
+ *
+ * @param {string} value - mandatoryTaskCoverage exclusion justification
+ * @returns {boolean} true when justification is non-empty and sufficiently specific
+ */
+export function isCycleSpecificExclusionJustification(value: string): boolean {
+  return String(value || "").trim().length >= MANDATORY_EXCLUSION_JUSTIFICATION_MIN_LENGTH;
 }
 
 /**

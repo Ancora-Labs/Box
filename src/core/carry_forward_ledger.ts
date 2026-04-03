@@ -574,6 +574,7 @@ export function classifyCarryForwardByRecurrence(
   // Count how many times each pending task fingerprint appears in all postmortem entries.
   const recurrenceMap = new Map<string, number>();
   for (const entry of allEntries) {
+    if (entry?.interventionDuplicateSuppressed === true) continue;
     const text = String(entry.followUpTask || entry.lessonLearned || "");
     const fp = computeFingerprint(text);
     if (fp) recurrenceMap.set(fp, (recurrenceMap.get(fp) ?? 0) + 1);

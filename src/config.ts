@@ -82,7 +82,10 @@ export async function loadConfig(): Promise<Config> {
     securityFamilyFailureWindowMinutes: process.env.BOX_SECURITY_FAMILY_FAILURE_WINDOW_MINUTES?.trim() || null,
     securityFamilyCooldownMinutes: process.env.BOX_SECURITY_FAMILY_COOLDOWN_MINUTES?.trim() || null,
     environmentBlockerCooldownMinutes: process.env.BOX_ENVIRONMENT_BLOCKER_COOLDOWN_MINUTES?.trim() || null,
+    jesusTimeoutMs: process.env.BOX_JESUS_TIMEOUT_MS?.trim() || null,
     workerTimeoutMinutes: process.env.BOX_WORKER_TIMEOUT_MINUTES?.trim() || null,
+    verificationCommandTimeoutMs: process.env.BOX_VERIFICATION_COMMAND_TIMEOUT_MS?.trim() || null,
+    dashboardEnabled: process.env.BOX_DASHBOARD_ENABLED?.trim() || null,
     interBatchDelayMs: process.env.BOX_INTER_BATCH_DELAY_MS?.trim() || null,
     maxCapacityMode: process.env.BOX_MAX_CAPACITY_MODE?.trim() || null,
     maxPlansPerDependencyBatch: process.env.BOX_MAX_PLANS_PER_DEPENDENCY_BATCH?.trim() || null,
@@ -210,10 +213,19 @@ export async function loadConfig(): Promise<Config> {
     environmentBlockerCooldownMinutes: env.environmentBlockerCooldownMinutes
       ? Number(env.environmentBlockerCooldownMinutes)
       : Number(fileConfig?.runtime?.environmentBlockerCooldownMinutes ?? 180),
+    jesusTimeoutMs: env.jesusTimeoutMs
+      ? Number(env.jesusTimeoutMs)
+      : Number(fileConfig?.runtime?.jesusTimeoutMs ?? 1800000),
     workerMaxFilesChanged: Number(fileConfig?.runtime?.workerMaxFilesChanged ?? 20),
     workerTimeoutMinutes: env.workerTimeoutMinutes
       ? Number(env.workerTimeoutMinutes)
       : Number(fileConfig?.runtime?.workerTimeoutMinutes ?? 15),
+    verificationCommandTimeoutMs: env.verificationCommandTimeoutMs
+      ? Number(env.verificationCommandTimeoutMs)
+      : Number(fileConfig?.runtime?.verificationCommandTimeoutMs ?? 1800000),
+    dashboardEnabled: env.dashboardEnabled
+      ? ["1", "true", "yes", "on"].includes(env.dashboardEnabled.toLowerCase())
+      : Boolean(fileConfig?.runtime?.dashboardEnabled ?? true),
     interBatchDelayMs: env.interBatchDelayMs
       ? Number(env.interBatchDelayMs)
       : Number(fileConfig?.runtime?.interBatchDelayMs ?? 90000),
@@ -223,6 +235,12 @@ export async function loadConfig(): Promise<Config> {
     maxPlansPerDependencyBatch: env.maxPlansPerDependencyBatch
       ? Number(env.maxPlansPerDependencyBatch)
       : Number(fileConfig?.runtime?.maxPlansPerDependencyBatch ?? 6),
+    interventionJudgeMinSamples: Number(fileConfig?.runtime?.interventionJudgeMinSamples ?? 3),
+    interventionJudgeWindowSize: Number(fileConfig?.runtime?.interventionJudgeWindowSize ?? 5),
+    interventionJudgeAutoApplyLowRisk: Boolean(fileConfig?.runtime?.interventionJudgeAutoApplyLowRisk ?? false),
+    interventionJudgeAiEnabled: Boolean(fileConfig?.runtime?.interventionJudgeAiEnabled ?? true),
+    interventionJudgeAiTimeoutMs: Number(fileConfig?.runtime?.interventionJudgeAiTimeoutMs ?? 120000),
+    interventionJudgeAiModel: String(fileConfig?.runtime?.interventionJudgeAiModel || "").trim() || null,
     workerForbiddenPathPrefixes: Array.isArray(fileConfig?.runtime?.workerForbiddenPathPrefixes)
       ? fileConfig.runtime.workerForbiddenPathPrefixes.map((item) => String(item))
       : []

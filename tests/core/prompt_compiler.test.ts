@@ -13,6 +13,7 @@ import {
   CACHE_STABLE_SECTION_NAMES,
   markCycleDeltaSectionsRequired,
   PROMPT_BUDGET_PARTITION,
+  analyzePacketDensification,
 } from "../../src/core/prompt_compiler.js";
 
 describe("prompt_compiler", () => {
@@ -525,5 +526,35 @@ describe("markCycleDeltaSectionsRequired — partitionBudget field", () => {
     const result = compilePrompt(withPartitions, { tokenBudget: 50 });
     assert.ok(result.includes("RESEARCH_DELTA"), "cycle-delta section must survive token pressure");
     assert.ok(!result.includes("Z".repeat(10)), "large expandable must be dropped");
+  });
+});
+
+describe("analyzePacketDensification()", () => {
+  it("flags thin packets when minimum density fields are missing", () => {
+    const result = analyzePacketDensification([
+      {
+        task: "Small fix",
+        target_files: ["src/core/a.ts"],
+        acceptance_criteria: ["works"],
+        estimatedExecutionTokens: 1000,
+      },
+    ]);
+    assert.equal(result.thinCount, 1);
+    assert.equal(result.isDenseEnough, false);
+    assert.deepEqual(result.thinIndexes, [0]);
+  });
+
+  it("passes dense packets that satisfy floor thresholds", () => {
+    const result = analyzePacketDensification([
+      {
+        task: "Implement bundled prompt densification checks with token-aware packet quality controls and deterministic acceptance gates.",
+        target_files: ["src/core/prometheus.ts", "src/core/prompt_compiler.ts"],
+        acceptance_criteria: ["criterion 1", "criterion 2"],
+        estimatedExecutionTokens: 12000,
+      },
+    ]);
+    assert.equal(result.thinCount, 0);
+    assert.equal(result.isDenseEnough, true);
+    assert.equal(result.denseRatio, 1);
   });
 });

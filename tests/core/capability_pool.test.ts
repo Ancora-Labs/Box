@@ -448,9 +448,23 @@ describe("capability_pool — lane diversity threshold enforcement", () => {
       const plans = [{ task: "Add test coverage" }];
       const result = assignWorkersToPlans(plans);
       assert.ok(typeof result.diversityCheck === "object", "diversityCheck must be present");
+      assert.ok(typeof result.specializationUtilization === "object", "specializationUtilization must be present");
       assert.ok(typeof result.diversityCheck.meetsMinimum === "boolean");
       assert.ok(typeof result.diversityCheck.activeLaneCount === "number");
       assert.ok(typeof result.diversityCheck.warning === "string");
+    });
+
+    it("tracks specialization share and target compliance", () => {
+      const plans = [
+        { task: "Add test coverage" },
+        { task: "Update docker deployment pipeline" },
+        { task: "Update internal runtime refactor" },
+      ];
+      const result = assignWorkersToPlans(plans, { workerPool: { specializationTargets: { minSpecializedShare: 0.2 } } });
+      assert.ok(result.specializationUtilization.specializedCount >= 1);
+      assert.equal(result.specializationUtilization.total, 3);
+      assert.ok(result.specializationUtilization.specializedShare > 0);
+      assert.equal(result.specializationUtilization.specializationTargetsMet, true);
     });
 
     it("diversityCheck.meetsMinimum=true when lane spread meets default threshold (2)", () => {

@@ -297,14 +297,8 @@ function normalizeAcceptanceCriteria(criteria = []) {
 }
 
 function normalizeVerificationCommands(commands = []) {
-  const rewritten = commands.map(command => rewriteVerificationCommand(command));
-
-  const deduped = [];
-  for (const command of rewritten) {
-    if (!deduped.includes(command)) deduped.push(command);
-  }
-
-  return deduped.length > 0 ? deduped : [VERIFICATION_DEFAULTS.test, "node --test"];
+  const normalized = normalizeCommandBatch(Array.isArray(commands) ? commands : []);
+  return normalized.length > 0 ? normalized : [VERIFICATION_DEFAULTS.test];
 }
 
 function normalizeEvolutionTask(task) {
@@ -345,7 +339,9 @@ function normalizeScope(scope, title = "") {
 export function inferVerificationFromFilesHint(filesHint: string[]): string[] {
   if (!Array.isArray(filesHint) || filesHint.length === 0) return [];
   const testFiles = filesHint.filter(f => /\.(test|spec)\.(ts|js|tsx|jsx)$/i.test(f));
-  return testFiles.slice(0, 3).map(f => `node --test ${f}`);
+  if (testFiles.length === 0) return [];
+  // Build a targeted npm test command with only the relevant test files
+  return [`npm test -- ${testFiles.join(" ")}`];
 }
 
 export function repairPrometheusTask(task: EvolutionTask = {}): PreparedEvolutionTask {
@@ -901,12 +897,19 @@ function runVerificationCommands(task) {
 
   const results: Array<{ cmd: string; passed: boolean; output: string }> = [];
 
+  const configuredTimeoutMs = Number(task?.verification_timeout_ms || task?.verificationTimeoutMs || 0);
+  const baseTimeoutMs = configuredTimeoutMs > 0
+    ? configuredTimeoutMs
+    : Number(task?.runtimeVerificationTimeoutMs || 30 * 60 * 1000);
+
   for (const cmd of cmds) {
+    const isCanonicalNpmTest = /^\s*npm\s+test\b/i.test(String(cmd || ""));
+    const timeoutMs = isCanonicalNpmTest ? Math.max(baseTimeoutMs, 60 * 60 * 1000) : baseTimeoutMs;
     // Only run safe, pre-defined commands — never interpolate from untrusted input
     try {
       const output = execSync(cmd, {
         cwd: process.cwd(),
-        timeout: 5 * 60 * 1000, // 5 min max
+        timeout: timeoutMs,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -1166,7 +1169,10 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
 
       // 4c. Run verification commands
       console.log(`[evolution] Running verification commands...`);
-      const verification = runVerificationCommands(activeTask);
+      const verification = runVerificationCommands({
+        ...activeTask,
+        runtimeVerificationTimeoutMs: Number(config?.runtime?.verificationCommandTimeoutMs || 0)
+      });
       console.log(`[evolution] Verification: ${verification.passed ? "PASSED" : "FAILED"}`);
       console.log(verification.summary);
 

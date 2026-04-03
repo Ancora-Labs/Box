@@ -38,6 +38,10 @@ import {
   quarantineLowConfidencePackets,
   FALLBACK_PROVENANCE_TAG,
   QUARANTINE_CONFIDENCE_THRESHOLD,
+  extractMandatoryHealthAuditFindings,
+  buildMandatoryTasksPromptSection,
+  validateMandatoryTaskCoverageContract,
+  buildRoutingOutcomeSection,
 } from "../../src/core/prometheus.js";
 import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
 import { isNonSpecificVerification, validatePlanContract } from "../../src/core/plan_contract_validator.js";
@@ -1145,6 +1149,22 @@ describe("buildDriftDebtTasks — prioritization and driftPriority field", () =>
     assert.ok(
       tasks[2].target_files?.includes("docs/ops.md"),
       `last task must cover the low-priority doc (docs/ops.md), got ${tasks[2].target_files}`
+    );
+  });
+
+  it("prioritizes autonomous-dev-playbook stale-ref debt before other docs at same priority", () => {
+    const report = {
+      staleReferences: [
+        { docPath: "docs/ops.md", referencedPath: "src/core/missing_ops.ts", line: 1 },
+        { docPath: "docs/autonomous-dev-playbook.md", referencedPath: "src/core/missing_playbook.ts", line: 2 },
+      ],
+      deprecatedTokenRefs: [],
+    };
+    const tasks = buildDriftDebtTasks(report);
+    assert.equal(tasks.length, 2);
+    assert.ok(
+      tasks[0].target_files?.includes("docs/autonomous-dev-playbook.md"),
+      `first task must target autonomous-dev-playbook for deterministic remediation priority; got ${tasks[0].target_files}`
     );
   });
 
@@ -3271,5 +3291,141 @@ describe("buildBenchmarkSection", () => {
 
   it("negative: malformed entries array does not throw", () => {
     assert.doesNotThrow(() => buildBenchmarkSection({ entries: [null] }));
+  });
+});
+
+describe("buildRoutingOutcomeSection", () => {
+  it("returns empty string for invalid input", () => {
+    assert.equal(buildRoutingOutcomeSection(null), "");
+    assert.equal(buildRoutingOutcomeSection({}), "");
+  });
+
+  it("builds section grouped by taskKind success rate", () => {
+    const payload = [
+      { taskKind: "implementation", outcome: "done" },
+      { taskKind: "implementation", outcome: "partial" },
+      { taskKind: "implementation", outcome: "done" },
+      { taskKind: "debt", outcome: "done" },
+    ];
+    const section = buildRoutingOutcomeSection(payload);
+    assert.ok(section.includes("ROUTING OUTCOME SIGNALS"));
+    assert.ok(section.includes("taskKind=implementation"));
+    assert.ok(section.includes("samples=3"));
+    assert.ok(section.includes("successRate=0.67"));
+  });
+
+  it("negative path: ignores malformed rows and still produces deterministic output", () => {
+    const payload = [
+      null,
+      { taskKind: "", outcome: "done" },
+      { taskKind: "implementation", outcome: "error" },
+    ];
+    const section = buildRoutingOutcomeSection(payload as any);
+    assert.ok(section.includes("taskKind=general") || section.includes("taskKind=implementation"));
+  });
+});
+
+describe("health-audit mandatory task injection contract", () => {
+  it("extractMandatoryHealthAuditFindings keeps only critical/important entries", () => {
+    const payload = {
+      findings: [
+        { area: "a", severity: "warning", finding: "ignore", remediation: "n/a", capabilityNeeded: "warn-only" },
+        { area: "b", severity: "critical", finding: "must map", remediation: "fix now", capabilityNeeded: "cap-critical" },
+        { area: "c", severity: "important", finding: "must map too", remediation: "fix soon", capabilityNeeded: "cap-important" },
+      ],
+    };
+    const result = extractMandatoryHealthAuditFindings(payload);
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map((f) => f.id), ["cap-critical", "cap-important"]);
+  });
+
+  it("buildMandatoryTasksPromptSection renders MANDATORY_TASKS with finding ids", () => {
+    const section = buildMandatoryTasksPromptSection([
+      {
+        id: "cap-critical",
+        area: "capability-gap",
+        severity: "critical",
+        finding: "Missing capability",
+        remediation: "Implement contract",
+        capabilityNeeded: "cap-critical",
+      },
+    ]);
+    assert.ok(section.includes("## MANDATORY_TASKS"));
+    assert.ok(section.includes("id=cap-critical"));
+    assert.ok(section.includes("\"mandatoryTaskCoverage\""));
+  });
+
+  it("validateMandatoryTaskCoverageContract passes when each mandatory finding is mapped or excluded", () => {
+    const findings = [
+      {
+        id: "cap-critical",
+        area: "capability-gap",
+        severity: "critical" as const,
+        finding: "critical finding",
+        remediation: "fix",
+        capabilityNeeded: "cap-critical",
+      },
+      {
+        id: "cap-important",
+        area: "system-learning",
+        severity: "important" as const,
+        finding: "important finding",
+        remediation: "review",
+        capabilityNeeded: "cap-important",
+      },
+    ];
+    const payload = {
+      plans: [{ task: "Implement cap-critical flow", title: "Implement cap-critical flow" }],
+      mandatoryTaskCoverage: [
+        { findingId: "cap-critical", status: "mapped", planTask: "Implement cap-critical flow" },
+        { findingId: "cap-important", status: "excluded", justification: "Blocked by active governance gate this cycle." },
+      ],
+    };
+    const result = validateMandatoryTaskCoverageContract(payload, findings);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.invalid, []);
+    assert.equal(result.mapped.length, 1);
+    assert.equal(result.excluded.length, 1);
+  });
+
+  it("negative path: validateMandatoryTaskCoverageContract fails when a mandatory finding is unmapped", () => {
+    const findings = [
+      {
+        id: "cap-critical",
+        area: "capability-gap",
+        severity: "critical" as const,
+        finding: "critical finding",
+        remediation: "fix",
+        capabilityNeeded: "cap-critical",
+      },
+    ];
+    const payload = {
+      plans: [{ task: "Some unrelated task" }],
+      mandatoryTaskCoverage: [],
+    };
+    const result = validateMandatoryTaskCoverageContract(payload, findings);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.missing, ["cap-critical"]);
+  });
+
+  it("negative path: mapped entry must reference an existing plan task", () => {
+    const findings = [
+      {
+        id: "cap-critical",
+        area: "capability-gap",
+        severity: "critical" as const,
+        finding: "critical finding",
+        remediation: "fix",
+        capabilityNeeded: "cap-critical",
+      },
+    ];
+    const payload = {
+      plans: [{ task: "Actual task" }],
+      mandatoryTaskCoverage: [{ findingId: "cap-critical", status: "mapped", planTask: "Missing task ref" }],
+    };
+    const result = validateMandatoryTaskCoverageContract(payload, findings);
+    assert.equal(result.ok, false);
+    assert.ok(result.invalid.some((v) => v.includes("mapped_without_existing_plan")));
   });
 });

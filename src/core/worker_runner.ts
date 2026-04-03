@@ -23,7 +23,13 @@ import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { getVerificationCommands } from "./verification_command_registry.js";
 import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired, isDiscoverySafeTask, extractMergedSha, buildArtifactAuditEntry } from "./verification_gate.js";
-import { enforceModelPolicy, routeModelWithUncertainty, classifyComplexityTier, COMPLEXITY_TIER } from "./model_policy.js";
+import {
+  enforceModelPolicy,
+  routeModelWithUncertainty,
+  classifyComplexityTier,
+  COMPLEXITY_TIER,
+  decideDeliberationPolicy
+} from "./model_policy.js";
 import { deriveRoutingAdjustments, buildPromptHardConstraints } from "./learning_policy_compiler.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
 import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION, resolveEscalationsForTask } from "./escalation_queue.js";
@@ -58,6 +64,12 @@ type TaskHints = {
   complexity?: string;
 };
 
+type BenchmarkRecommendation = {
+  implementationStatus?: string;
+  benchmarkScore?: number | null;
+  capacityGain?: number | null;
+};
+
 type RoutingAdjustment = {
   policyId: string;
   modelOverride: string;
@@ -75,6 +87,8 @@ type PromptHardConstraint = {
 type PromptControls = {
   tier?: string;
   hardConstraints?: PromptHardConstraint[];
+  deliberationMode?: "single-pass" | "multi-attempt";
+  searchBudget?: number;
 };
 
 type WorkerActivityEntry = {
@@ -251,6 +265,83 @@ function computeRecentROI(config, taskKind: string): number {
   }
 }
 
+function computeOutcomeMetrics(config, taskKind: string) {
+  try {
+    const logPath = path.join(config.paths?.stateDir || "state", "premium_usage_log.json");
+    if (!existsSync(logPath)) return { sampleCount: 0, successRate: 0, recentROI: 0 };
+    const entries = JSON.parse(readFileSync(logPath, "utf8"));
+    if (!Array.isArray(entries)) return { sampleCount: 0, successRate: 0, recentROI: 0 };
+    const relevant = entries
+      .filter((e) => !taskKind || e.taskKind === taskKind)
+      .slice(-12);
+    if (relevant.length === 0) return { sampleCount: 0, successRate: 0, recentROI: 0 };
+    const successCount = relevant.filter((e) => String(e.outcome || "").toLowerCase() === "done").length;
+    const successRate = successCount / relevant.length;
+    return {
+      sampleCount: relevant.length,
+      successRate,
+      recentROI: successRate,
+    };
+  } catch {
+    return { sampleCount: 0, successRate: 0, recentROI: 0 };
+  }
+}
+
+function loadBenchmarkGroundTruthSignal(config) {
+  try {
+    const stateDir = config.paths?.stateDir || "state";
+    const filePath = path.join(stateDir, "benchmark_ground_truth.json");
+    if (!existsSync(filePath)) return null;
+    const payload = JSON.parse(readFileSync(filePath, "utf8"));
+    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    const latest = entries.length > 0 ? entries[0] : null;
+    if (!latest || !Array.isArray(latest.recommendations)) return null;
+    return latest;
+  } catch {
+    return null;
+  }
+}
+
+function analyzeBenchmarkReadiness(config, taskHints: TaskHints = {}) {
+  const latest = loadBenchmarkGroundTruthSignal(config);
+  const recommendations = Array.isArray(latest?.recommendations) ? latest.recommendations : [];
+  if (recommendations.length === 0) return { hasSignal: false, unresolvedRatio: 0, avgScore: 0, avgGain: 0 };
+
+  let unresolved = 0;
+  let scoreCount = 0;
+  let scoreSum = 0;
+  let gainCount = 0;
+  let gainSum = 0;
+  for (const rec of recommendations as BenchmarkRecommendation[]) {
+    const status = String(rec?.implementationStatus || "pending").toLowerCase();
+    if (status !== "implemented" && status !== "implemented_correctly") unresolved++;
+    const score = Number(rec?.benchmarkScore);
+    if (Number.isFinite(score)) { scoreCount++; scoreSum += score; }
+    const gain = Number(rec?.capacityGain);
+    if (Number.isFinite(gain)) { gainCount++; gainSum += gain; }
+  }
+
+  const avgScore = scoreCount > 0 ? scoreSum / scoreCount : 0;
+  const avgGain = gainCount > 0 ? gainSum / gainCount : 0;
+  const unresolvedRatio = recommendations.length > 0 ? unresolved / recommendations.length : 0;
+
+  const complexity = String(taskHints.complexity || "").toLowerCase();
+  const hardTask = complexity === "critical" || complexity === "high" || Number(taskHints.estimatedLines || 0) >= 3000;
+  const highUncertainty = hardTask && (
+    unresolvedRatio >= 0.6 ||
+    (avgScore > 0 && avgScore < 0.7) ||
+    (avgGain > 0 && avgGain < 0.1)
+  );
+
+  return {
+    hasSignal: true,
+    unresolvedRatio: Math.round(unresolvedRatio * 1000) / 1000,
+    avgScore: Math.round(avgScore * 1000) / 1000,
+    avgGain: Math.round(avgGain * 1000) / 1000,
+    highUncertainty,
+  };
+}
+
 /**
  * Load compiled lesson-based policies from state/learned_policies.json.
  * Fail-open: returns [] on any read or parse error.
@@ -418,12 +509,27 @@ function resolveModel(config, roleName, taskKind, taskHints: TaskHints = {}, rou
   //    to auto-select the right model when no explicit config override exists.
   if (!candidate) {
     const recentROI = computeRecentROI(config, taskKind);
+    const outcomeMetrics = computeOutcomeMetrics(config, taskKind);
+    const benchmarkSignal = analyzeBenchmarkReadiness(config, taskHints);
     const uncertaintyRoute = routeModelWithUncertainty(
       taskHints,
       { defaultModel, strongModel, efficientModel },
       { recentROI }
     );
     candidate = uncertaintyRoute.model;
+    if (
+      benchmarkSignal.hasSignal &&
+      benchmarkSignal.highUncertainty &&
+      (uncertaintyRoute.tier === COMPLEXITY_TIER.T3 || String(taskHints.complexity || "").toLowerCase() === "critical")
+    ) {
+      candidate = strongModel;
+      try {
+        appendProgress(
+          config,
+          `[UNCERTAINTY_ESCALATION] ${roleName}: hard-task benchmark uncertainty -> ${strongModel} (avgScore=${benchmarkSignal.avgScore.toFixed(2)} avgGain=${benchmarkSignal.avgGain.toFixed(2)} unresolved=${benchmarkSignal.unresolvedRatio.toFixed(2)} sample=${outcomeMetrics.sampleCount})`
+        );
+      } catch { /* non-critical */ }
+    }
     if (uncertaintyRoute.uncertainty !== "low") {
       try {
         appendProgress(config,
@@ -667,6 +773,18 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
     }
   }
 
+  if (promptControls.deliberationMode === "multi-attempt") {
+    const searchBudget = Number(promptControls.searchBudget || 0);
+    parts.push("\n## SELECTIVE DELIBERATION POLICY");
+    parts.push("This task is high-uncertainty. Use bounded multi-attempt reasoning:");
+    parts.push("1) Attempt 1: initial implementation pass.");
+    parts.push("2) Attempt 2+: reflect on failure signals and revise plan before edits.");
+    if (searchBudget > 0) {
+      parts.push(`3) Bounded search budget: at most ${searchBudget} focused repository searches before coding.`);
+    }
+    parts.push("Do not loop indefinitely; converge to a concrete implementation or explicit blocker.");
+  }
+
   parts.push("\n## OUTPUT FORMAT");
   parts.push("Think deeply and work naturally. Write your full reasoning, analysis, and implementation details.");
   parts.push("At the END of your response, include these optional machine-readable markers (if applicable):");
@@ -685,8 +803,11 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
   parts.push("   Run: git rev-parse HEAD   (after merge is confirmed)");
   parts.push("2. A raw npm test output block wrapped in explicit markers:");
   parts.push("   ===NPM TEST OUTPUT START===");
-  parts.push("   <paste full stdout from 'npm test' run on the merged branch>");
+  parts.push("   <paste full stdout from targeted test run on the merged branch>");
   parts.push("   ===NPM TEST OUTPUT END===");
+  parts.push("   Use targeted tests: 'npm test -- tests/core/<relevant>.test.ts tests/core/<other>.test.ts'");
+  parts.push("   Only run test files related to the files you changed. Do NOT run the full suite.");
+  parts.push("   If unsure which test files are relevant, run tests matching the modules you modified.");
   parts.push("Omitting either artifact will cause the verification gate to reject your done status.");
   parts.push(String(instruction.task || ""));
 
@@ -701,8 +822,8 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
     parts.push("## ⚠️ VERIFICATION TARGET REQUIRED");
     parts.push("No specific test file target was detected in this task's verification commands.");
     parts.push("You MUST provide specific test evidence in your VERIFICATION_REPORT:");
-    parts.push("  - Run or create a specific test file (e.g. tests/core/<module>.test.ts)");
-    parts.push("  - Reference it explicitly: 'node --test tests/core/<module>.test.ts'");
+    parts.push("  - Run targeted tests: 'npm test -- tests/core/<module>.test.ts'");
+    parts.push("  - Reference it explicitly in evidence. Do NOT run the full test suite.");
     parts.push("  - Generic 'npm test passed' alone is NOT accepted as verification evidence.");
   }
 
@@ -710,6 +831,9 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
     parts.push("");
     parts.push("Additional context:");
     parts.push(String(instruction.context));
+    if (String(instruction.context).includes("## CI_FAILURE_CONTEXT")) {
+      parts.push("Use CI_FAILURE_CONTEXT as authoritative failure evidence for deterministic ci-fix work.");
+    }
   }
   if (instruction.isFollowUp && instruction.previousResult) {
     parts.push("");
@@ -745,7 +869,21 @@ export function parseWorkerResponse(stdout, stderr) {
 
   const accessHeaderMatch = combined.match(/BOX_ACCESS=([^\n\r]+)/i);
   const accessHeader = accessHeaderMatch ? accessHeaderMatch[1].trim() : null;
-  const hasBlockedAccess = accessHeader ? /\bblocked\b/i.test(accessHeader) : false;
+  const accessPairs = accessHeader
+    ? accessHeader
+      .split(";")
+      .map(part => String(part || "").trim())
+      .filter(Boolean)
+      .map(part => {
+        const [rawScope, rawState] = part.split(":");
+        return {
+          scope: String(rawScope || "").trim().toLowerCase(),
+          state: String(rawState || "").trim().toLowerCase(),
+        };
+      })
+    : [];
+  const blockedScopes = accessPairs.filter(item => item.state === "blocked").map(item => item.scope);
+  const hasBlockedAccess = blockedScopes.length > 0;
 
   // Guardrail: if access protocol reports blocked but status is not blocked,
   // force status to blocked for safe deterministic follow-up routing.
@@ -778,6 +916,8 @@ export function parseWorkerResponse(stdout, stderr) {
     prUrl,
     currentBranch,
     filesTouched,
+    accessHeader,
+    blockedAccessScopes: blockedScopes,
     summary,
     fullOutput: output,
     verificationReport,
@@ -802,6 +942,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   const learnedPolicies = loadLearnedPolicies(config);
   const routingAdjustments: RoutingAdjustment[] = deriveRoutingAdjustments(learnedPolicies);
   const hardConstraints: PromptHardConstraint[] = buildPromptHardConstraints(learnedPolicies);
+  const recentROI = computeRecentROI(config, instruction.taskKind);
+  const outcomeMetrics = computeOutcomeMetrics(config, instruction.taskKind);
+  const _benchmarkSignal = analyzeBenchmarkReadiness(config, taskHints);
+  const deliberation = decideDeliberationPolicy(
+    taskHints,
+    { recentROI },
+    {
+      benchmarkGroundTruth: loadBenchmarkGroundTruthSignal(config),
+      outcomeMetrics,
+    }
+  );
 
   // ── Task 1: Uncertainty-aware model selection ─────────────────────────────
   // resolveModel now uses routeModelWithUncertainty (backed by historical ROI)
@@ -821,10 +972,18 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   // Build conversation-only context with prompt tier budget and hard constraints injected
   const conversationContext = buildConversationContext(
     history, instruction, sessionState, config, workerKind,
-    { tier, hardConstraints }
+    {
+      tier,
+      hardConstraints,
+      deliberationMode: deliberation.mode,
+      searchBudget: deliberation.searchBudget,
+    }
   );
 
-  await appendProgress(config, `[WORKER:${roleName}] [${instruction.taskKind || "general"}→${model}] ${truncate(instruction.task, 70)}`);
+  await appendProgress(
+    config,
+    `[WORKER:${roleName}] [${instruction.taskKind || "general"}→${model}] deliberation=${deliberation.mode} ${truncate(instruction.task, 70)}`
+  );
 
   const updatedHistory = [
     ...history,
@@ -998,6 +1157,20 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   } catch { /* non-critical */ }
 
   const parsed: ParsedWorkerResponse = parseWorkerResponse(stdout, stderr);
+
+  // Soft-fail policy: if only API access is blocked for evolution-worker,
+  // do not stall the whole cycle. Keep evidence in summary and continue.
+  if (
+    parsed.status === "blocked"
+    && String(roleName || "").toLowerCase() === "evolution-worker"
+    && Array.isArray(parsed.blockedAccessScopes)
+    && parsed.blockedAccessScopes.length === 1
+    && String(parsed.blockedAccessScopes[0] || "") === "api"
+  ) {
+    parsed.status = "partial";
+    parsed.summary = `[ACCESS SOFTENED] api-only access block downgraded to partial to avoid cycle stall\n${parsed.summary}`;
+    await appendProgress(config, `[WORKER:${roleName}] ACCESS_SOFTENED api-only block → partial (non-blocking)`);
+  }
 
   // If access was reported as blocked, persist a structured escalation (non-critical)
   if (parsed.status === "blocked" && /BOX_ACCESS=[^\n]*blocked/i.test(stdout)) {

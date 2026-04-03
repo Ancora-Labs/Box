@@ -93,6 +93,8 @@ async function boxOn(config: Config): Promise<void> {
   const stateDir = config.paths?.stateDir || "state";
   const root = path.resolve(stateDir, "..");
 
+  const dashboardEnabled = config?.runtime?.dashboardEnabled !== false;
+
   // 1. Kill stale dashboard on port 8787
   const killed = await killByPort(8787);
   if (killed) console.log(`[box on] killed stale dashboard on port 8787 (pid=${killed})`);
@@ -118,13 +120,22 @@ async function boxOn(config: Config): Promise<void> {
     console.log(`[box on] daemon started pid=${dPid}`);
   }
 
-  // 5. Start dashboard (detached)
-  const dashPid = spawnDetached("node", ["--import", "tsx", "src/dashboard/live_dashboard.ts"], root);
-  savePid(stateDir, "dashboard_bg", dashPid);
-  console.log(`[box on] dashboard started pid=${dashPid} → http://localhost:8787`);
+  // 5. Start dashboard (detached) only when enabled
+  if (dashboardEnabled) {
+    const dashPid = spawnDetached("node", ["--import", "tsx", "src/dashboard/live_dashboard.ts"], root);
+    savePid(stateDir, "dashboard_bg", dashPid);
+    console.log(`[box on] dashboard started pid=${dashPid} → http://localhost:8787`);
+  } else {
+    removePidFile(stateDir, "dashboard_bg");
+    console.log("[box on] dashboard auto-start disabled (runtime.dashboardEnabled=false)");
+  }
 
   console.log("");
-  console.log("BOX is running. Dashboard: http://localhost:8787");
+  if (dashboardEnabled) {
+    console.log("BOX is running. Dashboard: http://localhost:8787");
+  } else {
+    console.log("BOX is running. Dashboard is disabled.");
+  }
   console.log("To stop: node --import tsx src/cli.ts off  (or: npm run box:off)");
 }
 
