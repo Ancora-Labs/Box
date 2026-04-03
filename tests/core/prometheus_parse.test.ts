@@ -43,6 +43,7 @@ import {
   extractMandatoryHealthAuditFindings,
   buildMandatoryTasksPromptSection,
   validateMandatoryTaskCoverageContract,
+  buildMandatoryCoverageRetryDiff,
   buildRoutingOutcomeSection,
 } from "../../src/core/prometheus.js";
 import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
@@ -776,6 +777,8 @@ describe("PROMETHEUS_STATIC_SECTIONS", () => {
     assert.ok(content.includes("ACTIONABLE IMPROVEMENT PACKET FORMAT"));
     assert.ok(content.includes("PACKET FIELD ENFORCEMENT RULES"));
     assert.ok(content.includes("===DECISION==="), "should contain JSON output markers");
+    assert.ok(content.includes("\"projectHealth\": \"<good|needs-work|critical>\""));
+    assert.ok(content.includes("\"estimatedPremiumRequestsTotal\": 6"));
   });
 });
 
@@ -3506,5 +3509,29 @@ describe("health-audit mandatory task injection contract", () => {
     const result = validateMandatoryTaskCoverageContract(payload, findings);
     assert.equal(result.ok, false);
     assert.ok(result.invalid.some((v) => v.includes("mapped_without_existing_plan")));
+  });
+
+  it("buildMandatoryCoverageRetryDiff emits deterministic missing/invalid lines", () => {
+    const diff = buildMandatoryCoverageRetryDiff({
+      ok: false,
+      missing: ["cap-critical", "cap-important"],
+      invalid: ["cap-critical:mapped_without_existing_plan"],
+      mapped: [],
+      excluded: [],
+    });
+    assert.ok(diff.includes("missing=[cap-critical, cap-important]"));
+    assert.ok(diff.includes("invalid=[cap-critical:mapped_without_existing_plan]"));
+  });
+
+  it("buildMandatoryCoverageRetryDiff uses none when missing and invalid are empty", () => {
+    const diff = buildMandatoryCoverageRetryDiff({
+      ok: true,
+      missing: [],
+      invalid: [],
+      mapped: ["cap-critical"],
+      excluded: [],
+    });
+    assert.ok(diff.includes("missing=[none]"));
+    assert.ok(diff.includes("invalid=[none]"));
   });
 });

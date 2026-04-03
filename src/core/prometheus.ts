@@ -322,6 +322,15 @@ export function validateMandatoryTaskCoverageContract(
   return { ok: missing.length === 0 && invalid.length === 0, missing, invalid, mapped, excluded };
 }
 
+export function buildMandatoryCoverageRetryDiff(result: MandatoryTaskCoverageValidationResult): string {
+  const missing = Array.isArray(result?.missing) ? result.missing : [];
+  const invalid = Array.isArray(result?.invalid) ? result.invalid : [];
+  const missingText = missing.length > 0 ? missing.join(", ") : "none";
+  const invalidText = invalid.length > 0 ? invalid.join(", ") : "none";
+  return `missing=[${sanitizePromptLine(missingText, 600)}]
+invalid=[${sanitizePromptLine(invalidText, 1200)}]`;
+}
+
 function sanitizePromptLine(value: unknown, maxLen = 220): string {
   const compact = String(value || "")
     .replace(/[\r\n\t]+/g, " ")
@@ -2351,10 +2360,10 @@ Security or governance recommendations must explain how they contribute to capac
 You MUST emit a structured JSON companion block at the end of your response.
 The JSON block must contain all of the following fields:
 {
-  "projectHealth": "<healthy|warning|critical>",
+  "projectHealth": "<good|needs-work|critical>",
   "totalPackets": <number>,
   "requestBudget": {
-    "estimatedPremiumRequestsTotal": <number>,
+    "estimatedPremiumRequestsTotal": 6,
     "errorMarginPercent": <number>,
     "hardCapTotal": <number>,
     "confidence": "low|medium|high",
@@ -3698,9 +3707,12 @@ ${compiledCycleDelta}`;
   // This is the primary enforcement gate. The post-normalization capacityDelta/
   // requestROI filter below remains as a secondary safety net for plans injected
   // by non-rawPlans paths (alternative shapes, drift debt tasks).
-  const rawParsedInput = aiResult?.parsed || buildNarrativeFallbackParsed({ ...aiResult, raw });
+  let rawParsedInput = aiResult?.parsed || buildNarrativeFallbackParsed({ ...aiResult, raw });
   const mandatoryCoverageResult = validateMandatoryTaskCoverageContract(rawParsedInput, mandatoryFindings);
   const mandatoryCoverageMode = config?.runtime?.mandatoryTaskCoverageMode === "enforce" ? "enforce" : "warn";
+  if (mandatoryCoverageMode === "enforce") {
+    rawParsedInput._retryAttempted = false;
+  }
   if (!mandatoryCoverageResult.ok) {
     const missing = mandatoryCoverageResult.missing.join(", ") || "none";
     const invalid = mandatoryCoverageResult.invalid.join(", ") || "none";
@@ -3714,13 +3726,123 @@ ${compiledCycleDelta}`;
       invalid: mandatoryCoverageResult.invalid,
       mapped: mandatoryCoverageResult.mapped,
       excluded: mandatoryCoverageResult.excluded,
+      _retryAttempted: mandatoryCoverageMode === "enforce" ? true : undefined,
     };
     if (mandatoryCoverageMode === "enforce") {
-      rawParsedInput.plans = [];
+      rawParsedInput._retryAttempted = true;
+      const coverageDiff = buildMandatoryCoverageRetryDiff(mandatoryCoverageResult);
+      const retryPrompt = `${contextPrompt}
+
+## MANDATORY_TASK_COVERAGE_RETRY
+The previous response failed mandatory coverage validation.
+Regenerate the full response and companion JSON, then fix the mandatoryTaskCoverage contract exactly.
+
+Coverage diff:
+${coverageDiff}
+
+Mandatory requirements:
+- Every mandatory finding ID appears exactly once in mandatoryTaskCoverage.
+- "mapped" entries must reference an existing plan task/title/task_id in plans[].
+- "excluded" entries must include cycle-specific, non-generic justification.
+- Keep plans actionable and deterministic.`;
       await appendProgress(
         config,
-        "[PROMETHEUS][MANDATORY_TASKS] Enforcement active — plans dropped due to coverage failure"
+        "[PROMETHEUS][MANDATORY_TASKS] Enforcement active — retrying once with explicit coverage diff"
       );
+
+      let retryRawParsedInput: unknown = null;
+      try {
+        const retryArgs = buildAgentArgs({
+          agentSlug: "prometheus",
+          prompt: retryPrompt,
+          model: prometheusModel,
+          allowAll: true,
+          noAskUser: true,
+          maxContinues: undefined
+        });
+        appendLiveLogSync(stateDir, `\n[copilot_stream_retry_start] ${ts()}\n`);
+        const retryResult = await spawnAsync(command, retryArgs, {
+          env: process.env,
+          timeoutMs: prometheusTimeoutMs,
+          onStdout(chunk) {
+            const text = chunk.toString("utf8");
+            appendLiveLogSync(stateDir, text);
+          },
+          onStderr(chunk) {
+            const text = chunk.toString("utf8");
+            appendLiveLogSync(stateDir, text);
+          }
+        });
+        const retryResultObj = retryResult as { status?: number; stdout?: string; stderr?: string };
+        appendLiveLogSync(stateDir, `\n[copilot_stream_retry_end] ${ts()} exit=${retryResultObj.status}\n`);
+        if (retryResultObj.status === 0) {
+          const retryStdout = String(retryResultObj.stdout || "");
+          const retryStderr = String(retryResultObj.stderr || "");
+          const retryRaw = `${retryStdout}\n${retryStderr}`.trim();
+          const retryAiResult = parseAgentOutput(retryRaw);
+          retryRawParsedInput = retryAiResult?.parsed || buildNarrativeFallbackParsed({ ...retryAiResult, raw: retryRaw });
+        } else {
+          await appendProgress(
+            config,
+            `[PROMETHEUS][MANDATORY_TASKS][WARN] Retry process failed — exited ${retryResultObj.status}`
+          );
+        }
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        await appendProgress(
+          config,
+          `[PROMETHEUS][MANDATORY_TASKS][WARN] Retry execution error: ${retryMessage}`
+        );
+      }
+
+      if (retryRawParsedInput) {
+        const retryCoverageResult = validateMandatoryTaskCoverageContract(retryRawParsedInput, mandatoryFindings);
+        if (retryCoverageResult.ok) {
+          rawParsedInput = retryRawParsedInput;
+          rawParsedInput._retryAttempted = true;
+          rawParsedInput._mandatoryTaskCoverageGate = {
+            ok: true,
+            missing: [],
+            invalid: [],
+            mapped: retryCoverageResult.mapped,
+            excluded: retryCoverageResult.excluded,
+            _retryAttempted: true,
+          };
+          await appendProgress(
+            config,
+            `[PROMETHEUS][MANDATORY_TASKS] Retry succeeded — mapped=${retryCoverageResult.mapped.length} excluded=${retryCoverageResult.excluded.length}`
+          );
+        } else {
+          const retryMissing = retryCoverageResult.missing.join(", ") || "none";
+          const retryInvalid = retryCoverageResult.invalid.join(", ") || "none";
+          rawParsedInput = retryRawParsedInput;
+          rawParsedInput._retryAttempted = true;
+          rawParsedInput._mandatoryTaskCoverageGate = {
+            ok: false,
+            missing: retryCoverageResult.missing,
+            invalid: retryCoverageResult.invalid,
+            mapped: retryCoverageResult.mapped,
+            excluded: retryCoverageResult.excluded,
+            _retryAttempted: true,
+          };
+          rawParsedInput.plans = [];
+          await appendProgress(
+            config,
+            `[PROMETHEUS][MANDATORY_TASKS] Retry failed coverage — missing=[${retryMissing}] invalid=[${retryInvalid}] | fail-close plans=[]`
+          );
+        }
+      } else {
+        rawParsedInput._mandatoryTaskCoverageGate = {
+          ...(rawParsedInput._mandatoryTaskCoverageGate || {}),
+          ok: false,
+          _retryAttempted: true,
+        };
+        rawParsedInput.plans = [];
+        await appendProgress(
+          config,
+          "[PROMETHEUS][MANDATORY_TASKS] Retry produced no parsable payload — fail-close plans=[]"
+        );
+      }
     } else {
       await appendProgress(
         config,
@@ -3734,6 +3856,7 @@ ${compiledCycleDelta}`;
       invalid: [],
       mapped: mandatoryCoverageResult.mapped,
       excluded: mandatoryCoverageResult.excluded,
+      _retryAttempted: mandatoryCoverageMode === "enforce" ? false : undefined,
     };
     await appendProgress(
       config,
