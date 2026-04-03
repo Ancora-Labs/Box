@@ -1128,17 +1128,19 @@ describe("buildTokenFirstBatches — specialist threshold routing", () => {
     assert.equal(batches[0].role, "evolution-worker");
   });
 
-  it("preserves wave boundaries when rerouting", () => {
+  it("collapses all waves to 1 when rerouting (wave barriers disabled in buildTokenFirstBatches)", () => {
+    // buildTokenFirstBatches intentionally collapses all plan waves to 1 so plans
+    // can be packed purely by role + token capacity without wave-level barriers.
     const plans = [
       { ...makePlan("governance-worker", "gov w1"), wave: 1, dependsOn: [] },
       { ...makePlan("governance-worker", "gov w2"), wave: 2, dependencies: ["gov w1"] },
     ];
 
     const batches = buildTokenFirstBatches(plans, config);
-    // Waves should be preserved after reroute
-    const waves = batches.map(b => b.wave);
-    assert.ok(waves.includes(1));
-    assert.ok(waves.includes(2));
+    // All output batches must have wave 1 (wave collapsing is the documented behavior)
+    for (const batch of batches) {
+      assert.equal(batch.wave, 1, "buildTokenFirstBatches must collapse all waves to 1");
+    }
   });
 
   it("includes specialistReroutes metadata when rerouting occurs", () => {
