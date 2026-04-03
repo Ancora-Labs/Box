@@ -236,23 +236,35 @@ export function parseAgentOutput(raw) {
   const text = String(raw || "");
 
   // Try ===DECISION=== / ===END=== markers (English format)
-  const decisionMatch = text.match(/===DECISION===\s*([\s\S]*?)===END===/);
-  if (decisionMatch) {
-    const splitIdx = text.indexOf("===DECISION===");
-    const thinking = text.slice(0, splitIdx).trim();
-    const jsonStr = decisionMatch[1].trim();
-    const parsed = tryParseJson(jsonStr);
-    return { thinking, parsed, ok: !!parsed };
+  // Use lastIndexOf so that tool-output echoes of the marker (e.g. grep patterns
+  // containing "===DECISION===") do not shadow the agent's actual final block.
+  const decisionIdx = text.lastIndexOf("===DECISION===");
+  if (decisionIdx >= 0) {
+    const afterDecision = text.slice(decisionIdx + "===DECISION===".length);
+    const endIdx = afterDecision.indexOf("===END===");
+    if (endIdx >= 0) {
+      const jsonStr = afterDecision.slice(0, endIdx).trim();
+      const parsed = tryParseJson(jsonStr);
+      if (parsed) {
+        const thinking = text.slice(0, decisionIdx).trim();
+        return { thinking, parsed, ok: true };
+      }
+    }
   }
 
-  // Try ===KARAR=== / ===SON=== markers (legacy Turkish format ÔÇö backward compat)
-  const kararMatch = text.match(/===KARAR===\s*([\s\S]*?)===SON===/);
-  if (kararMatch) {
-    const splitIdx = text.indexOf("===KARAR===");
-    const thinking = text.slice(0, splitIdx).trim();
-    const jsonStr = kararMatch[1].trim();
-    const parsed = tryParseJson(jsonStr);
-    return { thinking, parsed, ok: !!parsed };
+  // Try ===KARAR=== / ===SON=== markers (legacy Turkish format — backward compat)
+  const kararIdx = text.lastIndexOf("===KARAR===");
+  if (kararIdx >= 0) {
+    const afterKarar = text.slice(kararIdx + "===KARAR===".length);
+    const sonIdx = afterKarar.indexOf("===SON===");
+    if (sonIdx >= 0) {
+      const jsonStr = afterKarar.slice(0, sonIdx).trim();
+      const parsed = tryParseJson(jsonStr);
+      if (parsed) {
+        const thinking = text.slice(0, kararIdx).trim();
+        return { thinking, parsed, ok: true };
+      }
+    }
   }
 
   // Try ```json fenced blocks
