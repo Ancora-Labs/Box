@@ -1988,15 +1988,25 @@ export const PLANNER_HEALTH_ALIASES: Readonly<Record<string, string>> = Object.f
 
 const REQUIRED_PROMETHEUS_HEALTH_VALUES = new Set(["healthy", "degraded", "critical", "needs-work", "good"]);
 
+export function hasPrometheusRuntimeContractSignals(parsed: unknown): boolean {
+  if (!parsed || typeof parsed !== "object") return false;
+  const payload = parsed as Record<string, unknown>;
+  const generatedAt = String(payload.generatedAt ?? "").trim();
+  const keyFindings = String(payload.keyFindings ?? "").trim();
+  return generatedAt.length > 0 && keyFindings.length > 0;
+}
+
 function hasValidParserContractFields(parsed: any): boolean {
   if (!parsed || typeof parsed !== "object") return false;
   const rawHealth = String(parsed.projectHealth ?? "").trim().toLowerCase();
   const health = rawHealth.replace(/\s+/g, "-");
   const estimatedTotal = Number(parsed?.requestBudget?.estimatedPremiumRequestsTotal);
+  const generatedAt = String(parsed?.generatedAt ?? "").trim();
   const keyFindings = String(parsed?.keyFindings ?? "").trim();
   const strategicNarrative = String(parsed?.strategicNarrative ?? "").trim();
   return REQUIRED_PROMETHEUS_HEALTH_VALUES.has(health)
     && Number.isFinite(estimatedTotal)
+    && generatedAt.length > 0
     && keyFindings.length > 0
     && strategicNarrative.length > 0;
 }
@@ -2016,6 +2026,10 @@ function buildParserContractRetryDiff(parsed: any): string {
     missing.push("requestBudget.estimatedPremiumRequestsTotal");
   } else if (!Number.isFinite(Number(parsed.requestBudget.estimatedPremiumRequestsTotal))) {
     invalid.push(`requestBudget.estimatedPremiumRequestsTotal=${String(parsed.requestBudget.estimatedPremiumRequestsTotal)}`);
+  }
+  const rawGeneratedAt = String(parsed?.generatedAt ?? "").trim();
+  if (!rawGeneratedAt) {
+    missing.push("generatedAt");
   }
   const rawKeyFindings = String(parsed?.keyFindings ?? "").trim();
   if (!rawKeyFindings) {
@@ -3795,6 +3809,9 @@ ${compiledCycleDelta}`;
   if (!String(parsedContractCandidate.projectHealth ?? "").trim()) {
     parsedContractCandidate.projectHealth = inferProjectHealth(raw);
   }
+  if (!String(parsedContractCandidate.generatedAt ?? "").trim()) {
+    parsedContractCandidate.generatedAt = new Date().toISOString();
+  }
   if (
     !parsedContractCandidate.requestBudget ||
     parsedContractCandidate.requestBudget.estimatedPremiumRequestsTotal == null ||
@@ -3853,6 +3870,7 @@ ${parserDiff}
 Mandatory parser fields:
 - projectHealth must be exactly one of: good, healthy, needs-work, degraded, critical
 - requestBudget.estimatedPremiumRequestsTotal must be present and finite
+- generatedAt must be a non-empty ISO timestamp string
 - keyFindings must be a non-empty string
 - strategicNarrative must be a non-empty string
 - Keep the rest of the plan deterministic and unchanged unless required by these fixes.`;
@@ -4563,6 +4581,7 @@ Mandatory requirements:
   const analysis = {
     ...parsed,
     dossierPath: null,
+    generatedAt: String(parsed?.generatedAt || "").trim() || new Date().toISOString(),
     analyzedAt: new Date().toISOString(),
     model: prometheusModel,
     repo: config.env?.targetRepo,
