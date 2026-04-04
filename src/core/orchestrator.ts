@@ -92,6 +92,7 @@ import {
 import { validatePlanEvidenceCoupling } from "./evidence_envelope.js";
 import { runResearchScout } from "./research_scout.js";
 import { runResearchSynthesizer } from "./research_synthesizer.js";
+import { buildReplayClosureEvidence } from "./verification_gate.js";
 import {
   readCheckpoint as readVersionedCheckpoint,
   writeCheckpoint as writeVersionedCheckpoint,
@@ -2658,7 +2659,7 @@ async function runSingleCycle(config) {
   const allWorkerResults: Array<{ roleName: string; status: string; verificationEvidence?: string | null }> = [];
   // Collects (taskText, verificationEvidence) from successful workers for
   // carry-forward auto-close matching at end of cycle.
-  const resolvedPlanItems: Array<{ taskText: string; verificationEvidence: string }> = [];
+  const resolvedPlanItems: Array<{ taskText: string; verificationEvidence: unknown }> = [];
 
   // ── Strict wave boundary tracking ──────────────────────────────────────────
   // Each time the wave number changes, we log an explicit boundary event.
@@ -2741,12 +2742,16 @@ async function runSingleCycle(config) {
     // Only plans from successful batches with real evidence qualify.
     if (workerResult?.verificationEvidence) {
       const batchPlansList = Array.isArray((batch as any).plans) ? (batch as any).plans : [];
+      const replayClosure = buildReplayClosureEvidence(String(workerResult?.raw || ""));
       for (const plan of batchPlansList) {
         const taskText = String((plan as any)?.task || "").trim();
         if (taskText.length >= 10) {
           resolvedPlanItems.push({
             taskText,
-            verificationEvidence: String(workerResult.verificationEvidence),
+            verificationEvidence: {
+              workerContract: workerResult.verificationEvidence,
+              replayClosure,
+            },
           });
         }
       }
@@ -3015,14 +3020,40 @@ async function runSingleCycle(config) {
       ? addDebtEntries(debtLedger, followUpItems, cycleCounter, slaOpts)
       : debtLedger;
 
-    // Auto-close debt items verified by worker evidence this cycle.
-    // Only items with a fingerprint match AND non-trivial evidence are closed.
+    // Persist replay closure evidence links for this cycle.
+    const replayEvidenceFile = path.join(stateDir, "carry_forward_replay_evidence.jsonl");
+    const replayRecords = resolvedPlanItems
+      .map((item) => {
+        const envelope = item.verificationEvidence && typeof item.verificationEvidence === "object"
+          ? item.verificationEvidence as Record<string, unknown>
+          : null;
+        const replay = envelope?.replayClosure && typeof envelope.replayClosure === "object"
+          ? envelope.replayClosure as Record<string, unknown>
+          : null;
+        if (!replay) return null;
+        return JSON.stringify({
+          schemaVersion: 1,
+          recordedAt: new Date().toISOString(),
+          taskText: item.taskText,
+          contractSatisfied: replay.contractSatisfied === true,
+          canonicalCommands: Array.isArray(replay.canonicalCommands) ? replay.canonicalCommands : [],
+          executedCommands: Array.isArray(replay.executedCommands) ? replay.executedCommands : [],
+          rawArtifactEvidenceLinks: Array.isArray(replay.rawArtifactEvidenceLinks) ? replay.rawArtifactEvidenceLinks : [],
+        });
+      })
+      .filter(Boolean) as string[];
+    if (replayRecords.length > 0) {
+      await fs.appendFile(replayEvidenceFile, `${replayRecords.join("\n")}\n`, "utf8");
+    }
+
+    // Auto-close debt items verified by replay evidence contract this cycle.
+    // Only items with a fingerprint match AND full replay closure evidence are closed.
     // Unresolved items remain open and continue to gate future dispatch via
     // shouldBlockOnDebt in evaluatePreDispatchGovernanceGate.
     const closedByEvidence = autoCloseVerifiedDebt(updatedLedger, resolvedPlanItems);
     if (closedByEvidence > 0) {
       await appendProgress(config,
-        `[CARRY_FORWARD] ${closedByEvidence} debt item(s) auto-closed by worker verification evidence`
+        `[CARRY_FORWARD] ${closedByEvidence} debt item(s) auto-closed by replay closure evidence contract`
       );
     }
 

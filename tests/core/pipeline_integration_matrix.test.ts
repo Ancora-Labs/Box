@@ -210,7 +210,29 @@ describe("pipeline matrix — debt lifecycle", () => {
     const lesson = "ensure all worker outputs include VERIFICATION_REPORT marker";
     const ledger = addDebtEntries([], [{ followUpTask: lesson, severity: "critical" }], 1);
     const closedCount = autoCloseVerifiedDebt(ledger, [
-      { taskText: lesson, verificationEvidence: "VERIFICATION_REPORT: BUILD=pass; TESTS=pass" },
+      {
+        taskText: lesson,
+        verificationEvidence: {
+          workerContract: {
+            passed: true,
+            artifactDetail: {
+              hasSha: true,
+              hasTestOutput: true,
+              hasCleanTreeEvidence: true,
+              hasUnfilledPlaceholder: false,
+            },
+          },
+          replayClosure: {
+            contractSatisfied: true,
+            executedCommands: ["git rev-parse HEAD", "git status --porcelain", "npm test"],
+            rawArtifactEvidenceLinks: [
+              "inline://post-merge-sha/abc1234",
+              "inline://clean-tree-status",
+              "inline://npm-test-output-block",
+            ],
+          },
+        },
+      },
     ]);
     assert.equal(closedCount, 1);
     assert.equal(getOpenDebts(ledger).length, 0);

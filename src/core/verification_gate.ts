@@ -215,6 +215,89 @@ export function checkPostMergeArtifact(output) {
 }
 
 /**
+ * Canonical replay commands required for carry-forward verification closure.
+ * These commands prove the merged/main-branch replay contract was executed.
+ */
+export const CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS: readonly string[] = Object.freeze([
+  "git rev-parse HEAD",
+  "git status --porcelain",
+  "npm test",
+]);
+
+const REPLAY_COMMAND_PATTERNS = new Map<string, RegExp>([
+  ["git rev-parse HEAD", /\bgit\s+rev-parse\s+head\b/i],
+  ["git status --porcelain", /\bgit\s+status\s+--porcelain\b/i],
+  ["npm test", /\bnpm\s+test\b/i],
+]);
+
+/**
+ * Build replay-closure evidence from worker output.
+ *
+ * The contract is satisfied when:
+ *  1) all canonical replay commands are evidenced, and
+ *  2) at least one raw artifact evidence link is present.
+ */
+export function buildReplayClosureEvidence(
+  output: string,
+  precomputedArtifact?: ReturnType<typeof checkPostMergeArtifact>,
+) {
+  const text = String(output || "");
+  const artifact = precomputedArtifact ?? checkPostMergeArtifact(text);
+
+  const executedCommands = CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS.filter((command) => {
+    if (command === "git rev-parse HEAD" && artifact.hasSha) return true;
+    if (command === "git status --porcelain" && artifact.hasCleanTreeEvidence) return true;
+    if (command === "npm test" && artifact.hasTestOutput) return true;
+    const pattern = REPLAY_COMMAND_PATTERNS.get(command);
+    return pattern ? pattern.test(text) : false;
+  });
+
+  const missingCommands = CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS.filter(
+    command => !executedCommands.includes(command),
+  );
+
+  const rawArtifactEvidenceLinks: string[] = [];
+  const pushUniqueLink = (link: string) => {
+    const normalized = String(link || "").trim();
+    if (!normalized) return;
+    if (!rawArtifactEvidenceLinks.includes(normalized)) rawArtifactEvidenceLinks.push(normalized);
+  };
+
+  if (artifact.hasExplicitShaMarker || artifact.hasSha) {
+    const sha = artifact.mergedSha || "detected";
+    pushUniqueLink(`inline://post-merge-sha/${sha}`);
+  }
+  if (artifact.hasCleanTreeEvidence) {
+    pushUniqueLink("inline://clean-tree-status");
+  }
+  if (artifact.hasExplicitTestBlock || artifact.hasTestOutput) {
+    pushUniqueLink("inline://npm-test-output-block");
+  }
+
+  const explicitLinkPattern = /(RAW_ARTIFACT_LINKS?|ARTIFACT_LINKS?)\s*[:=]\s*([^\n\r]+)/ig;
+  let linkMatch: RegExpExecArray | null;
+  while ((linkMatch = explicitLinkPattern.exec(text)) !== null) {
+    const payload = String(linkMatch[2] || "");
+    payload
+      .split(/[,\s]+/)
+      .map(v => v.trim())
+      .filter(Boolean)
+      .forEach(pushUniqueLink);
+  }
+
+  return {
+    schemaVersion: 1,
+    canonicalCommands: [...CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS],
+    executedCommands,
+    missingCommands,
+    rawArtifactEvidenceLinks,
+    hasCanonicalReplayCommands: missingCommands.length === 0,
+    hasRawArtifactEvidenceLinks: rawArtifactEvidenceLinks.length > 0,
+    contractSatisfied: missingCommands.length === 0 && rawArtifactEvidenceLinks.length > 0,
+  };
+}
+
+/**
  * Extract the merged commit SHA from worker output.
  *
  * Returns the value from the explicit BOX_MERGED_SHA=<sha> marker when present.

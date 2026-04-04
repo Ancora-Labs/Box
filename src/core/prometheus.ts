@@ -482,6 +482,65 @@ async function getLatestResearchArtifactUpdatedAtMs(stateDir: string): Promise<n
   return latest;
 }
 
+const DIAGNOSTICS_FRESHNESS_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+async function readLatestJsonlRecord(filePath: string): Promise<any | null> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const lines = raw.split("\n").map(line => line.trim()).filter(Boolean);
+    if (lines.length === 0) return null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        return JSON.parse(lines[i]);
+      } catch {
+        // continue scanning backwards for the most recent parseable entry
+      }
+    }
+  } catch {
+    // optional diagnostics files may not exist
+  }
+  return null;
+}
+
+async function buildDiagnosticsFreshnessPromptSection(stateDir: string): Promise<string> {
+  const diagnostics = [
+    { label: "intervention_optimizer", file: "intervention_optimizer_log.jsonl" },
+    { label: "dependency_graph", file: "dependency_graph_diagnostics.json" },
+  ];
+
+  const lines: string[] = [];
+  for (const item of diagnostics) {
+    const filePath = path.join(stateDir, item.file);
+    const latest = await readLatestJsonlRecord(filePath);
+    if (!latest || typeof latest !== "object") {
+      lines.push(`- ${item.label}: missing_or_unparseable (${item.file})`);
+      continue;
+    }
+
+    const recordedAtRaw = String(
+      latest.savedAt
+      || latest.persistedAt
+      || latest.recordedAt
+      || latest.generatedAt
+      || "",
+    ).trim();
+    const recordedAtMs = recordedAtRaw ? new Date(recordedAtRaw).getTime() : NaN;
+    const staleAfterMs = Number((latest as any)?.freshness?.staleAfterMs || DIAGNOSTICS_FRESHNESS_MAX_AGE_MS);
+    const ageMs = Number.isFinite(recordedAtMs) ? (Date.now() - recordedAtMs) : Number.POSITIVE_INFINITY;
+    const stale = !Number.isFinite(recordedAtMs) || ageMs > staleAfterMs;
+    const ageMinutes = Number.isFinite(ageMs) ? Math.max(0, Math.round(ageMs / 60_000)) : -1;
+    lines.push(
+      `- ${item.label}: ${stale ? "stale" : "fresh"} ` +
+      `(recordedAt=${recordedAtRaw || "unknown"} ageMinutes=${ageMinutes >= 0 ? ageMinutes : "unknown"} source=${item.file})`
+    );
+  }
+
+  return `## DIAGNOSTICS FRESHNESS CONTRACT
+Treat diagnostics artifacts as live planning truth ONLY when status=fresh.
+Any status=stale or missing_or_unparseable is historical context only and MUST NOT drive new plan priorities.
+${lines.join("\n")}`;
+}
+
 // ── Source Code & State Injection for Deep Context ──────────────────────────
 // These builders give Prometheus direct visibility into the actual codebase and
 // system state — not just file names. This enables dramatically better planning.
@@ -2517,6 +2576,7 @@ export const PROMETHEUS_CYCLE_DELTA_SECTION_NAMES: ReadonlySet<string> = new Set
   "topic-memory",
   "behavior-patterns",
   "carry-forward",
+  "diagnostics-freshness",
 ]);
 
 /**
@@ -3332,6 +3392,7 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
   await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Awakening — direct Copilot CLI scan starting...`);
 
   const planningPolicy = buildPrometheusPlanningPolicy(config);
+  const diagnosticsFreshnessSection = await buildDiagnosticsFreshnessPromptSection(stateDir);
   let researchSectionText = "";
   let researchTopicCount = 0;
   let researchSourceCount = 0;
@@ -3631,6 +3692,7 @@ RULE: Every packet MUST contain enough work to justify a full AI context call. T
 ### dependencies — use EXACT packet titles, never aliases
 ### acceptance_criteria — every item MUST contain a numeric threshold
 ### wave assignments — tasks with dependencies must be in a later wave`);
+  if (diagnosticsFreshnessSection) cycleDeltaParts.push(diagnosticsFreshnessSection);
 
   // Research intelligence summary (topics only — Prometheus reads full synthesis file itself)
   if (researchTopicsList.length > 0) {
@@ -3676,6 +3738,7 @@ Use this data to produce evidence-backed plans, not vague strategic recommendati
       section("repair-feedback", repairFeedbackSection || ""),
       section("drift-summary", driftSummarySection || ""),
       section("mandatory-tasks", mandatoryTasksSection || ""),
+      section("diagnostics-freshness", diagnosticsFreshnessSection || ""),
     ],
     PROMETHEUS_CYCLE_DELTA_SECTION_NAMES
   );
@@ -3695,7 +3758,8 @@ ${userPrompt}
 ## YOUR WORKFLOW
 You have full read and write access to the repository and state directory.
 1. Read state/research_synthesis.json for the latest research intelligence (extracted content from internet sources).
-2. Read key state files to understand system health: state/cycle_analytics.json, state/capacity_scoreboard.json, state/cycle_health.json, state/evolution_progress.json, state/athena_postmortems.json, state/intervention_optimizer_log.json, state/dependency_graph_diagnostics.json
+2. Read key state files to understand system health: state/cycle_analytics.json, state/capacity_scoreboard.json, state/cycle_health.json, state/evolution_progress.json, state/athena_postmortems.json, state/intervention_optimizer_log.jsonl, state/dependency_graph_diagnostics.json
+   - Use diagnostics freshness metadata (freshness.staleAfterMs + timestamp fields) and do NOT treat stale diagnostics entries as live planning truth.
 3. Read source files you need to understand for planning — browse src/core/, src/workers/, src/types/ as needed.
 4. Produce your self-evolution master plan following your agent definition's output format.
 5. Your plan MUST end with a JSON companion block wrapped in ===DECISION=== / ===END=== markers containing a plans array.
