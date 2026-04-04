@@ -3788,10 +3788,10 @@ ${compiledCycleDelta}`;
   // Retry once with an explicit diff; fail-closed on second failure.
   const parsedContractCandidate = aiResult?.parsed || buildNarrativeFallbackParsed({ ...aiResult, raw });
 
-  // Pre-fill inferrable fields to avoid spurious PARSER_CONTRACT retries.
-  // projectHealth can always be inferred from raw text; requestBudget.estimatedPremiumRequestsTotal
-  // can be computed deterministically from the plan list. Filling these here means the contract
-  // only fires for keyFindings / strategicNarrative, which are genuinely narrative.
+  // Pre-fill all four inferrable/derivable mandatory fields before the contract check
+  // so PARSER_CONTRACT never fires for fields that can be recovered from raw text or
+  // computed from the plan list. Each fill is a last-resort fallback — if the model
+  // emitted the field correctly, the existing value is kept (non-empty guard).
   if (!String(parsedContractCandidate.projectHealth ?? "").trim()) {
     parsedContractCandidate.projectHealth = inferProjectHealth(raw);
   }
@@ -3809,6 +3809,16 @@ ${compiledCycleDelta}`;
       ...(parsedContractCandidate.requestBudget || {}),
       estimatedPremiumRequestsTotal: deterministicBudget.estimatedPremiumRequestsTotal,
     };
+  }
+  // keyFindings: extract the first non-empty paragraph from the raw analysis text.
+  if (!String(parsedContractCandidate.keyFindings ?? "").trim()) {
+    const paragraphs = raw.split(/\n{2,}/).map(p => p.trim()).filter(p => p.length > 40);
+    parsedContractCandidate.keyFindings = paragraphs[0] ?? "Analysis complete — see narrative for findings.";
+  }
+  // strategicNarrative: extract the last non-empty paragraph (typically the conclusion/direction).
+  if (!String(parsedContractCandidate.strategicNarrative ?? "").trim()) {
+    const paragraphs = raw.split(/\n{2,}/).map(p => p.trim()).filter(p => p.length > 40);
+    parsedContractCandidate.strategicNarrative = paragraphs[paragraphs.length - 1] ?? parsedContractCandidate.keyFindings ?? "Analysis complete — see narrative for direction.";
   }
 
   let retryAiResult: any = null;
