@@ -96,6 +96,19 @@ describe("parseWorkerResponse", () => {
     assert.equal(result.status, "blocked");
   });
 
+  it("extracts explicit dispatch block reason from BOX_BLOCKER", () => {
+    const stdout = "BOX_STATUS=blocked\nBOX_BLOCKER=governance_freeze_active:manual_freeze";
+    const result = parseWorkerResponse(stdout, "");
+    assert.equal(result.dispatchBlockReason, "governance_freeze_active:manual_freeze");
+  });
+
+  it("derives dispatch block reason from BOX_ACCESS blocked scopes when BOX_BLOCKER is absent", () => {
+    const stdout = "BOX_STATUS=done\nBOX_ACCESS=repo:blocked;files:ok;tools:ok;api:ok";
+    const result = parseWorkerResponse(stdout, "");
+    assert.equal(result.status, "blocked");
+    assert.equal(result.dispatchBlockReason, "access_blocked:repo");
+  });
+
   it("includes VERIFICATION_REPORT in verificationReport field", () => {
     const stdout = "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; RESPONSIVE=n/a; API=n/a; EDGE_CASES=pass; SECURITY=pass";
     const result = parseWorkerResponse(stdout, "");

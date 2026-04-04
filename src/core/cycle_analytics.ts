@@ -197,6 +197,10 @@ function hasDoneWorkerWithVerificationEvidence(workerResults: unknown): boolean 
     const row = item as Record<string, unknown>;
     const status = String(row.status || "").toLowerCase();
     if (status !== "done" && status !== "success") return false;
+    const dispatchContract = row.dispatchContract && typeof row.dispatchContract === "object"
+      ? row.dispatchContract as Record<string, unknown>
+      : null;
+    if (dispatchContract?.doneWorkerWithVerificationReportEvidence === true) return true;
     const evidence = String(
       row.verificationEvidence
       || row.verification_report
@@ -208,6 +212,27 @@ function hasDoneWorkerWithVerificationEvidence(workerResults: unknown): boolean 
   });
 }
 
+function hasDispatchBlockReasonOutcomes(workerResults: unknown): boolean {
+  if (!Array.isArray(workerResults)) return false;
+  const blockedRows = workerResults.filter((item) => {
+    if (!item || typeof item !== "object") return false;
+    const row = item as Record<string, unknown>;
+    return String(row.status || "").toLowerCase() === "blocked";
+  }) as Array<Record<string, unknown>>;
+  if (blockedRows.length === 0) return true;
+  return blockedRows.every((row) => {
+    const dispatchContract = row.dispatchContract && typeof row.dispatchContract === "object"
+      ? row.dispatchContract as Record<string, unknown>
+      : null;
+    const reason = String(
+      row.dispatchBlockReason
+      || dispatchContract?.dispatchBlockReason
+      || "",
+    ).trim();
+    return reason.length > 0;
+  });
+}
+
 export function computeRuntimeContractProbe(opts: {
   prometheusAnalysis?: unknown;
   athenaPlanReview?: unknown;
@@ -216,7 +241,8 @@ export function computeRuntimeContractProbe(opts: {
   const prometheusPass = hasPrometheusRuntimeContractSignals(opts.prometheusAnalysis);
   const athenaPass = hasFiniteAthenaOverallScore(opts.athenaPlanReview);
   const workerPass = hasDoneWorkerWithVerificationEvidence(opts.workerResults);
-  const passed = prometheusPass && athenaPass && workerPass;
+  const dispatchReasonPass = hasDispatchBlockReasonOutcomes(opts.workerResults);
+  const passed = prometheusPass && athenaPass && workerPass && dispatchReasonPass;
   return {
     checkedAt: new Date().toISOString(),
     passed,
@@ -224,6 +250,7 @@ export function computeRuntimeContractProbe(opts: {
       prometheusGeneratedAtAndKeyFindings: { pass: prometheusPass },
       athenaPlanReviewOverallScoreFinite: { pass: athenaPass },
       doneWorkerWithVerificationReportEvidence: { pass: workerPass },
+      dispatchBlockReasonOutcomes: { pass: dispatchReasonPass },
     },
   };
 }

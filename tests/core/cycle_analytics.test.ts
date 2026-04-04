@@ -23,6 +23,7 @@ import {
   persistCycleAnalytics,
   readCycleAnalytics,
   computeCycleHealth,
+  computeRuntimeContractProbe,
   persistCycleHealth,
   persistCycleHealthDivergence,
   readCycleHealth,
@@ -486,6 +487,44 @@ describe("computeCycleAnalytics — outcomes (AC1)", () => {
     const config = makeConfig("state");
     const record = computeCycleAnalytics(config);
     assert.ok(Object.values(CYCLE_OUTCOME_STATUS).includes(record.outcomes.status));
+  });
+});
+
+describe("computeRuntimeContractProbe — dispatch contract evidence", () => {
+  it("passes done-worker verification criterion via dispatchContract without stringifying object evidence", () => {
+    const probe = computeRuntimeContractProbe({
+      prometheusAnalysis: { generatedAt: makeTs(0), keyFindings: ["ok"] },
+      athenaPlanReview: { overallScore: 8 },
+      workerResults: [{
+        roleName: "evolution-worker",
+        status: "done",
+        verificationEvidence: { profile: "backend", passed: true },
+        dispatchContract: {
+          doneWorkerWithVerificationReportEvidence: true,
+          dispatchBlockReason: null,
+          replayClosure: { contractSatisfied: true, canonicalCommands: [], executedCommands: [], rawArtifactEvidenceLinks: [] },
+        },
+      }],
+    });
+    assert.equal(probe.criteria.doneWorkerWithVerificationReportEvidence.pass, true);
+    assert.equal(probe.passed, true);
+  });
+
+  it("fails when blocked worker outcomes omit dispatchBlockReason", () => {
+    const probe = computeRuntimeContractProbe({
+      prometheusAnalysis: { generatedAt: makeTs(0), keyFindings: ["ok"] },
+      athenaPlanReview: { overallScore: 8 },
+      workerResults: [
+        {
+          roleName: "evolution-worker",
+          status: "done",
+          dispatchContract: { doneWorkerWithVerificationReportEvidence: true, dispatchBlockReason: null },
+        },
+        { roleName: "qa", status: "blocked" },
+      ],
+    });
+    assert.equal(probe.criteria.dispatchBlockReasonOutcomes.pass, false);
+    assert.equal(probe.passed, false);
   });
 });
 

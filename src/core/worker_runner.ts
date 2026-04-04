@@ -22,7 +22,7 @@ import { appendProgress, appendLineageEntry, appendFailureClassification } from 
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist, CANONICAL_VERIFICATION_REPORT_TEMPLATE } from "./verification_profiles.js";
 import { getVerificationCommands, classifyNodeTestGlobWindowsArtifact } from "./verification_command_registry.js";
-import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired, isDiscoverySafeTask, extractMergedSha, buildArtifactAuditEntry } from "./verification_gate.js";
+import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired, isDiscoverySafeTask, extractMergedSha, buildArtifactAuditEntry, buildReplayClosureEvidence, hasVerificationReportEvidence } from "./verification_gate.js";
 import {
   enforceModelPolicy,
   routeModelWithUncertainty,
@@ -149,6 +149,17 @@ type VerificationEvidence = {
 
 type ParsedWorkerResponse = ReturnType<typeof parseWorkerResponse> & {
   verificationEvidence?: VerificationEvidence | null;
+};
+
+type DispatchVerificationContract = {
+  doneWorkerWithVerificationReportEvidence: boolean;
+  dispatchBlockReason: string | null;
+  replayClosure: {
+    contractSatisfied: boolean;
+    canonicalCommands: string[];
+    executedCommands: string[];
+    rawArtifactEvidenceLinks: string[];
+  };
 };
 
 const ANALYTICS_COMPLETED_WORKER_STATUSES = new Set(["done", "success", "skipped"]);
@@ -950,6 +961,8 @@ export function parseWorkerResponse(stdout, stderr) {
     : [];
   const blockedScopes = accessPairs.filter(item => item.state === "blocked").map(item => item.scope);
   const hasBlockedAccess = blockedScopes.length > 0;
+  const blockerMatch = combined.match(/BOX_BLOCKER=([^\n\r]+)/i);
+  let dispatchBlockReason = blockerMatch ? blockerMatch[1].trim() : null;
 
   // Guardrail: if access protocol reports blocked but status is not blocked,
   // force status to blocked for safe deterministic follow-up routing.
@@ -958,6 +971,11 @@ export function parseWorkerResponse(stdout, stderr) {
   let normalizedStatus = ["done", "partial", "blocked", "error", "skipped"].includes(status) ? status : "done";
   if (hasBlockedAccess && normalizedStatus !== "blocked" && normalizedStatus !== "skipped") {
     normalizedStatus = "blocked";
+  }
+  if (normalizedStatus === "blocked" && !dispatchBlockReason) {
+    dispatchBlockReason = hasBlockedAccess
+      ? `access_blocked:${blockedScopes.join(",")}`
+      : null;
   }
 
   // Summary: preserve full natural-language output (no truncation)
@@ -986,6 +1004,7 @@ export function parseWorkerResponse(stdout, stderr) {
     filesTouched,
     accessHeader,
     blockedAccessScopes: blockedScopes,
+    dispatchBlockReason,
     summary,
     fullOutput: output,
     verificationReport,
@@ -1068,6 +1087,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   const capabilityCheck = evaluateWorkerRoleCapability(config, roleName, instruction.taskKind, instruction.task);
   if (!capabilityCheck.allowed) {
     const summary = `Role capability check failed: ${capabilityCheck.code} — ${capabilityCheck.message}`;
+    const replayClosure = buildReplayClosureEvidence(summary);
+    const dispatchContract: DispatchVerificationContract = {
+      doneWorkerWithVerificationReportEvidence: false,
+      dispatchBlockReason: `role_capability_check_failed:${capabilityCheck.code}`,
+      replayClosure: {
+        contractSatisfied: replayClosure.contractSatisfied === true,
+        canonicalCommands: Array.isArray(replayClosure.canonicalCommands) ? replayClosure.canonicalCommands : [],
+        executedCommands: Array.isArray(replayClosure.executedCommands) ? replayClosure.executedCommands : [],
+        rawArtifactEvidenceLinks: Array.isArray(replayClosure.rawArtifactEvidenceLinks) ? replayClosure.rawArtifactEvidenceLinks : [],
+      },
+    };
     await appendProgress(config, `[WORKER:${roleName}] ${summary}`);
     updatedHistory.push({
       from: roleName,
@@ -1089,6 +1119,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       verificationReport: null,
       responsiveMatrix: null,
       verificationEvidence: null,
+      dispatchContract,
       fullOutput: summary,
       failureClassification: null,
       retryDecision: null
@@ -1260,6 +1291,22 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   } catch { /* non-critical */ }
 
   const parsed: ParsedWorkerResponse = parseWorkerResponse(stdout, stderr);
+  const replayClosure = buildReplayClosureEvidence(parsed.fullOutput || "");
+  const normalizedWorkerStatus = String(parsed.status || "").toLowerCase();
+  const dispatchContract: DispatchVerificationContract = {
+    doneWorkerWithVerificationReportEvidence:
+      (normalizedWorkerStatus === "done" || normalizedWorkerStatus === "success")
+      && hasVerificationReportEvidence(parsed.fullOutput || ""),
+    dispatchBlockReason: normalizedWorkerStatus === "blocked"
+      ? (parsed.dispatchBlockReason || "worker_reported_blocked_without_reason")
+      : null,
+    replayClosure: {
+      contractSatisfied: replayClosure.contractSatisfied === true,
+      canonicalCommands: Array.isArray(replayClosure.canonicalCommands) ? replayClosure.canonicalCommands : [],
+      executedCommands: Array.isArray(replayClosure.executedCommands) ? replayClosure.executedCommands : [],
+      rawArtifactEvidenceLinks: Array.isArray(replayClosure.rawArtifactEvidenceLinks) ? replayClosure.rawArtifactEvidenceLinks : [],
+    },
+  };
 
   // Soft-fail policy: if only API access is blocked for any worker,
   // attempt an orchestrator-side recovery: commit the dirty working tree to a
@@ -1648,6 +1695,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
         derivedRc = BLOCKING_REASON_CLASS.MAX_REWORK_EXHAUSTED;
       } else if (/verification gate/i.test(parsed.summary)) {
         derivedRc = BLOCKING_REASON_CLASS.VERIFICATION_GATE;
+      } else if (/role_capability_check_failed|role capability/i.test(parsed.dispatchBlockReason || "")) {
+        derivedRc = BLOCKING_REASON_CLASS.POLICY_VIOLATION;
       }
     }
 
@@ -1699,6 +1748,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     verificationReport: parsed.verificationReport,
     responsiveMatrix: parsed.responsiveMatrix,
     verificationEvidence: parsed.verificationEvidence || null,
+    dispatchContract,
     fullOutput: parsed.fullOutput,
     failureClassification,
     retryDecision

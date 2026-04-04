@@ -777,7 +777,7 @@ export async function saveTopicMemory(stateDir: string, memory: TopicMemoryState
   await writeJson(path.join(stateDir, TOPIC_MEMORY_FILE), memory);
 }
 
-function topicKey(topic: string): string {
+export function topicKey(topic: string): string {
   return topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
 }
 
@@ -904,10 +904,32 @@ export function updateTopicKnowledge(
 export function detectAndCompleteTopics(
   memory: TopicMemoryState,
   researchTopics: string[],
-  plans: any[]
+  plans: any[],
+  analysisRoot?: unknown
 ): { memory: TopicMemoryState; completedThisRun: string[] } {
   const completedThisRun: string[] = [];
   const now = new Date().toISOString();
+
+  // Build set of topic keys covered by plan synthesis_sources (forward reference — accurate)
+  const coveredByPlanKeys = new Set<string>();
+  for (const plan of (plans || [])) {
+    const sources = Array.isArray((plan as any).synthesis_sources) ? (plan as any).synthesis_sources as string[] : [];
+    for (const s of sources) {
+      coveredByPlanKeys.add(topicKey(s));
+      // Also try canonical resolution so partial matches work
+      coveredByPlanKeys.add(findCanonicalTopicKey(topicKey(s), Object.keys(memory.topics)));
+    }
+  }
+
+  // Build set of keys explicitly marked informational (Prometheus says: "read but no plan needed")
+  const informationalKeys = new Set<string>();
+  const informationalList = Array.isArray((analysisRoot as any)?.informational_topics_consumed)
+    ? (analysisRoot as any).informational_topics_consumed as string[]
+    : [];
+  for (const t of informationalList) {
+    informationalKeys.add(topicKey(t));
+    informationalKeys.add(findCanonicalTopicKey(topicKey(t), Object.keys(memory.topics)));
+  }
 
   for (const rawTopic of researchTopics) {
     const key = topicKey(rawTopic);
@@ -915,25 +937,15 @@ export function detectAndCompleteTopics(
     const entry = memory.topics[key];
     if (entry.status === "completed") continue;
 
-    // A topic is "complete" when:
-    // 1. It has been seen across at least 2 runs (enough accumulation time)
-    // 2. At least one plan has concrete target_files and verification referencing it
-    const topicWords = rawTopic.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-    const matchingPlans = (plans || []).filter(plan => {
-      const task = String(plan?.task || plan?.title || "").toLowerCase();
-      const hasFiles = Array.isArray(plan?.target_files) && plan.target_files.length > 0;
-      const hasVerification = Boolean(plan?.verification);
-      return topicWords.some(w => task.includes(w)) && hasFiles && hasVerification;
-    });
+    const coveredByPlan = coveredByPlanKeys.has(key);
+    const isInformational = informationalKeys.has(key);
 
-    if (entry.runCount >= 2 && matchingPlans.length > 0) {
-      // Generate concise summary from accumulated knowledge
+    if (entry.runCount >= 1 && (coveredByPlan || isInformational)) {
       const fragmentSummary = entry.knowledgeFragments.slice(-5).join("; ");
-      const planSummary = matchingPlans.slice(0, 3).map(p => String(p?.task || p?.title || "")).join("; ");
+      const reason = coveredByPlan ? "plan produced" : "informational (no plan needed)";
       entry.status = "completed";
       entry.lastUpdatedAt = now;
-      entry.completedSummary = `Topic researched over ${entry.runCount} runs. Key findings: ${fragmentSummary.slice(0, 300)}. Plans produced: ${planSummary.slice(0, 200)}`;
-      // Clear fragments to save space — summary replaces them
+      entry.completedSummary = `Completed after ${entry.runCount} run(s) — reason: ${reason}. Fragments: ${fragmentSummary.slice(0, 300)}`;
       entry.knowledgeFragments = [];
       completedThisRun.push(key);
     }
@@ -2782,11 +2794,14 @@ The JSON block must contain all of the following fields:
     "premortem": null,
     "capacityDelta": <number ∈ [-1.0, 1.0]>,
     "requestROI": <positive number>,
-    "estimatedExecutionTokens": <positive integer>
-  }]
+    "estimatedExecutionTokens": <positive integer>,
+    "synthesis_sources": ["<synthesis topic name this plan directly addresses — omit if not research-driven>"]
+  }],
+  "informational_topics_consumed": ["<synthesis topic name you read but no plan is needed — already implemented or purely contextual>"]
 }
 Do NOT omit target_files, before_state, after_state, scope, acceptance_criteria, capacityDelta, or requestROI from any plan entry.
 Do NOT omit estimatedExecutionTokens from any plan entry.
+For EVERY synthesis topic from the RESEARCH INTELLIGENCE section: if you produce a plan for it, list it in that plan's synthesis_sources[]. If you read it but no plan is needed (already done or purely informational), list it in informational_topics_consumed[]. This enables the system to know when all research is consumed and schedule a new Scout run.
 Do NOT emit requestBudget with _fallback:true — compute byWave and byRole from the actual plan list.
 Keep diagnostic findings in analysis or strategicNarrative and include only actionable redesign work in plans.
 Wrap the JSON companion with markers:
@@ -5027,7 +5042,7 @@ Mandatory requirements:
   try {
     if (researchTopicsList.length > 0 && Array.isArray(analysis.plans)) {
       topicMemory = updateTopicKnowledge(topicMemory, researchTopicsList, analysis.plans, researchSynthesisData);
-      const completion = detectAndCompleteTopics(topicMemory, researchTopicsList, analysis.plans);
+      const completion = detectAndCompleteTopics(topicMemory, researchTopicsList, analysis.plans, analysis);
       topicMemory = completion.memory;
       await saveTopicMemory(stateDir, topicMemory);
 
