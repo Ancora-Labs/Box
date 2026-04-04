@@ -622,6 +622,26 @@ describe("persistGraphDiagnostics — guaranteed parseable NDJSON contract", () 
     assert.ok(typeof entry.freshness.expiresAt === "string" && entry.freshness.expiresAt.length > 0);
   });
 
+  it("negative path: meta cannot override diagnostics contract fields", async () => {
+    const subDir = await fs.mkdtemp(path.join(tmpDir, "ndjson-meta-"));
+    const resolution = resolveDependencyGraph([makeTask("safe-1")]);
+    await persistGraphDiagnostics(subDir, resolution, {
+      jsonlSchema: "tampered.schema",
+      recordType: "tampered_type",
+      schemaVersion: 9999,
+      freshness: { status: "stale", staleAfterMs: 1 },
+      correlationId: "allowed-correlation",
+    });
+
+    const raw = await fs.readFile(path.join(subDir, "dependency_graph_diagnostics.json"), "utf8");
+    const entry = JSON.parse(raw.trim().split("\n")[0]);
+    assert.equal(entry.jsonlSchema, GRAPH_DIAGNOSTICS_JSONL_SCHEMA);
+    assert.equal(entry.recordType, "dependency_graph_diagnostic");
+    assert.equal(entry.schemaVersion, GRAPH_DIAGNOSTICS_SCHEMA_VERSION);
+    assert.equal(entry.freshness.status, "fresh");
+    assert.equal(entry.correlationId, "allowed-correlation");
+  });
+
   it("NEGATIVE PATH: each independently-parsed line does not depend on prior lines", async () => {
     // Simulate reading only the second line (as if the first was corrupted/missing).
     const subDir = await fs.mkdtemp(path.join(tmpDir, "ndjson-independent-"));

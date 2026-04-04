@@ -25,11 +25,15 @@ import {
   buildBudgetFromConfig,
   buildPolicyImpactByInterventionId,
   OPTIMIZER_STATUS,
+  OPTIMIZER_LOG_JSONL_SCHEMA,
+  OPTIMIZER_LOG_RECORD_TYPE,
 } from "./intervention_optimizer.js";
 import {
   resolveDependencyGraph,
   persistGraphDiagnostics,
   GRAPH_STATUS,
+  GRAPH_DIAGNOSTICS_JSONL_SCHEMA,
+  GRAPH_DIAGNOSTICS_RECORD_TYPE,
 } from "./dependency_graph_resolver.js";
 import { dualPassCriticRepair } from "./plan_critic.js";
 import { compileAcceptanceCriteria, enrichPlansWithAC } from "./ac_compiler.js";
@@ -502,17 +506,55 @@ async function readLatestJsonlRecord(filePath: string): Promise<any | null> {
   return null;
 }
 
+function isDiagnosticsRecordContractValid(
+  record: any,
+  expectedSchema: string,
+  expectedRecordType: string,
+): boolean {
+  if (!record || typeof record !== "object") return false;
+  if (record.jsonlSchema !== expectedSchema) return false;
+  if (record.recordType !== expectedRecordType) return false;
+
+  const freshness = record.freshness && typeof record.freshness === "object"
+    ? record.freshness
+    : null;
+  if (!freshness) return false;
+
+  const staleAfterMsRaw = Number(freshness.staleAfterMs);
+  if (!Number.isFinite(staleAfterMsRaw) || staleAfterMsRaw <= 0) return false;
+
+  const timestampRaw = String(
+    record.savedAt
+    || record.persistedAt
+    || record.recordedAt
+    || record.generatedAt
+    || "",
+  ).trim();
+  const timestampMs = timestampRaw ? new Date(timestampRaw).getTime() : NaN;
+  return Number.isFinite(timestampMs);
+}
+
 async function buildDiagnosticsFreshnessPromptSection(stateDir: string): Promise<string> {
   const diagnostics = [
-    { label: "intervention_optimizer", file: "intervention_optimizer_log.jsonl" },
-    { label: "dependency_graph", file: "dependency_graph_diagnostics.json" },
+    {
+      label: "intervention_optimizer",
+      file: "intervention_optimizer_log.jsonl",
+      jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+      recordType: OPTIMIZER_LOG_RECORD_TYPE,
+    },
+    {
+      label: "dependency_graph",
+      file: "dependency_graph_diagnostics.json",
+      jsonlSchema: GRAPH_DIAGNOSTICS_JSONL_SCHEMA,
+      recordType: GRAPH_DIAGNOSTICS_RECORD_TYPE,
+    },
   ];
 
   const lines: string[] = [];
   for (const item of diagnostics) {
     const filePath = path.join(stateDir, item.file);
     const latest = await readLatestJsonlRecord(filePath);
-    if (!latest || typeof latest !== "object") {
+    if (!isDiagnosticsRecordContractValid(latest, item.jsonlSchema, item.recordType)) {
       lines.push(`- ${item.label}: missing_or_unparseable (${item.file})`);
       continue;
     }
@@ -525,7 +567,10 @@ async function buildDiagnosticsFreshnessPromptSection(stateDir: string): Promise
       || "",
     ).trim();
     const recordedAtMs = recordedAtRaw ? new Date(recordedAtRaw).getTime() : NaN;
-    const staleAfterMs = Number((latest as any)?.freshness?.staleAfterMs || DIAGNOSTICS_FRESHNESS_MAX_AGE_MS);
+    const staleAfterMsRaw = Number((latest as any)?.freshness?.staleAfterMs);
+    const staleAfterMs = Number.isFinite(staleAfterMsRaw) && staleAfterMsRaw > 0
+      ? staleAfterMsRaw
+      : DIAGNOSTICS_FRESHNESS_MAX_AGE_MS;
     const ageMs = Number.isFinite(recordedAtMs) ? (Date.now() - recordedAtMs) : Number.POSITIVE_INFINITY;
     const stale = !Number.isFinite(recordedAtMs) || ageMs > staleAfterMs;
     const ageMinutes = Number.isFinite(ageMs) ? Math.max(0, Math.round(ageMs / 60_000)) : -1;

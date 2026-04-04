@@ -31,6 +31,7 @@ import {
   OPTIMIZER_LOG_SCHEMA_VERSION,
   OPTIMIZER_LOG_JSONL_SCHEMA,
   OPTIMIZER_LOG_FRESHNESS_MS,
+  OPTIMIZER_LOG_RECORD_TYPE,
   BUDGET_UNIT,
   INTERVENTION_SCHEMA,
   validateIntervention,
@@ -869,7 +870,7 @@ describe("persistOptimizerLog — parse-safe JSONL + freshness metadata", () => 
 
       const entry = JSON.parse(lines[0]);
       assert.equal(entry.jsonlSchema, OPTIMIZER_LOG_JSONL_SCHEMA);
-      assert.equal(entry.recordType, "intervention_optimizer_diagnostic");
+      assert.equal(entry.recordType, OPTIMIZER_LOG_RECORD_TYPE);
       assert.equal(entry.schemaVersion, OPTIMIZER_LOG_SCHEMA_VERSION);
       assert.equal(entry.freshness.status, "fresh");
       assert.equal(entry.freshness.staleAfterMs, OPTIMIZER_LOG_FRESHNESS_MS);

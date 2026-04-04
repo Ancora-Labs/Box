@@ -193,6 +193,7 @@ export const SPARSE_DATA_THRESHOLD = 3;
 export const OPTIMIZER_LOG_SCHEMA_VERSION = 1;
 export const OPTIMIZER_LOG_JSONL_SCHEMA = "box.intervention_optimizer_log.v2";
 export const OPTIMIZER_LOG_FRESHNESS_MS = 6 * 60 * 60 * 1000;
+export const OPTIMIZER_LOG_RECORD_TYPE = "intervention_optimizer_diagnostic";
 
 // ── Intervention schema ───────────────────────────────────────────────────────
 
@@ -1023,7 +1024,7 @@ export async function persistOptimizerLog(stateDir, result) {
     const expiresAt = new Date(Date.now() + OPTIMIZER_LOG_FRESHNESS_MS).toISOString();
     const entry = JSON.stringify({
       jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
-      recordType: "intervention_optimizer_diagnostic",
+      recordType: OPTIMIZER_LOG_RECORD_TYPE,
       schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
       savedAt,
       freshness: {
