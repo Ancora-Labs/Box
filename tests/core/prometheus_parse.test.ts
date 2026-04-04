@@ -1329,6 +1329,7 @@ describe("buildDriftDebtTasks — quality gate contract compliance", () => {
       deprecatedTokenRefs: [],
     };
     const [task] = buildDriftDebtTasks(report);
+    assert.ok(Array.isArray(task.implementationEvidence) && task.implementationEvidence.length > 0);
     const result = validatePlanContract(task);
     const criticalViolations = result.violations.filter((v: any) => v.severity === "critical");
     assert.equal(
@@ -1346,6 +1347,7 @@ describe("buildDriftDebtTasks — quality gate contract compliance", () => {
       ],
     };
     const [task] = buildDriftDebtTasks(report);
+    assert.ok(Array.isArray(task.implementationEvidence) && task.implementationEvidence.length > 0);
     const result = validatePlanContract(task);
     const criticalViolations = result.violations.filter((v: any) => v.severity === "critical");
     assert.equal(

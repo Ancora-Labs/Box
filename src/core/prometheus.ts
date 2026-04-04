@@ -2962,6 +2962,9 @@ export function buildDriftDebtTasks(
       capacityDelta: 0.05,
       requestROI: 1.2,
       leverage_rank: ["quality"],
+      implementationEvidence: [
+        `architecture_drift report lists stale reference(s) in ${doc}`,
+      ],
     });
   }
 
@@ -3005,6 +3008,9 @@ export function buildDriftDebtTasks(
       capacityDelta: 0.05,
       requestROI: 1.2,
       leverage_rank: ["quality"],
+      implementationEvidence: [
+        `architecture_drift report lists deprecated token usage(s) in ${doc}`,
+      ],
     });
   }
 
