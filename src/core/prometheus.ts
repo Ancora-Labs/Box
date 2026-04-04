@@ -41,6 +41,9 @@ import {
   validateLeadershipContract,
   LEADERSHIP_CONTRACT_TYPE,
   TRUST_BOUNDARY_ERROR,
+  filterMemoryEntriesByTrust,
+  isPrivilegedMemoryRequester,
+  MEMORY_TRUST_LEVEL,
 } from "./trust_boundary.js";
 import {
   validateAllPlans,
@@ -2177,6 +2180,112 @@ export function hasPrometheusRuntimeContractSignals(parsed: unknown): boolean {
   return generatedAt.length > 0 && keyFindings.length > 0;
 }
 
+export const CYCLE_PROOF_SEAM_KEYS = Object.freeze(["prometheus", "athena", "worker"] as const);
+
+export function validateCycleProofEvidenceSeams(artifact: unknown): {
+  ok: boolean;
+  cycleId: string;
+  seamChecks: Record<string, { pass: boolean; failReasons: string[] }>;
+  failReasons: string[];
+} {
+  const failReasons: string[] = [];
+  if (!artifact || typeof artifact !== "object") {
+    return {
+      ok: false,
+      cycleId: "",
+      seamChecks: {},
+      failReasons: ["cycle_proof_evidence must be an object"],
+    };
+  }
+  const payload = artifact as Record<string, unknown>;
+  const cycleId = String(payload.cycleId ?? "").trim();
+  if (!cycleId) failReasons.push("cycle_proof_evidence.cycleId missing");
+
+  const seams = payload.seams && typeof payload.seams === "object"
+    ? payload.seams as Record<string, unknown>
+    : null;
+  const checks = seams?.checks && typeof seams.checks === "object"
+    ? seams.checks as Record<string, unknown>
+    : null;
+  if (!checks) failReasons.push("cycle_proof_evidence.seams.checks missing");
+
+  const seamChecks: Record<string, { pass: boolean; failReasons: string[] }> = {};
+  for (const key of CYCLE_PROOF_SEAM_KEYS) {
+    const seam = checks?.[key] && typeof checks[key] === "object"
+      ? checks[key] as Record<string, unknown>
+      : null;
+    if (!seam) {
+      failReasons.push(`cycle_proof_evidence.seams.checks.${key} missing`);
+      seamChecks[key] = { pass: false, failReasons: [`${key} seam check missing`] };
+      continue;
+    }
+    const pass = seam.pass === true;
+    const seamFailReasons = Array.isArray(seam.failReasons)
+      ? seam.failReasons.map((reason) => String(reason || "").trim()).filter(Boolean)
+      : [];
+    if (seam.pass !== true && seam.pass !== false) {
+      failReasons.push(`cycle_proof_evidence.seams.checks.${key}.pass must be boolean`);
+    }
+    if (!pass && seamFailReasons.length === 0) {
+      failReasons.push(`cycle_proof_evidence.seams.checks.${key}.failReasons missing`);
+    }
+    if (!pass && seamFailReasons.length > 0) {
+      failReasons.push(...seamFailReasons.map((reason) => `${key}: ${reason}`));
+    }
+    seamChecks[key] = { pass, failReasons: seamFailReasons };
+  }
+
+  return {
+    ok: failReasons.length === 0,
+    cycleId,
+    seamChecks,
+    failReasons,
+  };
+}
+
+export function buildTrustedMemoryShortlist(
+  knowledgeMemory: any,
+  opts: { requestedBy?: string; includeLowTrust?: boolean } = {},
+): {
+  lessons: any[];
+  promptHints: any[];
+  droppedLowTrustLessons: number;
+  droppedLowTrustHints: number;
+} {
+  const requestedBy = String(opts.requestedBy || "");
+  const privilegedCaller = isPrivilegedMemoryRequester(requestedBy);
+  const includeLowTrust = opts.includeLowTrust === true && privilegedCaller;
+  const lessons = Array.isArray(knowledgeMemory?.lessons) ? knowledgeMemory.lessons : [];
+  const promptHints = Array.isArray(knowledgeMemory?.promptHints) ? knowledgeMemory.promptHints : [];
+
+  const filteredLessons = filterMemoryEntriesByTrust(lessons, {
+    includeLowTrust,
+    privilegedCaller,
+  });
+  const filteredHints = filterMemoryEntriesByTrust(promptHints, {
+    includeLowTrust,
+    privilegedCaller,
+  });
+
+  const lessonShortlist = buildRankedLessonShortlists(filteredLessons.selected, { limit: 10 });
+  const rankedLessons = lessonShortlist.combinedTop10.slice(0, 10);
+  const rankedHints = filteredHints.selected
+    .slice(0, 20)
+    .sort((a, b) => {
+      const aWeight = a?.trust?.level === MEMORY_TRUST_LEVEL.HIGH ? 3 : (a?.trust?.level === MEMORY_TRUST_LEVEL.MEDIUM ? 2 : 1);
+      const bWeight = b?.trust?.level === MEMORY_TRUST_LEVEL.HIGH ? 3 : (b?.trust?.level === MEMORY_TRUST_LEVEL.MEDIUM ? 2 : 1);
+      return bWeight - aWeight;
+    })
+    .slice(0, 5);
+
+  return {
+    lessons: rankedLessons,
+    promptHints: rankedHints,
+    droppedLowTrustLessons: filteredLessons.droppedLowTrustCount,
+    droppedLowTrustHints: filteredHints.droppedLowTrustCount,
+  };
+}
+
 function hasValidParserContractFields(parsed: any): boolean {
   if (!parsed || typeof parsed !== "object") return false;
   const rawHealth = String(parsed.projectHealth ?? "").trim().toLowerCase();
@@ -3630,6 +3739,8 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
   // ── Load accumulated topic memory ─────────────────────────────────────────
   let topicMemory = await loadTopicMemory(stateDir);
   let topicMemorySection = "";
+  let trustedMemorySection = "";
+  let cycleProofSection = "";
   try {
     topicMemorySection = buildTopicMemoryPromptSection(topicMemory);
     const activeCount = Object.values(topicMemory.topics).filter(t => t.status === "active").length;
@@ -3641,6 +3752,52 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
     }
   } catch {
     // Non-fatal — proceed without topic memory.
+  }
+
+  try {
+    const knowledgeMemory = await readJson(path.join(stateDir, "knowledge_memory.json"), null);
+    const memoryShortlist = buildTrustedMemoryShortlist(knowledgeMemory, {
+      requestedBy,
+      includeLowTrust: options.includeLowTrustMemory === true,
+    });
+    if (memoryShortlist.lessons.length > 0 || memoryShortlist.promptHints.length > 0) {
+      const lessonLines = memoryShortlist.lessons.map((entry: any, index: number) => {
+        const trustLevel = String(entry?.trust?.level || MEMORY_TRUST_LEVEL.MEDIUM);
+        return `${index + 1}. ${String(entry?.lesson || "").trim()} [trust=${trustLevel}]`;
+      }).filter((line: string) => /\S/.test(line));
+      const hintLines = memoryShortlist.promptHints.map((entry: any, index: number) => {
+        const trustLevel = String(entry?.trust?.level || MEMORY_TRUST_LEVEL.MEDIUM);
+        return `${index + 1}. ${String(entry?.hint || "").trim()} [trust=${trustLevel}]`;
+      }).filter((line: string) => /\S/.test(line));
+      trustedMemorySection = `\n\n## TRUST-FILTERED KNOWLEDGE MEMORY\nLessons:\n${lessonLines.length > 0 ? lessonLines.join("\n") : "- (none)"}\n\nPrompt hints:\n${hintLines.length > 0 ? hintLines.join("\n") : "- (none)"}`;
+    }
+    if (memoryShortlist.droppedLowTrustLessons > 0 || memoryShortlist.droppedLowTrustHints > 0) {
+      await appendProgress(
+        config,
+        `[PROMETHEUS][MEMORY_TRUST] filtered low-trust entries lessons=${memoryShortlist.droppedLowTrustLessons} hints=${memoryShortlist.droppedLowTrustHints} includeLowTrust=${options.includeLowTrustMemory === true && isPrivilegedMemoryRequester(requestedBy)}`
+      );
+    }
+  } catch (memoryErr) {
+    await appendProgress(
+      config,
+      `[PROMETHEUS][WARN] Failed to load trust-filtered knowledge memory: ${String((memoryErr as any)?.message || memoryErr)}`
+    );
+  }
+
+  try {
+    const cycleProofEvidence = await readJson(path.join(stateDir, "cycle_proof_evidence.json"), null);
+    const seamValidation = validateCycleProofEvidenceSeams(cycleProofEvidence);
+    if (!seamValidation.ok) {
+      await appendProgress(
+        config,
+        `[PROMETHEUS][CYCLE_PROOF] rejected incomplete cycle_proof_evidence artifact: ${seamValidation.failReasons.slice(0, 5).join("; ")}`
+      );
+    } else {
+      const failedSeams = CYCLE_PROOF_SEAM_KEYS.filter((key) => seamValidation.seamChecks[key]?.pass !== true);
+      cycleProofSection = `\n\n## CYCLE PROOF EVIDENCE\ncycleId=${seamValidation.cycleId}\nseamStatus=${failedSeams.length === 0 ? "all-pass" : `failed(${failedSeams.join(",")})`}`;
+    }
+  } catch {
+    // Optional signal — proceed without cycle proof evidence section.
   }
 
   // ── Extract behavior patterns from postmortems ────────────────────────────
@@ -3909,6 +4066,8 @@ Use this data to produce evidence-backed plans, not vague strategic recommendati
 
   // Topic memory (compact)
   if (topicMemorySection) cycleDeltaParts.push(topicMemorySection);
+  if (trustedMemorySection) cycleDeltaParts.push(trustedMemorySection);
+  if (cycleProofSection) cycleDeltaParts.push(cycleProofSection);
 
   // Behavior patterns from postmortems
   if (behaviorPatternsSection) cycleDeltaParts.push(behaviorPatternsSection);
@@ -3930,6 +4089,8 @@ Use this data to produce evidence-backed plans, not vague strategic recommendati
     [
       section("research-intelligence", researchTopicsList.length > 0 ? cycleDeltaParts.find(p => p.startsWith("## RESEARCH INTELLIGENCE AVAILABLE")) || "" : ""),
       section("topic-memory", topicMemorySection || ""),
+      section("trusted-memory", trustedMemorySection || ""),
+      section("cycle-proof", cycleProofSection || ""),
       section("behavior-patterns", behaviorPatternsSection || ""),
       section("postmortem-shortlist", postmortemShortlistSection || ""),
       section("carry-forward", carryForwardSection || ""),
@@ -3983,7 +4144,7 @@ ${compiledCycleDelta}`;
     model: prometheusModel,
     allowAll: true,
     noAskUser: true,
-    maxContinues: undefined
+    maxContinues: undefined,
   });
 
   appendLiveLogSync(stateDir, `\n[copilot_stream_start] ${ts()}\n`);
@@ -4149,7 +4310,7 @@ Mandatory parser fields:
             model: prometheusModel,
             allowAll: true,
             noAskUser: true,
-            maxContinues: undefined
+            maxContinues: undefined,
           });
           appendLiveLogSync(stateDir, `\n[copilot_stream_retry_start] ${ts()}\n`);
           const retryResult = await spawnAsync(command, retryArgs, {
@@ -4258,7 +4419,7 @@ Mandatory requirements:
           model: prometheusModel,
           allowAll: true,
           noAskUser: true,
-          maxContinues: undefined
+          maxContinues: undefined,
         });
         appendLiveLogSync(stateDir, `\n[copilot_stream_retry_start] ${ts()}\n`);
         const retryResult = await spawnAsync(command, retryArgs, {

@@ -237,11 +237,13 @@ export function spawnAsync(command, args, options) {
     const stdoutChunks = [];
     const stderrChunks = [];
     const stdinInput = options.input || null;
+    // Always keep stdin as pipe so we can write '\n' to answer CLI prompts
+    // (e.g. "Do you want to continue?") without restarting the process.
     const child = spawn(command, args, {
       env: options.env,
       cwd: options.cwd,
       windowsHide: true,
-      stdio: [stdinInput ? "pipe" : "ignore", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"]
     });
     if (stdinInput) {
       child.stdin.write(stdinInput);
@@ -253,11 +255,45 @@ export function spawnAsync(command, args, options) {
     const earlyExitMarker: string | undefined = options.earlyExitMarker;
     let earlyExitBuffer = "";
 
+    // autoConfirmPatterns: when stdout matches any of these patterns the process
+    // is asking for user confirmation. We write '\n' (Enter / default Yes) to
+    // stdin so the CLI continues unattended rather than blocking indefinitely.
+    // Patterns cover Copilot CLI's "Do you want to continue?" and similar prompts.
+    const autoConfirmPatterns: RegExp[] = options.autoConfirmPatterns ?? [
+      /do you want to continue/i,
+      /continue\?/i,
+      /press enter to continue/i,
+      /\(y\/n\)/i,
+      /\[y\/N\]/i,
+      /\[Y\/n\]/i,
+    ];
+    const autoConfirm: boolean = options.autoConfirm !== false; // default true
+    let autoConfirmBuffer = "";
+
     child.stdout.on("data", (chunk) => {
       stdoutChunks.push(chunk);
       if (options.onStdout) options.onStdout(chunk);
+
+      const text = chunk.toString("utf8");
+
+      // Auto-answer continuation prompts by sending Enter to stdin.
+      if (autoConfirm && !settled && child.stdin && !child.stdin.destroyed) {
+        autoConfirmBuffer += text;
+        // Keep buffer bounded to last 512 chars — we only need recent output
+        if (autoConfirmBuffer.length > 512) {
+          autoConfirmBuffer = autoConfirmBuffer.slice(-512);
+        }
+        for (const pattern of autoConfirmPatterns) {
+          if (pattern.test(autoConfirmBuffer)) {
+            autoConfirmBuffer = ""; // reset so we don't double-fire
+            try { child.stdin.write("\n"); } catch { /* stdin may have closed */ }
+            break;
+          }
+        }
+      }
+
       if (earlyExitMarker && !settled) {
-        earlyExitBuffer += chunk.toString("utf8");
+        earlyExitBuffer += text;
         if (earlyExitBuffer.includes(earlyExitMarker)) {
           if (settled) return;
           settled = true;

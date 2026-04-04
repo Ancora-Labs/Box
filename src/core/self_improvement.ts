@@ -43,6 +43,11 @@ import {
   prioritizeStaleDebts,
 } from "./carry_forward_ledger.js";
 import { buildRankedLessonShortlists } from "./lesson_halflife.js";
+import {
+  classifyMemoryTrust,
+  filterMemoryEntriesByTrust,
+  isPrivilegedMemoryRequester,
+} from "./trust_boundary.js";
 
 // ── Decision Quality Weights ──────────────────────────────────────────────────
 
@@ -271,6 +276,14 @@ async function loadKnowledgeMemory(stateDir) {
 async function saveKnowledgeMemory(stateDir, memory) {
   memory.lastUpdated = new Date().toISOString();
   await writeJson(path.join(stateDir, "knowledge_memory.json"), memory);
+}
+
+function attachMemoryTrustMetadata(entry: any, opts: { source: string; sourceType?: string; isUserMediated?: boolean; reason?: string }) {
+  const trust = classifyMemoryTrust(opts);
+  return {
+    ...entry,
+    trust,
+  };
 }
 
 function loadPolicyImpactLedger(stateDir: string) {
@@ -601,7 +614,12 @@ export async function collectCycleOutcomes(config) {
 
 async function analyzeWithAI(config, outcomes, knowledgeMemory) {
   const command = config.env?.copilotCliCommand || "copilot";
-  const rankedLessons = buildRankedLessonShortlists(knowledgeMemory.lessons || [], { limit: 10 });
+  const requestedBy = String(config?.runtime?.selfImprovementRequestedBy || "self-improvement");
+  const trustedLessons = filterMemoryEntriesByTrust(knowledgeMemory.lessons || [], {
+    includeLowTrust: config?.runtime?.selfImprovementIncludeLowTrustMemory === true,
+    privilegedCaller: isPrivilegedMemoryRequester(requestedBy),
+  });
+  const rankedLessons = buildRankedLessonShortlists(trustedLessons.selected || [], { limit: 10 });
   const lessonSections = [
     { label: "TOP-10 RECENT", items: rankedLessons.recentTop10 },
     { label: "TOP-10 HIGH-IMPACT", items: rankedLessons.highImpactTop10 },
@@ -1825,8 +1843,16 @@ export async function runSelfImprovementCycle(config) {
   // 4. Store lessons in knowledge memory
   const newLessons = Array.isArray(analysis.lessons) ? analysis.lessons : [];
   for (const lesson of newLessons) {
-    lesson.addedAt = new Date().toISOString();
-    knowledgeMemory.lessons.push(lesson);
+    const enrichedLesson = attachMemoryTrustMetadata({
+      ...lesson,
+      addedAt: new Date().toISOString(),
+    }, {
+      source: String(lesson?.source || "self-improvement"),
+      sourceType: "model",
+      isUserMediated: false,
+      reason: String(lesson?.lesson || ""),
+    });
+    knowledgeMemory.lessons.push(enrichedLesson);
   }
 
   // Cap knowledge memory size
@@ -1837,7 +1863,17 @@ export async function runSelfImprovementCycle(config) {
 
   // Store prompt hints for next cycle
   if (Array.isArray(analysis.promptHints)) {
-    knowledgeMemory.promptHints = analysis.promptHints;
+    knowledgeMemory.promptHints = analysis.promptHints.map((hint) =>
+      attachMemoryTrustMetadata({
+        ...hint,
+        addedAt: new Date().toISOString(),
+      }, {
+        source: String(hint?.targetAgent || "prompt-hint"),
+        sourceType: "user-mediated",
+        isUserMediated: true,
+        reason: String(hint?.reason || hint?.hint || ""),
+      })
+    );
   }
 
   // Store capability gaps — these feed back into Jesus's health audit
@@ -1981,8 +2017,16 @@ export async function runSelfImprovementCycle(config) {
         const policyAdj = deriveReviewerPolicyAdjustment(reviewerMetrics);
         if (policyAdj.lessons.length > 0) {
           for (const lesson of policyAdj.lessons) {
-            lesson.addedAt = new Date().toISOString();
-            knowledgeMemory.lessons.push(lesson);
+            const enrichedLesson = attachMemoryTrustMetadata({
+              ...lesson,
+              addedAt: new Date().toISOString(),
+            }, {
+              source: String(lesson?.source || "reviewer-policy-adjustment"),
+              sourceType: "system",
+              isUserMediated: false,
+              reason: String(lesson?.lesson || ""),
+            });
+            knowledgeMemory.lessons.push(enrichedLesson);
           }
           if (knowledgeMemory.lessons.length > (siConfig.maxReports || 200)) {
             knowledgeMemory.lessons = knowledgeMemory.lessons.slice(-(siConfig.maxReports || 200));

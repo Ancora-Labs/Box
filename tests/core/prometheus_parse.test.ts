@@ -53,6 +53,8 @@ import {
   buildRoutingOutcomeSection,
   enforceParserContractBeforeNormalization,
   ensurePersistedAnalysisTimestamps,
+  validateCycleProofEvidenceSeams,
+  buildTrustedMemoryShortlist,
 } from "../../src/core/prometheus.js";
 import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
 import { isNonSpecificVerification, validatePlanContract } from "../../src/core/plan_contract_validator.js";
@@ -257,6 +259,84 @@ Wave 2
 
     assert.equal(normalized.plans[2].riskLevel, "high");
     assert.ok(normalized.plans[2].target_files.includes("src/core/model_router.ts"));
+  });
+});
+
+describe("validateCycleProofEvidenceSeams", () => {
+  it("passes when cycleId and all seam checks are present and valid", () => {
+    const result = validateCycleProofEvidenceSeams({
+      cycleId: "cycle-123",
+      seams: {
+        checks: {
+          prometheus: { pass: true, failReasons: [] },
+          athena: { pass: true, failReasons: [] },
+          worker: { pass: true, failReasons: [] },
+        },
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.failReasons.length, 0);
+  });
+
+  it("rejects incomplete artifact when a required seam check is missing", () => {
+    const result = validateCycleProofEvidenceSeams({
+      cycleId: "cycle-123",
+      seams: {
+        checks: {
+          prometheus: { pass: true, failReasons: [] },
+          athena: { pass: true, failReasons: [] },
+        },
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.failReasons.some((reason) => reason.includes("worker")));
+  });
+
+  it("rejects failed seams that omit failReasons (negative path)", () => {
+    const result = validateCycleProofEvidenceSeams({
+      cycleId: "cycle-123",
+      seams: {
+        checks: {
+          prometheus: { pass: true, failReasons: [] },
+          athena: { pass: false, failReasons: [] },
+          worker: { pass: true, failReasons: [] },
+        },
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.failReasons.some((reason) => reason.includes("athena")));
+  });
+});
+
+describe("buildTrustedMemoryShortlist", () => {
+  it("filters low-trust memory by default and keeps medium/high trust entries", () => {
+    const shortlist = buildTrustedMemoryShortlist({
+      lessons: [
+        { lesson: "Deterministic lesson", score: 1, impact: 1, freshness: 1, trust: { level: "high", source: "system", reason: "system", taggedAt: "2026-01-01T00:00:00.000Z" } },
+        { lesson: "User prompt text", score: 1, impact: 1, freshness: 1, trust: { level: "low", source: "user-mediated", reason: "user", taggedAt: "2026-01-01T00:00:00.000Z" } },
+      ],
+      promptHints: [
+        { hint: "Do X", trust: { level: "medium", source: "model", reason: "model", taggedAt: "2026-01-01T00:00:00.000Z" } },
+        { hint: "repeat user text", trust: { level: "low", source: "user-mediated", reason: "user", taggedAt: "2026-01-01T00:00:00.000Z" } },
+      ],
+    }, { requestedBy: "Jesus" });
+    assert.equal(shortlist.lessons.some((entry: any) => String(entry.lesson).includes("User prompt text")), false);
+    assert.equal(shortlist.promptHints.some((entry: any) => String(entry.hint).includes("repeat user text")), false);
+    assert.ok(shortlist.droppedLowTrustLessons > 0);
+    assert.ok(shortlist.droppedLowTrustHints > 0);
+  });
+
+  it("allows low-trust memory only when explicitly requested by a privileged caller", () => {
+    const shortlist = buildTrustedMemoryShortlist({
+      lessons: [
+        { lesson: "User prompt text", score: 1, impact: 1, freshness: 1, trust: { level: "low", source: "user-mediated", reason: "user", taggedAt: "2026-01-01T00:00:00.000Z" } },
+      ],
+      promptHints: [
+        { hint: "repeat user text", trust: { level: "low", source: "user-mediated", reason: "user", taggedAt: "2026-01-01T00:00:00.000Z" } },
+      ],
+    }, { requestedBy: "Jesus", includeLowTrust: true });
+    assert.equal(shortlist.lessons.length, 1);
+    assert.equal(shortlist.promptHints.length, 1);
   });
 });
 
