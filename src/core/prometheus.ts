@@ -1986,7 +1986,7 @@ export const PLANNER_HEALTH_ALIASES: Readonly<Record<string, string>> = Object.f
   warning:  "needs-work",
 });
 
-const REQUIRED_PROMETHEUS_HEALTH_VALUES = new Set(["healthy", "degraded", "critical", "needs-work"]);
+const REQUIRED_PROMETHEUS_HEALTH_VALUES = new Set(["healthy", "degraded", "critical", "needs-work", "good"]);
 
 function hasValidParserContractFields(parsed: any): boolean {
   if (!parsed || typeof parsed !== "object") return false;
@@ -2427,7 +2427,7 @@ Security or governance recommendations must explain how they contribute to capac
 You MUST emit a structured JSON companion block at the end of your response.
 The JSON block must contain all of the following fields:
 {
-  "projectHealth": "<good|needs-work|critical>",
+  "projectHealth": "<good|healthy|needs-work|degraded|critical>",
   "totalPackets": <number>,
   "requestBudget": {
     "estimatedPremiumRequestsTotal": 6,
@@ -3800,7 +3800,7 @@ Parser contract diff:
 ${parserDiff}
 
 Mandatory parser fields:
-- projectHealth must be exactly one of: healthy, degraded, critical, needs-work
+- projectHealth must be exactly one of: good, healthy, needs-work, degraded, critical
 - requestBudget.estimatedPremiumRequestsTotal must be present and finite
 - Keep the rest of the plan deterministic and unchanged unless required by these fixes.`;
 

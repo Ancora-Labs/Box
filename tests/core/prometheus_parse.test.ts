@@ -778,7 +778,7 @@ describe("PROMETHEUS_STATIC_SECTIONS", () => {
     assert.ok(content.includes("ACTIONABLE IMPROVEMENT PACKET FORMAT"));
     assert.ok(content.includes("PACKET FIELD ENFORCEMENT RULES"));
     assert.ok(content.includes("===DECISION==="), "should contain JSON output markers");
-    assert.ok(content.includes("\"projectHealth\": \"<good|needs-work|critical>\""));
+    assert.ok(content.includes("\"projectHealth\": \"<good|healthy|needs-work|degraded|critical>\""));
     assert.ok(content.includes("\"estimatedPremiumRequestsTotal\": 6"));
   });
 });
