@@ -53,6 +53,15 @@ export function getLaneForWorkerName(name: unknown, fallback = "implementation")
   return fallback;
 }
 
+export function getSpecialistLaneNames(): string[] {
+  return Object.keys(LANE_WORKER_NAMES).filter((lane) => lane !== "implementation");
+}
+
+export function isSpecialistLane(lane: unknown): boolean {
+  const normalized = String(lane || "").trim().toLowerCase();
+  return normalized.length > 0 && normalized !== "implementation" && normalized in LANE_WORKER_NAMES;
+}
+
 const ATHENA_REVIEW_KIND_TOKENS = Object.freeze([
   "athena",
   "review",

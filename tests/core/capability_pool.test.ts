@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { inferCapabilityTag, selectWorkerForPlan, assignWorkersToPlans, enforceLaneDiversity, computeDispatchMetrics, buildWorkerChain, detectLaneConflicts, recordLaneOutcome, getLaneScore, scoreWorkerTaskFit, selectWorkerByFitScore, buildLanePerformanceFromCycleTelemetry } from "../../src/core/capability_pool.js";
+import { inferCapabilityTag, selectWorkerForPlan, assignWorkersToPlans, enforceLaneDiversity, computeDispatchMetrics, buildWorkerChain, detectLaneConflicts, recordLaneOutcome, getLaneScore, scoreWorkerTaskFit, selectWorkerByFitScore, buildLanePerformanceFromCycleTelemetry, buildLaneTelemetrySignals, computeSpecialistFitThreshold } from "../../src/core/capability_pool.js";
 
 describe("capability_pool", () => {
   describe("inferCapabilityTag", () => {
@@ -709,5 +709,42 @@ describe("capability_pool — buildLanePerformanceFromCycleTelemetry", () => {
       implementation: null,
     } as any);
     assert.deepEqual(ledger, {});
+  });
+});
+
+describe("capability_pool — buildLaneTelemetrySignals", () => {
+  it("extracts completionRate and roi for each lane", () => {
+    const signals = buildLaneTelemetrySignals({
+      quality: { completionRate: 0.75, roi: 2.2 },
+      governance: { completionRate: 0.5, roi: 1.0 },
+    });
+    assert.equal(signals.quality.completionRate, 0.75);
+    assert.equal(signals.quality.roi, 2.2);
+    assert.equal(signals.governance.completionRate, 0.5);
+    assert.equal(signals.governance.roi, 1.0);
+  });
+
+  it("negative path: ignores telemetry rows without numeric completionRate and roi", () => {
+    const signals = buildLaneTelemetrySignals({
+      quality: { completionRate: "bad", roi: 2.2 },
+      governance: { completionRate: 0.5, roi: null },
+    } as any);
+    assert.deepEqual(signals, {});
+  });
+});
+
+describe("capability_pool — computeSpecialistFitThreshold", () => {
+  it("lowers threshold for strong lane telemetry to increase specialist reuse", () => {
+    const adjusted = computeSpecialistFitThreshold(0.7, "quality", {
+      quality: { completionRate: 0.95, roi: 3.0 },
+    });
+    assert.ok(adjusted < 0.7, `expected lowered threshold, got ${adjusted}`);
+  });
+
+  it("raises threshold for weak lane telemetry to reduce specialist overuse", () => {
+    const adjusted = computeSpecialistFitThreshold(0.7, "quality", {
+      quality: { completionRate: 0.2, roi: 0.2 },
+    });
+    assert.ok(adjusted > 0.7, `expected raised threshold, got ${adjusted}`);
   });
 });

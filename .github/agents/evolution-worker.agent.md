@@ -80,14 +80,30 @@ If blocked:
 3. Propose the smallest unblocking action.
 4. Mark status as blocked with evidence.
 
+## Git Workflow (REQUIRED for every implementation task)
+
+After all edits pass lint/tests/build, you MUST create a PR before reporting done:
+
+1. Create a feature branch: `git checkout -b evolution/<short-slug>`
+2. Stage all changes: `git add -A`
+3. Commit: `git commit -m "<concise description>"`
+4. Push: `git push -u origin evolution/<short-slug>`
+5. Open PR: `gh pr create --base main --head evolution/<short-slug> --title "<title>" --body "<summary>"`
+6. Record the PR URL as `BOX_PR_URL=<url>`
+
+If `gh pr create` fails, try `gh auth status` to verify CLI access and retry once.
+Do NOT skip this step or report `api:blocked` without attempting it.
+
 ## Reporting
 
 Always end your response with:
 
 ```
 BOX_STATUS=done | partial | blocked
+BOX_PR_URL=<https://github.com/...>   (REQUIRED — push a branch and open a real PR)
 BOX_BRANCH=<branch>
 BOX_FILES_TOUCHED=src/file1.js,src/file2.js
+BOX_ACCESS=repo:ok;files:ok;tools:ok;api:<ok|blocked>
 
 ===VERIFICATION_REPORT===
 acceptance criterion 1: PASS/FAIL — evidence

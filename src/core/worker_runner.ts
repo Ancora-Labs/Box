@@ -1208,11 +1208,12 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   const parsed: ParsedWorkerResponse = parseWorkerResponse(stdout, stderr);
 
-  // Soft-fail policy: if only API access is blocked for evolution-worker,
-  // do not stall the whole cycle. Keep evidence in summary and continue.
+  // Soft-fail policy: if only API access is blocked for any worker,
+  // attempt an orchestrator-side recovery: commit the dirty working tree to a
+  // feature branch and open a PR using the host process's git/gh access.
+  // This prevents work being silently discarded when the subagent's CLI is blocked.
   if (
     parsed.status === "blocked"
-    && String(roleName || "").toLowerCase() === "evolution-worker"
     && Array.isArray(parsed.blockedAccessScopes)
     && parsed.blockedAccessScopes.length === 1
     && String(parsed.blockedAccessScopes[0] || "") === "api"
@@ -1220,6 +1221,35 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     parsed.status = "partial";
     parsed.summary = `[ACCESS SOFTENED] api-only access block downgraded to partial to avoid cycle stall\n${parsed.summary}`;
     await appendProgress(config, `[WORKER:${roleName}] ACCESS_SOFTENED api-only block → partial (non-blocking)`);
+
+    // Recovery: if the worker left uncommitted changes, commit and push them here.
+    try {
+      const cwd = String(config.rootDir || process.cwd());
+      const statusResult = await spawnAsync("git", ["status", "--porcelain"], { cwd }) as SpawnAsyncResult;
+      const isDirty = String(statusResult?.stdout || "").trim().length > 0;
+      if (isDirty && !parsed.prUrl) {
+        const slug = String(roleName || "worker").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+        const ts = Date.now();
+        const branch = `recovery/${slug}-${ts}`;
+        await spawnAsync("git", ["checkout", "-b", branch], { cwd }) as SpawnAsyncResult;
+        await spawnAsync("git", ["add", "-A"], { cwd }) as SpawnAsyncResult;
+        const commitMsg = `chore: ${roleName} changes (api-blocked orchestrator recovery)`;
+        await spawnAsync("git", ["commit", "-m", commitMsg], { cwd }) as SpawnAsyncResult;
+        await spawnAsync("git", ["push", "-u", "origin", branch], { cwd }) as SpawnAsyncResult;
+        const prTitle = `[${roleName}] api-blocked recovery — automated commit`;
+        const prBody = `Orchestrator auto-committed uncommitted changes after worker reported api:blocked.\n\nOriginal task: ${String(instruction.task || "").slice(0, 200)}`;
+        const prResult = await spawnAsync("gh", ["pr", "create", "--base", "main", "--head", branch, "--title", prTitle, "--body", prBody], { cwd }) as SpawnAsyncResult;
+        const prUrl = String(prResult?.stdout || "").trim().match(/https:\/\/\S+/)?.[0] || null;
+        if (prUrl) {
+          parsed.prUrl = prUrl;
+          parsed.summary = `[ACCESS RECOVERY] orchestrator opened PR from dirty tree: ${prUrl}\n${parsed.summary}`;
+          await appendProgress(config, `[WORKER:${roleName}] ACCESS_RECOVERY pr-opened branch=${branch} pr=${prUrl}`);
+        }
+      }
+    } catch (recoveryErr) {
+      // Recovery is best-effort — never block the cycle on git/gh failures
+      await appendProgress(config, `[WORKER:${roleName}] ACCESS_RECOVERY failed (non-fatal): ${String((recoveryErr as Error)?.message || recoveryErr).slice(0, 120)}`).catch(() => {});
+    }
   }
 
   // If access was reported as blocked, persist a structured escalation (non-critical)

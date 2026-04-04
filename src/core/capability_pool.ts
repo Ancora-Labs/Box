@@ -27,6 +27,13 @@ export interface LaneOutcome {
 
 export type LanePerformanceLedger = Record<string, LaneOutcome>;
 
+export interface LaneTelemetrySignal {
+  completionRate: number;
+  roi: number;
+}
+
+export type LaneTelemetrySignalMap = Record<string, LaneTelemetrySignal>;
+
 /**
  * Record a single worker outcome for a lane.
  * Returns a **new** ledger object — the input is never mutated.
@@ -544,6 +551,23 @@ export function buildLanePerformanceFromCycleTelemetry(telemetry: unknown): Lane
   return lanePerformance;
 }
 
+export function buildLaneTelemetrySignals(telemetry: unknown): LaneTelemetrySignalMap {
+  if (!telemetry || typeof telemetry !== "object") return {};
+  const signals: LaneTelemetrySignalMap = {};
+  for (const [lane, raw] of Object.entries(telemetry as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as Record<string, unknown>;
+    if (typeof entry.completionRate !== "number" || !Number.isFinite(entry.completionRate)) continue;
+    if (typeof entry.roi !== "number" || !Number.isFinite(entry.roi)) continue;
+    const completionRateRaw = entry.completionRate;
+    const roiRaw = entry.roi;
+    const completionRate = Math.max(0, Math.min(1, Math.round(completionRateRaw * 1000) / 1000));
+    const roi = Math.max(0, Math.round(roiRaw * 1000) / 1000);
+    signals[lane] = { completionRate, roi };
+  }
+  return signals;
+}
+
 /**
  * Convert a completion-yield ROI value to a Laplace-compatible lane performance
  * score in [0, 1].
@@ -563,4 +587,23 @@ export function buildLanePerformanceFromCycleTelemetry(telemetry: unknown): Lane
 export function roiToLaneScore(roi: number): number {
   if (!Number.isFinite(roi) || roi <= 0) return 0.5;
   return Math.min(1.0, Math.round((roi / 2) * 1000) / 1000);
+}
+
+export function computeSpecialistFitThreshold(
+  baseThreshold: number,
+  lane: string,
+  telemetrySignals?: LaneTelemetrySignalMap
+): number {
+  const safeBase = Number.isFinite(baseThreshold) ? Math.max(0, Math.min(1, baseThreshold)) : 0.65;
+  if (!lane || !telemetrySignals || !telemetrySignals[lane]) return safeBase;
+
+  const signal = telemetrySignals[lane];
+  const roiScore = roiToLaneScore(signal.roi);
+  const completionScore = Math.max(0, Math.min(1, signal.completionRate));
+  const blendedSignal = (roiScore * 0.6) + (completionScore * 0.4);
+
+  // Higher historical signal lowers the threshold to encourage specialist reuse.
+  const adjustment = (blendedSignal - 0.5) * 0.2;
+  const adjusted = safeBase - adjustment;
+  return Math.round(Math.max(0, Math.min(1, adjusted)) * 1000) / 1000;
 }

@@ -50,7 +50,7 @@ import { SLO_TIMESTAMP_CONTRACT, SLO_METRIC } from "./slo_checker.js";
 import { hasVerificationReportEvidence } from "./verification_gate.js";
 import { hasFiniteAthenaOverallScore } from "./athena_reviewer.js";
 import { hasPrometheusRuntimeContractSignals } from "./prometheus.js";
-import { getLaneForWorkerName } from "./role_registry.js";
+import { getLaneForWorkerName, isSpecialistLane } from "./role_registry.js";
 
 // ── Funnel helpers ─────────────────────────────────────────────────────────────
 
@@ -233,6 +233,7 @@ function computeLaneTelemetry(workerResults: Array<{ roleName: string; status: s
   failed: number;
   completionRate: number;
   roi: number;
+  specialistLane: boolean;
 }> {
   if (!Array.isArray(workerResults) || workerResults.length === 0) return {};
   const byLane = new Map<string, { dispatched: number; completed: number; failed: number }>();
@@ -245,7 +246,7 @@ function computeLaneTelemetry(workerResults: Array<{ roleName: string; status: s
     if (status === "error" || status === "failed") current.failed += 1;
     byLane.set(lane, current);
   }
-  const output: Record<string, { dispatched: number; completed: number; failed: number; completionRate: number; roi: number }> = {};
+  const output: Record<string, { dispatched: number; completed: number; failed: number; completionRate: number; roi: number; specialistLane: boolean }> = {};
   for (const [lane, row] of byLane.entries()) {
     const completionRate = row.dispatched > 0 ? row.completed / row.dispatched : 0;
     const roi = row.completed / Math.max(1, row.failed);
@@ -255,6 +256,7 @@ function computeLaneTelemetry(workerResults: Array<{ roleName: string; status: s
       failed: row.failed,
       completionRate: Math.round(completionRate * 1000) / 1000,
       roi: Math.round(roi * 1000) / 1000,
+      specialistLane: isSpecialistLane(lane),
     };
   }
   return output;
