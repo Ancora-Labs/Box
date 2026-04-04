@@ -73,6 +73,20 @@ type ProgressTaskState = {
   error: string | null;
 };
 
+function resolveDispatchBlockReason(workerResult: Record<string, unknown> | null | undefined): string | null {
+  if (!workerResult || typeof workerResult !== "object") return null;
+  const direct = String(workerResult.dispatchBlockReason || "").trim();
+  if (direct.length > 0) return direct;
+  const contract = workerResult.dispatchContract && typeof workerResult.dispatchContract === "object"
+    ? workerResult.dispatchContract as Record<string, unknown>
+    : null;
+  const contractReason = String(contract?.dispatchBlockReason || "").trim();
+  if (contractReason.length > 0) return contractReason;
+  const summary = String(workerResult.summary || workerResult.fullOutput || "");
+  const blockerMatch = summary.match(/BOX_BLOCKER=([^\n\r]+)/i);
+  return blockerMatch ? blockerMatch[1].trim() : null;
+}
+
 type PrChecksResult = {
   ok: boolean;
   passed: boolean;
@@ -1094,8 +1108,16 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
       console.log(`[evolution] Worker status: ${workerResult.status}`);
 
       if (workerResult.status === "blocked" || workerResult.status === "error") {
+        const dispatchBlockReason = resolveDispatchBlockReason(workerResult as Record<string, unknown>);
         taskState.status = "rework";
-        taskState.error = `worker-${workerResult.status}`;
+        taskState.error = workerResult.status === "blocked" && dispatchBlockReason
+          ? `worker-blocked:${dispatchBlockReason}`
+          : `worker-${workerResult.status}`;
+        taskState.worker_result = {
+          status: workerResult.status,
+          dispatchBlockReason,
+          dispatchContract: (workerResult as Record<string, unknown>).dispatchContract || null,
+        };
         await saveProgress(stateDir, progress);
         console.warn(`[evolution] Worker returned ${workerResult.status} — scheduling rework`);
         continue;
@@ -1250,6 +1272,8 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
           status: workerResult.status,
           prUrl: workerResult.prUrl,
           filesTouched: workerResult.filesTouched,
+          dispatchBlockReason: resolveDispatchBlockReason(workerResult as Record<string, unknown>),
+          dispatchContract: (workerResult as Record<string, unknown>).dispatchContract || null,
         };
         progress.tasks[task.task_id] = taskState;
         await saveProgress(stateDir, progress);
@@ -1277,7 +1301,9 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
         prUrl: workerResult.prUrl,
         filesTouched: workerResult.filesTouched,
         verificationPassed: verification.passed,
-        prChecks
+        prChecks,
+        dispatchBlockReason: resolveDispatchBlockReason(workerResult as Record<string, unknown>),
+        dispatchContract: (workerResult as Record<string, unknown>).dispatchContract || null,
       };
       // Persist explicit evidence of which task-named verification targets were executed.
       taskState.verification_passed = verification.passed;

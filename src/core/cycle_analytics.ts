@@ -197,6 +197,10 @@ function hasDoneWorkerWithVerificationEvidence(workerResults: unknown): boolean 
     const row = item as Record<string, unknown>;
     const status = String(row.status || "").toLowerCase();
     if (status !== "done" && status !== "success") return false;
+    const dispatchContract = row.dispatchContract && typeof row.dispatchContract === "object"
+      ? row.dispatchContract as Record<string, unknown>
+      : null;
+    if (dispatchContract?.doneWorkerWithVerificationReportEvidence === true) return true;
     const evidence = String(
       row.verificationEvidence
       || row.verification_report
@@ -208,6 +212,27 @@ function hasDoneWorkerWithVerificationEvidence(workerResults: unknown): boolean 
   });
 }
 
+function hasDispatchBlockReasonOutcomes(workerResults: unknown): boolean {
+  if (!Array.isArray(workerResults)) return false;
+  const blockedRows = workerResults.filter((item) => {
+    if (!item || typeof item !== "object") return false;
+    const row = item as Record<string, unknown>;
+    return String(row.status || "").toLowerCase() === "blocked";
+  }) as Array<Record<string, unknown>>;
+  if (blockedRows.length === 0) return true;
+  return blockedRows.every((row) => {
+    const dispatchContract = row.dispatchContract && typeof row.dispatchContract === "object"
+      ? row.dispatchContract as Record<string, unknown>
+      : null;
+    const reason = String(
+      row.dispatchBlockReason
+      || dispatchContract?.dispatchBlockReason
+      || "",
+    ).trim();
+    return reason.length > 0;
+  });
+}
+
 export function computeRuntimeContractProbe(opts: {
   prometheusAnalysis?: unknown;
   athenaPlanReview?: unknown;
@@ -216,7 +241,8 @@ export function computeRuntimeContractProbe(opts: {
   const prometheusPass = hasPrometheusRuntimeContractSignals(opts.prometheusAnalysis);
   const athenaPass = hasFiniteAthenaOverallScore(opts.athenaPlanReview);
   const workerPass = hasDoneWorkerWithVerificationEvidence(opts.workerResults);
-  const passed = prometheusPass && athenaPass && workerPass;
+  const dispatchReasonPass = hasDispatchBlockReasonOutcomes(opts.workerResults);
+  const passed = prometheusPass && athenaPass && workerPass && dispatchReasonPass;
   return {
     checkedAt: new Date().toISOString(),
     passed,
@@ -224,6 +250,7 @@ export function computeRuntimeContractProbe(opts: {
       prometheusGeneratedAtAndKeyFindings: { pass: prometheusPass },
       athenaPlanReviewOverallScoreFinite: { pass: athenaPass },
       doneWorkerWithVerificationReportEvidence: { pass: workerPass },
+      dispatchBlockReasonOutcomes: { pass: dispatchReasonPass },
     },
   };
 }
@@ -783,7 +810,7 @@ export const HEALTH_SCORE = Object.freeze({
  */
 export const CYCLE_HEALTH_SCHEMA = Object.freeze({
   schemaVersion: 1,
-  required: ["schemaVersion", "lastCycle", "history", "updatedAt"],
+  required: ["schemaVersion", "lastCycle", "history", "updatedAt", "lastDivergence"],
   healthRecord: Object.freeze({
     required: [
       "cycleId",
@@ -802,6 +829,15 @@ export const CYCLE_HEALTH_SCHEMA = Object.freeze({
   /** Same default cap as cycle_analytics — configurable via config.cycleAnalytics.maxHistoryEntries. */
   defaultMaxHistoryEntries: 50,
 });
+
+export interface CycleHealthDivergenceSnapshot {
+  divergenceState: string;
+  pipelineStatus: string;
+  operationalStatus: string;
+  plannerHealth: string;
+  isWarning: boolean;
+  recordedAt: string;
+}
 
 // ── Internal path helper ──────────────────────────────────────────────────────
 
@@ -921,6 +957,13 @@ export async function persistCycleHealth(config, healthRecord) {
     schemaVersion: CYCLE_HEALTH_SCHEMA.schemaVersion,
     lastCycle: null,
     history: [],
+    lastDivergence: null,
+    divergenceState: "unknown",
+    pipelineStatus: "unknown",
+    operationalStatus: "unknown",
+    plannerHealth: "unknown",
+    isWarning: false,
+    recordedAt: null,
     updatedAt: null,
   });
 
@@ -934,7 +977,57 @@ export async function persistCycleHealth(config, healthRecord) {
     schemaVersion: CYCLE_HEALTH_SCHEMA.schemaVersion,
     lastCycle:     healthRecord,
     history,
+    lastDivergence: existing?.lastDivergence ?? null,
+    divergenceState: String(existing?.divergenceState || "unknown"),
+    pipelineStatus: String(existing?.pipelineStatus || "unknown"),
+    operationalStatus: String(existing?.operationalStatus || "unknown"),
+    plannerHealth: String(existing?.plannerHealth || "unknown"),
+    isWarning: existing?.isWarning === true,
+    recordedAt: existing?.recordedAt || null,
     updatedAt:     new Date().toISOString(),
+  });
+}
+
+export async function persistCycleHealthDivergence(
+  config,
+  divergenceSnapshot: CycleHealthDivergenceSnapshot,
+) {
+  const filePath = cycleHealthPath(config);
+  const existing = await readJson(filePath, {
+    schemaVersion: CYCLE_HEALTH_SCHEMA.schemaVersion,
+    lastCycle: null,
+    history: [],
+    lastDivergence: null,
+    divergenceState: "unknown",
+    pipelineStatus: "unknown",
+    operationalStatus: "unknown",
+    plannerHealth: "unknown",
+    isWarning: false,
+    recordedAt: null,
+    updatedAt: null,
+  });
+
+  const nextDivergence = {
+    divergenceState: String(divergenceSnapshot?.divergenceState || "unknown"),
+    pipelineStatus: String(divergenceSnapshot?.pipelineStatus || "unknown"),
+    operationalStatus: String(divergenceSnapshot?.operationalStatus || "unknown"),
+    plannerHealth: String(divergenceSnapshot?.plannerHealth || "unknown"),
+    isWarning: divergenceSnapshot?.isWarning === true,
+    recordedAt: String(divergenceSnapshot?.recordedAt || new Date().toISOString()),
+  };
+
+  await writeJson(filePath, {
+    schemaVersion: CYCLE_HEALTH_SCHEMA.schemaVersion,
+    lastCycle: existing?.lastCycle ?? null,
+    history: Array.isArray(existing?.history) ? existing.history : [],
+    lastDivergence: nextDivergence,
+    divergenceState: nextDivergence.divergenceState,
+    pipelineStatus: nextDivergence.pipelineStatus,
+    operationalStatus: nextDivergence.operationalStatus,
+    plannerHealth: nextDivergence.plannerHealth,
+    isWarning: nextDivergence.isWarning,
+    recordedAt: nextDivergence.recordedAt,
+    updatedAt: new Date().toISOString(),
   });
 }
 

@@ -22,7 +22,7 @@ import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js"
 import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest } from "./daemon_control.js";
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
-import { runPrometheusAnalysis } from "./prometheus.js";
+import { runPrometheusAnalysis, loadTopicMemory, saveTopicMemory, topicKey as prometheusTopicKey, findCanonicalTopicKey } from "./prometheus.js";
 import { runAthenaPlanReview, ATHENA_PLAN_REVIEW_REASON_CODE, hasFiniteAthenaOverallScore } from "./athena_reviewer.js";
 import { runWorkerConversation, isAnalyticsCompletedWorkerStatus } from "./worker_runner.js";
 import { runSelfImprovementCycle, shouldTriggerSelfImprovement } from "./self_improvement.js";
@@ -34,7 +34,7 @@ import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REA
 import { updatePipelineProgress, readPipelineProgress } from "./pipeline_progress.js";
 import { loadEscalationQueue, sortEscalationQueue, processEscalationQueueClosures } from "./escalation_queue.js";
 import { computeCycleSLOs, persistSloMetrics, detectCoupledAlerts } from "./slo_checker.js";
-import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealth, CYCLE_PHASE, computeRuntimeContractProbe } from "./cycle_analytics.js";
+import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealth, persistCycleHealthDivergence, CYCLE_PHASE, computeRuntimeContractProbe } from "./cycle_analytics.js";
 import { computeBaselineRecoveryState, persistBaselineMetrics, PARSER_CONFIDENCE_RECOVERY_THRESHOLD } from "./parser_baseline_recovery.js";
 import { computeDispatchStrictness, loadReplayRegressionState, DISPATCH_STRICTNESS } from "./parser_replay_harness.js";
 import {
@@ -45,7 +45,7 @@ import {
   MIGRATION_REASON
 } from "./schema_registry.js";
 import { runCatastropheDetection, GUARDRAIL_ACTION, isSloCascadingBreachScenario } from "./catastrophe_detector.js";
-import { executeGuardrailsForDetections, isGuardrailActive, readForceCheckpointValidationContract } from "./guardrail_executor.js";
+import { executeGuardrailsForDetections, isGuardrailActive, readForceCheckpointValidationContract, autoRevertSloGuardrailIfResolved } from "./guardrail_executor.js";
 import { evaluateFreezeGate, isFreezeActive } from "./governance_freeze.js";
 import { detectRecurrences, buildRecurrenceEscalations } from "./recurrence_detector.js";
 import { checkClosureSLA } from "./closure_validator.js";
@@ -498,6 +498,8 @@ export interface GovernanceBlockDecision {
   reason: string | null;
   /** Post-block action taken (e.g. "rollback" on canary breach), undefined otherwise. */
   action: "rollback" | undefined;
+  /** Explicit machine-readable dispatch block reason outcome. Mirrors `reason` when blocked, null otherwise. */
+  dispatchBlockReason: string | null;
   /** Dependency graph resolution result. null when the graph was not evaluated. */
   graphResult: Record<string, unknown> | null;
   /** Dispatch cycle identifier carried through for telemetry correlation. */
@@ -552,6 +554,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       blocked: true,
       reason: budgetEligibility.reason,
       action: undefined,
+      dispatchBlockReason: budgetEligibility.reason,
       graphResult: null,
       cycleId,
       budgetEligibility,
@@ -567,6 +570,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
           blocked: true,
           reason: BLOCK_REASON.GUARDRAIL_PAUSE_WORKERS_ACTIVE,
           action: undefined,
+          dispatchBlockReason: BLOCK_REASON.GUARDRAIL_PAUSE_WORKERS_ACTIVE,
           graphResult: null,
           cycleId,
           budgetEligibility,
@@ -604,6 +608,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
           blocked: true,
           reason: `${BLOCK_REASON.GUARDRAIL_FORCE_CHECKPOINT_ACTIVE}:${forceCheckpoint.scenarioId || "unknown_scenario"}`,
           action: undefined,
+          dispatchBlockReason: `${BLOCK_REASON.GUARDRAIL_FORCE_CHECKPOINT_ACTIVE}:${forceCheckpoint.scenarioId || "unknown_scenario"}`,
           graphResult: null,
           cycleId,
           budgetEligibility,
@@ -621,6 +626,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       blocked: true,
       reason: `${BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE}:${freezeStatus.reason}`,
       action: undefined,
+      dispatchBlockReason: `${BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE}:${freezeStatus.reason}`,
       graphResult: null,
       cycleId,
       budgetEligibility,
@@ -642,6 +648,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       blocked: true,
       reason: `${BLOCK_REASON.LINEAGE_CYCLE_DETECTED}:${graphResult.reasonCode}`,
       action: undefined,
+      dispatchBlockReason: `${BLOCK_REASON.LINEAGE_CYCLE_DETECTED}:${graphResult.reasonCode}`,
       graphResult,
       cycleId,
       budgetEligibility,
@@ -676,6 +683,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       blocked: true,
       reason: `${BLOCK_REASON.GOVERNANCE_CANARY_BREACH}:${canaryBreach.reason || "GOVERNANCE_CANARY_BREACH"}`,
       action: "rollback",
+      dispatchBlockReason: `${BLOCK_REASON.GOVERNANCE_CANARY_BREACH}:${canaryBreach.reason || "GOVERNANCE_CANARY_BREACH"}`,
       graphResult,
       rollbackResult,
       cycleId,
@@ -694,13 +702,14 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       maxCriticalOverdue: config?.carryForward?.maxCriticalOverdue,
     });
     if (debtGate.shouldBlock) {
-      return {
-        blocked: true,
-        reason: `${BLOCK_REASON.CRITICAL_DEBT_OVERDUE}:${debtGate.reason}`,
-        action: undefined,
-        graphResult,
-        cycleId,
-        budgetEligibility,
+        return {
+          blocked: true,
+          reason: `${BLOCK_REASON.CRITICAL_DEBT_OVERDUE}:${debtGate.reason}`,
+          action: undefined,
+          dispatchBlockReason: `${BLOCK_REASON.CRITICAL_DEBT_OVERDUE}:${debtGate.reason}`,
+          graphResult,
+          cycleId,
+          budgetEligibility,
         gateIndex: GATE_PRECEDENCE.CARRY_FORWARD_DEBT,
       };
     }
@@ -732,6 +741,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
           blocked: true,
           reason: `${BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED}:${mandatoryDebt.length} high-priority drift debt task(s) remain — ${firstHint}`,
           action: undefined,
+          dispatchBlockReason: `${BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED}:${mandatoryDebt.length} high-priority drift debt task(s) remain — ${firstHint}`,
           graphResult,
           cycleId,
           budgetEligibility,
@@ -764,6 +774,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
         blocked: true,
         reason: `${BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID}:${invalidPlans[0]}`,
         action: undefined,
+        dispatchBlockReason: `${BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID}:${invalidPlans[0]}`,
         graphResult,
         cycleId,
         budgetEligibility,
@@ -789,6 +800,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
         blocked: true,
         reason: `${BLOCK_REASON.DEPENDENCY_READINESS_INCOMPLETE}:${readinessResult.reason}`,
         action: undefined,
+        dispatchBlockReason: `${BLOCK_REASON.DEPENDENCY_READINESS_INCOMPLETE}:${readinessResult.reason}`,
         graphResult,
         cycleId,
         budgetEligibility,
@@ -810,6 +822,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
         blocked: true,
         reason: `${BLOCK_REASON.ROLLING_YIELD_THROTTLE}:yield=${yieldContract.yield.toFixed(2)},window=${yieldContract.windowSize},threshold=${yieldContract.threshold}`,
         action: undefined,
+        dispatchBlockReason: `${BLOCK_REASON.ROLLING_YIELD_THROTTLE}:yield=${yieldContract.yield.toFixed(2)},window=${yieldContract.windowSize},threshold=${yieldContract.threshold}`,
         graphResult,
         cycleId,
         budgetEligibility,
@@ -825,6 +838,7 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
     blocked: false,
     reason: null,
     action: undefined,
+    dispatchBlockReason: null,
     graphResult,
     cycleId,
     budgetEligibility
@@ -1247,7 +1261,7 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
       inputSnapshot: { planCount: plans.length, resumedFromCheckpoint: true, startIndex }
     });
     if (gateDecision.blocked) {
-      const reasonMsg = gateDecision.reason || "pre_dispatch_gate_blocked";
+      const reasonMsg = gateDecision.dispatchBlockReason || gateDecision.reason || "pre_dispatch_gate_blocked";
       await appendProgress(config,
         `[RESUME] Pre-dispatch governance gate blocked resumed dispatch — reason=${reasonMsg}`
       );
@@ -1754,7 +1768,13 @@ async function dispatchWorker(config, plan) {
       summary,
       filesChanged: "",
       raw: summary,
-      verificationEvidence: null
+      verificationEvidence: null,
+      dispatchContract: {
+        doneWorkerWithVerificationReportEvidence: false,
+        dispatchBlockReason: `role_capability_check_failed:${capabilityCheck.code}`,
+        replayClosure: buildReplayClosureEvidence(summary),
+      },
+      dispatchBlockReason: `role_capability_check_failed:${capabilityCheck.code}`,
     };
   }
 
@@ -1779,7 +1799,9 @@ async function dispatchWorker(config, plan) {
     summary: result?.summary || "",
     filesChanged: result?.filesTouched || "",
     raw: String(result?.fullOutput || "").slice(0, 3000),
-    verificationEvidence: result?.verificationEvidence || null
+    verificationEvidence: result?.verificationEvidence || null,
+    dispatchContract: result?.dispatchContract || null,
+    dispatchBlockReason: result?.dispatchContract?.dispatchBlockReason || null,
   };
 
   // Log worker dispatch to live agents log
@@ -2000,54 +2022,61 @@ async function runSingleCycle(config) {
   // ────────────────────────────────────────────────────────────────────────────
   try {
     const stateDir = config.paths?.stateDir || "state";
-    const maxActiveResearchTopics = Number(config.runtime?.scoutMaxActiveTopics ?? 30);
 
     // Read synthesis state
     const synthesisPath = path.join(stateDir, "research_synthesis.json");
-    let synthesisAgeHours = Infinity;
     let synthesisConsumedAt: Date | null = null;
     let synthJson: Record<string, unknown> | null = null;
     try {
       synthJson = await readJson(synthesisPath, null);
-      if (synthJson?.synthesizedAt) {
-        synthesisAgeHours = (Date.now() - new Date(synthJson.synthesizedAt as string).getTime()) / (1000 * 60 * 60);
-      }
       if (synthJson?.lastConsumedAt) {
         synthesisConsumedAt = new Date(synthJson.lastConsumedAt as string);
       }
     } catch { /* ok — file missing means first run, treat as consumed */ }
 
-    // Check active topic count in Prometheus topic memory
-    const topicMemoryPath = path.join(stateDir, "prometheus_topic_memory.json");
-    let activeTopicCount = 0;
-    try {
-      const topicMemory = await readJson(topicMemoryPath, null);
-      if (Array.isArray(topicMemory?.active)) {
-        activeTopicCount = topicMemory.active.length;
-      }
-    } catch { /* ok */ }
-
-    const topicsUnderThreshold = activeTopicCount <= maxActiveResearchTopics;
-
-    // Consumption-triggered: Prometheus wrote lastConsumedAt after the last scout run,
-    // meaning the knowledge was used and needs refreshing before the next cycle.
-    // Also triggers on first run (no synthesis file yet — synthesisAgeHours = Infinity).
+    // Consumption-triggered scout gate:
+    // Scout runs when Prometheus consumed the previous synthesis in a DIFFERENT cycle
+    // from when it was produced (gap > 5 minutes rules out same-cycle consumption).
+    // ALSO triggers when all synthesis topics are marked consumed in topic memory
+    // (every topic either produced a plan or was marked informational by Prometheus).
+    const MIN_CONSUMED_GAP_MS = 5 * 60 * 1000; // 5 minutes
     const synthesisConsumedSinceLastScout =
       synthJson === null || // first run — no synthesis exists yet
       (
         synthesisConsumedAt !== null &&
         synthJson?.synthesizedAt != null &&
         synthesisConsumedAt > new Date(synthJson.synthesizedAt as string) &&
-        synthesisAgeHours >= 1  // guard: synthesis must be at least 1h old to avoid same-cycle double-run
+        (synthesisConsumedAt.getTime() - new Date(synthJson.synthesizedAt as string).getTime()) > MIN_CONSUMED_GAP_MS
       );
 
-    const shouldRunScout = topicsUnderThreshold && synthesisConsumedSinceLastScout;
+    // Check if ALL synthesis topics are now consumed in topic memory
+    let allSynthesisTopicsConsumed = false;
+    let allTopicsConsumedReason = "";
+    try {
+      const synthTopics = Array.isArray((synthJson as any)?.topics) ? (synthJson as any).topics as Array<{ topic: string }> : [];
+      if (synthTopics.length > 0) {
+        const topicMem = await loadTopicMemory(stateDir);
+        const existingKeys = Object.keys(topicMem.topics);
+        const unconsumed = synthTopics.filter(t => {
+          const key = findCanonicalTopicKey(prometheusTopicKey(String(t.topic || "")), existingKeys);
+          return !topicMem.topics[key] || topicMem.topics[key].status !== "completed";
+        });
+        if (unconsumed.length === 0) {
+          allSynthesisTopicsConsumed = true;
+          allTopicsConsumedReason = `all ${synthTopics.length} synthesis topic(s) consumed in topic memory`;
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    const shouldRunScout = synthesisConsumedSinceLastScout || allSynthesisTopicsConsumed;
 
     if (shouldRunScout) {
       const scoutReason = synthJson === null
         ? "first-run (no synthesis exists)"
-        : `consumption-triggered (consumed=${synthesisConsumedAt?.toISOString()}, synthesized=${synthJson.synthesizedAt})`;
-      await appendProgress(config, `[CYCLE] ── Step 1.5: Research Scout (${scoutReason}, activeTopics=${activeTopicCount}) ──`);
+        : allSynthesisTopicsConsumed && !synthesisConsumedSinceLastScout
+          ? `all-topics-consumed (${allTopicsConsumedReason})`
+          : `consumption-triggered (consumed=${synthesisConsumedAt?.toISOString()}, synthesized=${synthJson.synthesizedAt})`;
+      await appendProgress(config, `[CYCLE] ── Step 1.5: Research Scout (${scoutReason}) ──`);
       await appendProgress(config, `[AGENT] ↯↯↯ RESEARCH SCOUT ↯↯↯  req#${_cycleRequests + 1} this cycle`);
       try {
         const scoutResult = await runResearchScout(config);
@@ -2065,9 +2094,7 @@ async function runSingleCycle(config) {
         await appendProgress(config, `[RESEARCH_SCOUT] Failed (non-fatal): ${String((scoutErr as any)?.message || scoutErr)}`);
       }
     } else {
-      const skipReason = !topicsUnderThreshold
-        ? `activeTopics=${activeTopicCount} > threshold=${maxActiveResearchTopics}`
-        : `synthesis not yet consumed (lastConsumedAt=${synthesisConsumedAt?.toISOString() ?? "none"}, synthesizedAt=${synthJson?.synthesizedAt ?? "none"})`;
+      const skipReason = `synthesis not yet fully consumed (lastConsumedAt=${synthesisConsumedAt?.toISOString() ?? "none"}, synthesizedAt=${synthJson?.synthesizedAt ?? "none"}, gap must exceed ${MIN_CONSUMED_GAP_MS / 60000}m OR all synthesis topics consumed in topic memory)`;
       await appendProgress(config, `[CYCLE] Research Scout skipped — ${skipReason}`);
     }
   } catch (scoutGateErr) {
@@ -2564,7 +2591,7 @@ async function runSingleCycle(config) {
         inputSnapshot: { planCount: plans.length, cycleId }
       });
       if (gateDecision.blocked) {
-        const reasonMsg = gateDecision.reason || "pre_dispatch_gate_blocked";
+        const reasonMsg = gateDecision.dispatchBlockReason || gateDecision.reason || "pre_dispatch_gate_blocked";
         await appendProgress(config,
           `[CYCLE] Pre-dispatch governance gate blocked dispatch — reason=${reasonMsg}`
         );
@@ -2783,7 +2810,22 @@ async function runSingleCycle(config) {
 
   const dispatchCheckpoint = await beginDispatchCheckpoint(config, workerBatches, plans.length);
   let workersDone = 0;
-  const allWorkerResults: Array<{ roleName: string; status: string; verificationEvidence?: string | null }> = [];
+  const allWorkerResults: Array<{
+    roleName: string;
+    status: string;
+    verificationEvidence?: unknown;
+    dispatchContract?: {
+      doneWorkerWithVerificationReportEvidence?: boolean;
+      dispatchBlockReason?: string | null;
+      replayClosure?: {
+        contractSatisfied?: boolean;
+        canonicalCommands?: string[];
+        executedCommands?: string[];
+        rawArtifactEvidenceLinks?: string[];
+      } | null;
+    } | null;
+    dispatchBlockReason?: string | null;
+  }> = [];
   // Collects (taskText, verificationEvidence) from successful workers for
   // carry-forward auto-close matching at end of cycle.
   const resolvedPlanItems: Array<{ taskText: string; verificationEvidence: unknown }> = [];
@@ -2879,14 +2921,16 @@ async function runSingleCycle(config) {
     allWorkerResults.push({
       roleName: batch.role,
       status: String(workerResult?.status || "unknown"),
-      verificationEvidence: workerResult?.verificationEvidence ? String(workerResult.verificationEvidence) : null,
+      verificationEvidence: workerResult?.verificationEvidence || null,
+      dispatchContract: workerResult?.dispatchContract || null,
+      dispatchBlockReason: workerResult?.dispatchBlockReason || null,
     });
 
     // Collect plan tasks with verification evidence for carry-forward auto-close.
     // Only plans from successful batches with real evidence qualify.
-    if (workerResult?.verificationEvidence) {
+    const replayClosureContract = workerResult?.dispatchContract?.replayClosure || buildReplayClosureEvidence(String(workerResult?.raw || ""));
+    if (workerResult?.verificationEvidence || replayClosureContract?.contractSatisfied === true) {
       const batchPlansList = Array.isArray((batch as any).plans) ? (batch as any).plans : [];
-      const replayClosure = buildReplayClosureEvidence(String(workerResult?.raw || ""));
       for (const plan of batchPlansList) {
         const taskText = String((plan as any)?.task || "").trim();
         if (taskText.length >= 10) {
@@ -2894,10 +2938,53 @@ async function runSingleCycle(config) {
             taskText,
             verificationEvidence: {
               workerContract: workerResult.verificationEvidence,
-              replayClosure,
+              replayClosure: replayClosureContract,
+              doneWorkerWithVerificationReportEvidence: workerResult?.dispatchContract?.doneWorkerWithVerificationReportEvidence === true,
+              dispatchBlockReason: workerResult?.dispatchBlockReason || null,
             },
           });
         }
+      }
+
+      // ── Mark synthesis topics consumed by completed plans ──────────────────
+      // When a plan with synthesis_sources completes, mark those topics as
+      // "completed" in topic memory so the scout gate can detect full consumption.
+      try {
+        const stateDir = config.paths?.stateDir || "state";
+        const batchPlans = Array.isArray((batch as any).plans) ? (batch as any).plans : [];
+        const completedTopicKeys: string[] = [];
+        for (const plan of batchPlans) {
+          const sources = Array.isArray((plan as any).synthesis_sources) ? (plan as any).synthesis_sources as string[] : [];
+          for (const s of sources) {
+            completedTopicKeys.push(prometheusTopicKey(s));
+          }
+        }
+        if (completedTopicKeys.length > 0) {
+          const topicMemory = await loadTopicMemory(stateDir);
+          const existingKeys = Object.keys(topicMemory.topics);
+          const now = new Date().toISOString();
+          let changed = false;
+          for (const rawKey of completedTopicKeys) {
+            const key = findCanonicalTopicKey(rawKey, existingKeys);
+            if (topicMemory.topics[key] && topicMemory.topics[key].status !== "completed") {
+              topicMemory.topics[key].status = "completed";
+              topicMemory.topics[key].lastUpdatedAt = now;
+              topicMemory.topics[key].completedSummary =
+                topicMemory.topics[key].completedSummary ||
+                `Completed via worker plan execution (batch role=${batch.role})`;
+              topicMemory.topics[key].knowledgeFragments = [];
+              changed = true;
+            }
+          }
+          if (changed) {
+            await saveTopicMemory(stateDir, topicMemory);
+            await appendProgress(config,
+              `[TOPIC_MEMORY] Marked ${completedTopicKeys.length} synthesis topic(s) consumed by ${batch.role} batch`
+            );
+          }
+        }
+      } catch {
+        // Non-fatal — topic tracking never blocks dispatch
       }
     }
 
@@ -3111,6 +3198,21 @@ async function runSingleCycle(config) {
         warn(`[orchestrator] Guardrail execution returned partial/failed status: ${guardResult.reason || "see results"}`);
       }
     }
+
+    // Auto-revert FORCE_CHECKPOINT_VALIDATION if the SLO_CASCADING_BREACH that
+    // triggered it is no longer active this cycle.  Runs unconditionally after
+    // detection so a resolved breach is always cleared without operator action.
+    if (config.systemGuardian?.enabled !== false) {
+      const isSloBreachingNow = catastropheResult.detections.some(
+        d => d.scenarioId === "SLO_CASCADING_BREACH"
+      );
+      const revertResult = await autoRevertSloGuardrailIfResolved(config, isSloBreachingNow);
+      if (revertResult.reverted) {
+        await appendProgress(config, "[GUARDRAIL] FORCE_CHECKPOINT_VALIDATION auto-reverted: SLO_CASCADING_BREACH condition resolved");
+      } else if (revertResult.reason) {
+        warn(`[orchestrator] SLO guardrail auto-revert failed (non-fatal): ${revertResult.reason}`);
+      }
+    }
   } catch (err) {
     // Advisory — never blocks orchestration
     warn(`[orchestrator] Catastrophe detection error (non-fatal): ${String(err?.message || err)}`);
@@ -3145,10 +3247,26 @@ async function runSingleCycle(config) {
     const postmortemsRaw2 = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
     const pmEntries2 = Array.isArray(postmortemsRaw2?.entries) ? postmortemsRaw2.entries : [];
     if (pmEntries2.length > 0) {
-      const policies = compileLessonsToPolicies(pmEntries2);
+      const learnedPolicyPath = path.join(stateDir, "learned_policies.json");
+      const existingPolicies = await readJson(learnedPolicyPath, []);
+      const existingPolicyIds = Array.isArray(existingPolicies)
+        ? existingPolicies.map((policy: any) => String(policy?.id || "")).filter(Boolean)
+        : [];
+      const policies = compileLessonsToPolicies(pmEntries2, { existingPolicies: existingPolicyIds });
       if (policies.length > 0) {
-        await writeJson(path.join(stateDir, "learned_policies.json"), policies);
-        await appendProgress(config, `[POLICY_COMPILER] ${policies.length} lesson-based policies compiled: ${policies.map(p => p.id).join(", ")}`);
+        const mergedPolicies = [
+          ...(Array.isArray(existingPolicies) ? existingPolicies : []),
+          ...policies.map((policy) => ({
+            ...policy,
+            optimizationLoop: {
+              interventionKind: policy?.interventionKind || "policy-delta",
+              impactAttribution: "pending",
+              retirementMode: "measured_uplift",
+            },
+          })),
+        ];
+        await writeJson(learnedPolicyPath, mergedPolicies);
+        await appendProgress(config, `[POLICY_COMPILER] ${policies.length} policy optimization delta(s) compiled: ${policies.map(p => p.id).join(", ")}`);
       }
     }
   } catch (err) {
@@ -3237,8 +3355,19 @@ async function runSingleCycle(config) {
     const doneWorkerEvidenceCount = allWorkerResults.filter((row) => {
       const status = String(row?.status || "").toLowerCase();
       if (status !== "done" && status !== "success") return false;
-      return hasVerificationReportEvidence(row?.verificationEvidence || "");
+      if (row?.dispatchContract?.doneWorkerWithVerificationReportEvidence === true) return true;
+      return hasVerificationReportEvidence(String(row?.verificationEvidence || ""));
     }).length;
+    const blockedDispatchRows = allWorkerResults
+      .filter((row) => String(row?.status || "").toLowerCase() === "blocked");
+    const blockedWithReasonCount = blockedDispatchRows
+      .filter((row) => String(row?.dispatchBlockReason || row?.dispatchContract?.dispatchBlockReason || "").trim().length > 0)
+      .length;
+    const blockedDispatchReasons = [...new Set(
+      blockedDispatchRows
+        .map((row) => String(row?.dispatchBlockReason || row?.dispatchContract?.dispatchBlockReason || "").trim())
+        .filter(Boolean)
+    )];
     const seamChecks = {
       prometheus: {
         pass: seamProbe.criteria.prometheusGeneratedAtAndKeyFindings.pass === true,
@@ -3258,12 +3387,22 @@ async function runSingleCycle(config) {
           ? []
           : [`no done/success worker produced VERIFICATION_REPORT evidence (count=${doneWorkerEvidenceCount})`],
       },
+      dispatchBlockReason: {
+        pass: seamProbe.criteria.dispatchBlockReasonOutcomes.pass === true,
+        failReasons: seamProbe.criteria.dispatchBlockReasonOutcomes.pass === true
+          ? []
+          : [`blocked worker outcomes missing dispatchBlockReason evidence (withReason=${blockedWithReasonCount}/${blockedDispatchRows.length})`],
+      },
     };
-    const seamContractSatisfied = seamChecks.prometheus.pass && seamChecks.athena.pass && seamChecks.worker.pass;
+    const seamContractSatisfied = seamChecks.prometheus.pass
+      && seamChecks.athena.pass
+      && seamChecks.worker.pass
+      && seamChecks.dispatchBlockReason.pass;
     const seamFailReasons = [
       ...seamChecks.prometheus.failReasons,
       ...seamChecks.athena.failReasons,
       ...seamChecks.worker.failReasons,
+      ...seamChecks.dispatchBlockReason.failReasons,
     ];
     await writeJson(path.join(stateDir, "cycle_proof_evidence.json"), {
       schemaVersion: 1,
@@ -3280,6 +3419,11 @@ async function runSingleCycle(config) {
         contractSatisfied: seamContractSatisfied,
         failReasons: seamFailReasons,
         checks: seamChecks,
+      },
+      dispatchOutcomes: {
+        blockedCount: blockedDispatchRows.length,
+        blockedWithReasonCount,
+        blockReasons: blockedDispatchReasons,
       },
       backlogSnapshot: replayMandatoryItems.map((item: any) => ({
         id: item?.id || null,
@@ -3304,6 +3448,9 @@ async function runSingleCycle(config) {
 
   // ── Capacity scoreboard: persist KPIs for trend analysis ──────────────────
   try {
+    const firstBatchSpecialization = Array.isArray(workerBatches) && workerBatches.length > 0
+      ? (workerBatches[0] as any)?.specialistUtilizationTarget
+      : null;
     await appendCapacityEntry(config, {
       parserConfidence: prometheusAnalysis?.parserConfidence ?? null,
       parserCoreConfidence: prometheusAnalysis?.parserCoreConfidence ?? null,
@@ -3314,6 +3461,8 @@ async function runSingleCycle(config) {
       budgetUsed: prometheusAnalysis?.requestBudget?.estimatedPremiumRequestsTotal ?? 0,
       budgetLimit: prometheusAnalysis?.requestBudget?.hardCapTotal ?? 0,
       workersDone: workersDone,
+      specializedShareTarget: Number(firstBatchSpecialization?.adaptiveMinSpecializedShare ?? firstBatchSpecialization?.minSpecializedShare ?? 0),
+      specializedShareTargetMet: firstBatchSpecialization?.targetMet === true,
     });
   } catch (err) {
     warn(`[orchestrator] Capacity scoreboard update failed (non-fatal): ${String(err?.message || err)}`);
@@ -3329,7 +3478,7 @@ async function runSingleCycle(config) {
     const healthFile = await readJson(path.join(stateDir, "orchestrator_health.json"), null);
     const operationalStatus = healthFile?.orchestratorStatus ?? ORCHESTRATOR_STATUS.OPERATIONAL;
     const divergence = computeHealthDivergence(operationalStatus, plannerHealth);
-    await writeJson(path.join(stateDir, "cycle_health.json"), {
+    await persistCycleHealthDivergence(config, {
       ...divergence,
       recordedAt: new Date().toISOString(),
     });

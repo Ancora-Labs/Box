@@ -62,8 +62,14 @@ import {
   markCacheableSegments as _markCacheableSegments,
   markCycleDeltaSectionsRequired as _markCycleDeltaSectionsRequired,
   analyzePacketDensification as _analyzePacketDensification,
-  PROMPT_BUDGET_PARTITION
+  PROMPT_BUDGET_PARTITION,
+  compileRankedContextSection,
 } from "./prompt_compiler.js";
+import {
+  scanProject,
+  buildSemanticFileCandidatesFromScan,
+  rankSemanticFileCandidates,
+} from "./project_scanner.js";
 import { computeFingerprint, classifyCarryForwardByRecurrence } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
 import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
@@ -771,7 +777,7 @@ export async function saveTopicMemory(stateDir: string, memory: TopicMemoryState
   await writeJson(path.join(stateDir, TOPIC_MEMORY_FILE), memory);
 }
 
-function topicKey(topic: string): string {
+export function topicKey(topic: string): string {
   return topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
 }
 
@@ -898,10 +904,32 @@ export function updateTopicKnowledge(
 export function detectAndCompleteTopics(
   memory: TopicMemoryState,
   researchTopics: string[],
-  plans: any[]
+  plans: any[],
+  analysisRoot?: unknown
 ): { memory: TopicMemoryState; completedThisRun: string[] } {
   const completedThisRun: string[] = [];
   const now = new Date().toISOString();
+
+  // Build set of topic keys covered by plan synthesis_sources (forward reference — accurate)
+  const coveredByPlanKeys = new Set<string>();
+  for (const plan of (plans || [])) {
+    const sources = Array.isArray((plan as any).synthesis_sources) ? (plan as any).synthesis_sources as string[] : [];
+    for (const s of sources) {
+      coveredByPlanKeys.add(topicKey(s));
+      // Also try canonical resolution so partial matches work
+      coveredByPlanKeys.add(findCanonicalTopicKey(topicKey(s), Object.keys(memory.topics)));
+    }
+  }
+
+  // Build set of keys explicitly marked informational (Prometheus says: "read but no plan needed")
+  const informationalKeys = new Set<string>();
+  const informationalList = Array.isArray((analysisRoot as any)?.informational_topics_consumed)
+    ? (analysisRoot as any).informational_topics_consumed as string[]
+    : [];
+  for (const t of informationalList) {
+    informationalKeys.add(topicKey(t));
+    informationalKeys.add(findCanonicalTopicKey(topicKey(t), Object.keys(memory.topics)));
+  }
 
   for (const rawTopic of researchTopics) {
     const key = topicKey(rawTopic);
@@ -909,25 +937,15 @@ export function detectAndCompleteTopics(
     const entry = memory.topics[key];
     if (entry.status === "completed") continue;
 
-    // A topic is "complete" when:
-    // 1. It has been seen across at least 2 runs (enough accumulation time)
-    // 2. At least one plan has concrete target_files and verification referencing it
-    const topicWords = rawTopic.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-    const matchingPlans = (plans || []).filter(plan => {
-      const task = String(plan?.task || plan?.title || "").toLowerCase();
-      const hasFiles = Array.isArray(plan?.target_files) && plan.target_files.length > 0;
-      const hasVerification = Boolean(plan?.verification);
-      return topicWords.some(w => task.includes(w)) && hasFiles && hasVerification;
-    });
+    const coveredByPlan = coveredByPlanKeys.has(key);
+    const isInformational = informationalKeys.has(key);
 
-    if (entry.runCount >= 2 && matchingPlans.length > 0) {
-      // Generate concise summary from accumulated knowledge
+    if (entry.runCount >= 1 && (coveredByPlan || isInformational)) {
       const fragmentSummary = entry.knowledgeFragments.slice(-5).join("; ");
-      const planSummary = matchingPlans.slice(0, 3).map(p => String(p?.task || p?.title || "")).join("; ");
+      const reason = coveredByPlan ? "plan produced" : "informational (no plan needed)";
       entry.status = "completed";
       entry.lastUpdatedAt = now;
-      entry.completedSummary = `Topic researched over ${entry.runCount} runs. Key findings: ${fragmentSummary.slice(0, 300)}. Plans produced: ${planSummary.slice(0, 200)}`;
-      // Clear fragments to save space — summary replaces them
+      entry.completedSummary = `Completed after ${entry.runCount} run(s) — reason: ${reason}. Fragments: ${fragmentSummary.slice(0, 300)}`;
       entry.knowledgeFragments = [];
       completedThisRun.push(key);
     }
@@ -2776,11 +2794,14 @@ The JSON block must contain all of the following fields:
     "premortem": null,
     "capacityDelta": <number ∈ [-1.0, 1.0]>,
     "requestROI": <positive number>,
-    "estimatedExecutionTokens": <positive integer>
-  }]
+    "estimatedExecutionTokens": <positive integer>,
+    "synthesis_sources": ["<synthesis topic name this plan directly addresses — omit if not research-driven>"]
+  }],
+  "informational_topics_consumed": ["<synthesis topic name you read but no plan is needed — already implemented or purely contextual>"]
 }
 Do NOT omit target_files, before_state, after_state, scope, acceptance_criteria, capacityDelta, or requestROI from any plan entry.
 Do NOT omit estimatedExecutionTokens from any plan entry.
+For EVERY synthesis topic from the RESEARCH INTELLIGENCE section: if you produce a plan for it, list it in that plan's synthesis_sources[]. If you read it but no plan is needed (already done or purely informational), list it in informational_topics_consumed[]. This enables the system to know when all research is consumed and schedule a new Scout run.
 Do NOT emit requestBudget with _fallback:true — compute byWave and byRole from the actual plan list.
 Keep diagnostic findings in analysis or strategicNarrative and include only actionable redesign work in plans.
 Wrap the JSON companion with markers:
@@ -3945,40 +3966,32 @@ Consider whether the root causes are:
     }
   } catch { /* non-fatal — proceed without pattern analysis */ }
 
-  // ── Build real file listing for prompt (prevents fabricated target_files) ─
-  let _repoFileListingSection = "";
+  // ── Deterministic semantic retrieval for planner context ───────────────────
+  let semanticRetrievalSection = "";
   try {
-    const listDir = async (dir: string, prefix: string) => {
-      try {
-        const files = await fs.readdir(path.join(repoRoot, dir));
-        return files
-          .filter(f => f.endsWith(".ts") || f.endsWith(".js") || f.endsWith(".mts") || f.endsWith(".cjs"))
-          .map(f => `${prefix}/${f}`);
-      } catch { return []; }
-    };
-    const [coreFiles, workerFiles, dashFiles, typeFiles, providerFiles, rootSrcFiles, testCoreFiles, testFiles] = await Promise.all([
-      listDir("src/core", "src/core"),
-      listDir("src/workers", "src/workers"),
-      listDir("src/dashboard", "src/dashboard"),
-      listDir("src/types", "src/types"),
-      listDir("src/providers", "src/providers"),
-      listDir("src", "src"),
-      listDir("tests/core", "tests/core"),
-      listDir("tests", "tests"),
-    ]);
-    const sections: string[] = [];
-    if (coreFiles.length) sections.push(`### src/core/ (core modules)\n${coreFiles.join("\n")}`);
-    if (workerFiles.length) sections.push(`### src/workers/\n${workerFiles.join("\n")}`);
-    if (dashFiles.length) sections.push(`### src/dashboard/\n${dashFiles.join("\n")}`);
-    if (typeFiles.length) sections.push(`### src/types/\n${typeFiles.join("\n")}`);
-    if (providerFiles.length) sections.push(`### src/providers/\n${providerFiles.join("\n")}`);
-    if (rootSrcFiles.length) sections.push(`### src/ (root)\n${rootSrcFiles.join("\n")}`);
-    if (testCoreFiles.length) sections.push(`### tests/core/ (test files)\n${testCoreFiles.join("\n")}`);
-    if (testFiles.length) sections.push(`### tests/ (root test files)\n${testFiles.join("\n")}`);
-    if (sections.length) {
-      _repoFileListingSection = `\n\n## EXISTING REPOSITORY FILES\nYou MUST only reference paths from this list in target_files. Do NOT invent new module names.\n${sections.join("\n")}\n`;
+    const scan = await scanProject({ rootDir: repoRoot });
+    const candidates = buildSemanticFileCandidatesFromScan(scan);
+    const retrievalQuery = [
+      userPrompt,
+      String(options.prometheusReason || ""),
+      String(carryForwardSection || ""),
+      String(behaviorPatternsSection || ""),
+    ].join("\n");
+    const ranked = rankSemanticFileCandidates(retrievalQuery, candidates, {
+      tokenBudget: 1100,
+      maxEntries: 16,
+      cacheKey: `prometheus:${repoRoot}:${retrievalQuery}`,
+    });
+    if (ranked.length > 0) {
+      semanticRetrievalSection = compileRankedContextSection(
+        "SEMANTIC FILE PRIORITY (deterministic, token-budgeted)",
+        ranked,
+        { tokenBudget: 1100, maxEntries: 16 },
+      );
     }
-  } catch { /* non-fatal */ }
+  } catch {
+    // Non-fatal — prompt generation continues without semantic retrieval.
+  }
 
   // ── Self-improvement repair feedback injection ────────────────────────────
   let repairFeedbackSection = "";
@@ -4083,6 +4096,7 @@ Use this data to produce evidence-backed plans, not vague strategic recommendati
 
   // Architecture drift summary
   if (driftSummarySection) cycleDeltaParts.push(driftSummarySection);
+  if (semanticRetrievalSection) cycleDeltaParts.push(`\n\n${semanticRetrievalSection}`);
   if (mandatoryTasksSection) cycleDeltaParts.push(mandatoryTasksSection);
 
   const cycleDeltaSections = _markCycleDeltaSectionsRequired(
@@ -5028,7 +5042,7 @@ Mandatory requirements:
   try {
     if (researchTopicsList.length > 0 && Array.isArray(analysis.plans)) {
       topicMemory = updateTopicKnowledge(topicMemory, researchTopicsList, analysis.plans, researchSynthesisData);
-      const completion = detectAndCompleteTopics(topicMemory, researchTopicsList, analysis.plans);
+      const completion = detectAndCompleteTopics(topicMemory, researchTopicsList, analysis.plans, analysis);
       topicMemory = completion.memory;
       await saveTopicMemory(stateDir, topicMemory);
 
