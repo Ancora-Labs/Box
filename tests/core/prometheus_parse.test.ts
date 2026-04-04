@@ -2494,6 +2494,8 @@ describe("enforceParserContractBeforeNormalization", () => {
     const repaired = {
       projectHealth: "degraded",
       requestBudget: { estimatedPremiumRequestsTotal: 2 },
+      keyFindings: "Strategic parser contract repaired",
+      strategicNarrative: "Improve dispatch reliability with explicit validation.",
       plans: [{ task: "x", role: "evolution-worker" }],
     };
     let called = 0;
@@ -2506,6 +2508,8 @@ describe("enforceParserContractBeforeNormalization", () => {
         called += 1;
         assert.ok(diff.includes("projectHealth"));
         assert.ok(diff.includes("requestBudget.estimatedPremiumRequestsTotal"));
+        assert.ok(diff.includes("keyFindings"));
+        assert.ok(diff.includes("strategicNarrative"));
         return repaired;
       },
     });
@@ -2521,6 +2525,8 @@ describe("enforceParserContractBeforeNormalization", () => {
     const stillInvalid = {
       projectHealth: "unknown",
       requestBudget: { estimatedPremiumRequestsTotal: Number.NaN },
+      keyFindings: "",
+      strategicNarrative: "",
       plans: [{ task: "x", role: "evolution-worker" }],
     };
     let violation = "";
@@ -2537,12 +2543,16 @@ describe("enforceParserContractBeforeNormalization", () => {
     assert.ok(violation.includes("projectHealth=unknown"));
     assert.ok(String(result.violationReason || "").includes("projectHealth=unknown"));
     assert.ok(String(result.violationReason || "").includes("requestBudget.estimatedPremiumRequestsTotal=NaN"));
+    assert.ok(String(result.violationReason || "").includes("keyFindings"));
+    assert.ok(String(result.violationReason || "").includes("strategicNarrative"));
   });
 
   it("keeps valid mandatory fields on first pass without retry or penalties", async () => {
     const valid = {
       projectHealth: "healthy",
       requestBudget: { estimatedPremiumRequestsTotal: 4 },
+      keyFindings: "Keep retry path deterministic.",
+      strategicNarrative: "Maintain parse boundary contracts before normalization.",
       plans: [{ task: "x", role: "evolution-worker" }],
     };
     let called = 0;

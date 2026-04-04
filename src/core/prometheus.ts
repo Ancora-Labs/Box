@@ -1993,7 +1993,12 @@ function hasValidParserContractFields(parsed: any): boolean {
   const rawHealth = String(parsed.projectHealth ?? "").trim().toLowerCase();
   const health = rawHealth.replace(/\s+/g, "-");
   const estimatedTotal = Number(parsed?.requestBudget?.estimatedPremiumRequestsTotal);
-  return REQUIRED_PROMETHEUS_HEALTH_VALUES.has(health) && Number.isFinite(estimatedTotal);
+  const keyFindings = String(parsed?.keyFindings ?? "").trim();
+  const strategicNarrative = String(parsed?.strategicNarrative ?? "").trim();
+  return REQUIRED_PROMETHEUS_HEALTH_VALUES.has(health)
+    && Number.isFinite(estimatedTotal)
+    && keyFindings.length > 0
+    && strategicNarrative.length > 0;
 }
 
 function buildParserContractRetryDiff(parsed: any): string {
@@ -2011,6 +2016,14 @@ function buildParserContractRetryDiff(parsed: any): string {
     missing.push("requestBudget.estimatedPremiumRequestsTotal");
   } else if (!Number.isFinite(Number(parsed.requestBudget.estimatedPremiumRequestsTotal))) {
     invalid.push(`requestBudget.estimatedPremiumRequestsTotal=${String(parsed.requestBudget.estimatedPremiumRequestsTotal)}`);
+  }
+  const rawKeyFindings = String(parsed?.keyFindings ?? "").trim();
+  if (!rawKeyFindings) {
+    missing.push("keyFindings");
+  }
+  const rawStrategicNarrative = String(parsed?.strategicNarrative ?? "").trim();
+  if (!rawStrategicNarrative) {
+    missing.push("strategicNarrative");
   }
   const missingText = missing.length > 0 ? missing.join(", ") : "none";
   const invalidText = invalid.length > 0 ? invalid.join(", ") : "none";
@@ -3768,6 +3781,8 @@ ${compiledCycleDelta}`;
   // Mandatory parse fields must be present/valid before normalization:
   //   - projectHealth ∈ {healthy,degraded,critical,needs-work}
   //   - requestBudget.estimatedPremiumRequestsTotal is finite
+  //   - keyFindings is non-empty
+  //   - strategicNarrative is non-empty
   // Retry once with an explicit diff; fail-closed on second failure.
   const parsedContractCandidate = aiResult?.parsed || buildNarrativeFallbackParsed({ ...aiResult, raw });
   let retryAiResult: any = null;
@@ -3802,6 +3817,8 @@ ${parserDiff}
 Mandatory parser fields:
 - projectHealth must be exactly one of: good, healthy, needs-work, degraded, critical
 - requestBudget.estimatedPremiumRequestsTotal must be present and finite
+- keyFindings must be a non-empty string
+- strategicNarrative must be a non-empty string
 - Keep the rest of the plan deterministic and unchanged unless required by these fixes.`;
 
         try {
