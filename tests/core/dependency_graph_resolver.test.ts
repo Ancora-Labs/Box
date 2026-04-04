@@ -30,6 +30,8 @@ import {
   CONFLICT_REASON,
   TASK_ERROR_CODE,
   GRAPH_DIAGNOSTICS_SCHEMA_VERSION,
+  GRAPH_DIAGNOSTICS_JSONL_SCHEMA,
+  GRAPH_DIAGNOSTICS_FRESHNESS_MS,
   READINESS_STATUS,
   READINESS_REASON,
   READINESS_CONFIDENCE_THRESHOLD_DEFAULT,
@@ -613,6 +615,11 @@ describe("persistGraphDiagnostics — guaranteed parseable NDJSON contract", () 
     for (const field of requiredFields) {
       assert.ok(field in entry, `required field "${field}" must be present in every NDJSON entry`);
     }
+    assert.equal(entry.jsonlSchema, GRAPH_DIAGNOSTICS_JSONL_SCHEMA);
+    assert.equal(entry.recordType, "dependency_graph_diagnostic");
+    assert.equal(entry.freshness.status, "fresh");
+    assert.equal(entry.freshness.staleAfterMs, GRAPH_DIAGNOSTICS_FRESHNESS_MS);
+    assert.ok(typeof entry.freshness.expiresAt === "string" && entry.freshness.expiresAt.length > 0);
   });
 
   it("NEGATIVE PATH: each independently-parsed line does not depend on prior lines", async () => {

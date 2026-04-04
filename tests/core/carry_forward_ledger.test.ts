@@ -318,28 +318,55 @@ describe("autoCloseVerifiedDebt", () => {
     };
   }
 
-  it("closes a matching open entry when evidence is provided", () => {
+  function makeReplayContractEvidence(overrides: Record<string, unknown> = {}) {
+    return {
+      workerContract: {
+        passed: true,
+        artifactDetail: {
+          hasSha: true,
+          hasTestOutput: true,
+          hasCleanTreeEvidence: true,
+          hasUnfilledPlaceholder: false,
+        },
+      },
+      replayClosure: {
+        contractSatisfied: true,
+        executedCommands: ["git rev-parse HEAD", "git status --porcelain", "npm test"],
+        rawArtifactEvidenceLinks: [
+          "inline://post-merge-sha/abc1234",
+          "inline://clean-tree-status",
+          "inline://npm-test-output-block",
+        ],
+      },
+      ...overrides,
+    };
+  }
+
+  it("closes a matching open entry when replay closure contract is satisfied", () => {
     const lesson = "Fix flaky worker runner test suite reliability issue";
     const ledger = [makeEntry(lesson)];
     const count = autoCloseVerifiedDebt(ledger, [
-      { taskText: lesson, verificationEvidence: "All tests pass — PR #99 merged" },
+      { taskText: lesson, verificationEvidence: makeReplayContractEvidence() },
     ]);
     assert.equal(count, 1, "One entry must be closed");
     assert.ok(ledger[0].closedAt, "closedAt must be set");
-    assert.equal(ledger[0].closureEvidence, "All tests pass — PR #99 merged");
+    assert.match(String(ledger[0].closureEvidence || ""), /replay-closure:v1/);
   });
 
-  it("does NOT close an entry when evidence is missing or too short", () => {
+  it("does NOT close an entry when replay closure evidence links are missing", () => {
     const lesson = "Fix broken governance canary breach detection path";
     const ledger = [makeEntry(lesson)];
-
-    // No evidence
-    let count = autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: "" }]);
-    assert.equal(count, 0, "Must not close with empty evidence");
-
-    // Evidence too short (< 5 chars)
-    count = autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: "ok" }]);
-    assert.equal(count, 0, "Must not close with trivially short evidence");
+    const count = autoCloseVerifiedDebt(ledger, [{
+      taskText: lesson,
+      verificationEvidence: makeReplayContractEvidence({
+        replayClosure: {
+          contractSatisfied: false,
+          executedCommands: ["git rev-parse HEAD", "git status --porcelain", "npm test"],
+          rawArtifactEvidenceLinks: [],
+        },
+      }),
+    }]);
+    assert.equal(count, 0, "Must not close without replay artifact links");
 
     assert.equal(ledger[0].closedAt, null, "Entry must remain open");
   });
@@ -357,11 +384,11 @@ describe("autoCloseVerifiedDebt", () => {
     const lesson = "Fix the carry-forward SLA accounting cycle counter bug";
     const ledger = [makeEntry(lesson)];
     // Close first time
-    autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: "PR #1 merged" }]);
+    autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: makeReplayContractEvidence() }]);
     assert.ok(ledger[0].closedAt);
     // Try again with different evidence
     const count2 = autoCloseVerifiedDebt(ledger, [
-      { taskText: lesson, verificationEvidence: "PR #2 merged (second attempt)" },
+      { taskText: lesson, verificationEvidence: makeReplayContractEvidence() },
     ]);
     assert.equal(count2, 0, "Already-closed entry must not be re-closed");
   });
@@ -375,7 +402,7 @@ describe("autoCloseVerifiedDebt", () => {
     ];
 
     const count = autoCloseVerifiedDebt(ledger, [
-      { taskText: resolvedLesson, verificationEvidence: "Tests pass, PR merged" },
+      { taskText: resolvedLesson, verificationEvidence: makeReplayContractEvidence() },
     ]);
 
     assert.equal(count, 1, "Exactly one entry must be closed");
@@ -391,7 +418,7 @@ describe("autoCloseVerifiedDebt", () => {
 
   it("returns 0 for empty ledger", () => {
     const count = autoCloseVerifiedDebt([], [
-      { taskText: "Fix something", verificationEvidence: "Done — tests pass" },
+      { taskText: "Fix something", verificationEvidence: makeReplayContractEvidence() },
     ]);
     assert.equal(count, 0);
   });
@@ -406,7 +433,7 @@ describe("autoCloseVerifiedDebt", () => {
     ];
 
     autoCloseVerifiedDebt(ledger, [
-      { taskText: resolvedLesson, verificationEvidence: "PR #100 merged — tests pass" },
+      { taskText: resolvedLesson, verificationEvidence: makeReplayContractEvidence() },
     ]);
 
     // Resolved entry is now closed; the critical ones are still open

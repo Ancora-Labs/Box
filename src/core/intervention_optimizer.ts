@@ -53,7 +53,7 @@
  *   Source: box.config.json → runtime.runtimeBudget.maxWorkerSpawnsPerCycle
  *
  * ── Persistence ───────────────────────────────────────────────────────────────
- *   Log file: state/intervention_optimizer_log.json
+ *   Log file: state/intervention_optimizer_log.jsonl
  *   Schema version: OPTIMIZER_LOG_SCHEMA_VERSION (integer, currently 1)
  *   Required fields in each entry: schemaVersion, generatedAt, status, reasonCode,
  *     budgetUnit, totalBudgetLimit, totalBudgetUsed, byWaveBudgetLimit,
@@ -65,7 +65,7 @@
  */
 
 import path from "node:path";
-import { readJson, writeJson } from "./fs_utils.js";
+import fs from "node:fs/promises";
 import { applyClassificationToSuccessProbability } from "./failure_classifier.js";
 
 // ── Budget unit ───────────────────────────────────────────────────────────────
@@ -187,10 +187,12 @@ export const SPARSE_DATA_THRESHOLD = 3;
 // ── Schema version ────────────────────────────────────────────────────────────
 
 /**
- * Schema version for intervention_optimizer_log.json.
+ * Schema version for intervention_optimizer_log.jsonl entries.
  * Bump (integer) when the persisted schema changes incompatibly.
  */
 export const OPTIMIZER_LOG_SCHEMA_VERSION = 1;
+export const OPTIMIZER_LOG_JSONL_SCHEMA = "box.intervention_optimizer_log.v2";
+export const OPTIMIZER_LOG_FRESHNESS_MS = 6 * 60 * 60 * 1000;
 
 // ── Intervention schema ───────────────────────────────────────────────────────
 
@@ -999,16 +1001,16 @@ export function buildBudgetFromConfig(requestBudget, config) {
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 /**
- * Append an optimizer result entry to state/intervention_optimizer_log.json.
+ * Append an optimizer result entry to state/intervention_optimizer_log.jsonl.
  *
  * Called by prometheus.js integration after each optimizer run.
  * Never throws — all errors are returned in a result object so the caller can
  * log them without crashing the orchestration flow.
  *
  * Log file schema:
- *   { schemaVersion, updatedAt, entries: [...result objects] }
- *   Each entry conforms to OPTIMIZER_RESULT_SCHEMA (all required fields present).
- *   Maximum retained entries: 100 (LIFO trim).
+ *   JSONL (one object per line), each line:
+ *   { jsonlSchema, recordType, schemaVersion, savedAt, freshness, payload }
+ *   where payload is the optimizer result object.
  *
  * @param {string} stateDir — absolute path to state directory
  * @param {object} result   — optimizer result from runInterventionOptimizer
@@ -1016,23 +1018,23 @@ export function buildBudgetFromConfig(requestBudget, config) {
  */
 export async function persistOptimizerLog(stateDir, result) {
   try {
-    const logFile = path.join(stateDir, "intervention_optimizer_log.json");
-    const existing = await readJson(logFile, {
+    const logFile = path.join(stateDir, "intervention_optimizer_log.jsonl");
+    const savedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + OPTIMIZER_LOG_FRESHNESS_MS).toISOString();
+    const entry = JSON.stringify({
+      jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+      recordType: "intervention_optimizer_diagnostic",
       schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
-      updatedAt:     new Date().toISOString(),
-      entries:       [],
+      savedAt,
+      freshness: {
+        status: "fresh",
+        staleAfterMs: OPTIMIZER_LOG_FRESHNESS_MS,
+        expiresAt,
+      },
+      payload: result,
     });
 
-    const entries = Array.isArray(existing.entries) ? existing.entries : [];
-    entries.push({ ...result, savedAt: new Date().toISOString() });
-
-    const trimmed = entries.length > 100 ? entries.slice(-100) : entries;
-
-    await writeJson(logFile, {
-      schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
-      updatedAt:     new Date().toISOString(),
-      entries:       trimmed,
-    });
+    await fs.appendFile(logFile, entry + "\n", "utf8");
 
     return { ok: true };
   } catch (err) {

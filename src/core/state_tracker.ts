@@ -524,22 +524,56 @@ export async function getFailureClusterReport(config) {
 // ── Intervention optimizer log ────────────────────────────────────────────────
 
 /**
- * Load the intervention optimizer log from state/intervention_optimizer_log.json.
+ * Load the intervention optimizer log from state/intervention_optimizer_log.jsonl.
  *
  * @param {object} config — box config object with paths.stateDir
- * @returns {Promise<object>} — { schemaVersion, updatedAt, entries: [] }
+ * @returns {Promise<object>} — { schemaVersion, updatedAt, entries: [] } (fresh entries only)
  */
 export async function loadInterventionOptimizerLog(config) {
-  const logFile = path.join(config.paths.stateDir, "intervention_optimizer_log.json");
-  return readJson(logFile, {
-    schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
-    updatedAt:     new Date().toISOString(),
-    entries:       [],
-  });
+  const stateDir = config?.paths?.stateDir || "state";
+  const jsonlFile = path.join(stateDir, "intervention_optimizer_log.jsonl");
+  const fallbackJsonFile = path.join(stateDir, "intervention_optimizer_log.json");
+  const nowMs = Date.now();
+  const defaultFreshnessMs = 6 * 60 * 60 * 1000;
+
+  try {
+    const raw = await fs.readFile(jsonlFile, "utf8");
+    const lines = raw.split("\n").map(line => line.trim()).filter(Boolean);
+    const records = lines.map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+
+    const entries = [];
+    for (const record of records as any[]) {
+      const freshness = record?.freshness && typeof record.freshness === "object"
+        ? record.freshness
+        : {};
+      const staleAfterMs = Number(freshness?.staleAfterMs || defaultFreshnessMs);
+      const savedAt = String(record?.savedAt || record?.persistedAt || "").trim();
+      const savedAtMs = savedAt ? new Date(savedAt).getTime() : NaN;
+      if (!Number.isFinite(savedAtMs)) continue;
+      if (nowMs - savedAtMs > staleAfterMs) continue;
+      const payload = record?.payload && typeof record.payload === "object" ? record.payload : null;
+      if (payload) entries.push(payload);
+    }
+
+    return {
+      schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
+      updatedAt: new Date().toISOString(),
+      entries: entries.slice(-100),
+    };
+  } catch {
+    // Backward compatibility: accept the legacy JSON object file when JSONL does not exist.
+    return readJson(fallbackJsonFile, {
+      schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
+      updatedAt:     new Date().toISOString(),
+      entries:       [],
+    });
+  }
 }
 
 /**
- * Append one optimizer result entry to state/intervention_optimizer_log.json.
+ * Append one optimizer result entry to state/intervention_optimizer_log.jsonl.
  *
  * Emits PLANNING_INTERVENTION_OPTIMIZED event (non-blocking; never throws).
  * Trims to the last 100 entries to cap file growth.
@@ -601,21 +635,25 @@ export async function persistMonthlyPostmortem(config, postmortem) {
 }
 
 export async function appendInterventionOptimizerEntry(config, entry) {
-  const logFile = path.join(config.paths.stateDir, "intervention_optimizer_log.json");
-  const state = await readJson(logFile, {
-    schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
-    updatedAt:     new Date().toISOString(),
-    entries:       [],
-  });
-
+  const stateDir = config?.paths?.stateDir || "state";
+  const logFile = path.join(stateDir, "intervention_optimizer_log.jsonl");
+  const savedAt = new Date().toISOString();
+  const staleAfterMs = 6 * 60 * 60 * 1000;
+  const expiresAt = new Date(Date.now() + staleAfterMs).toISOString();
   const correlationId = String(entry?.correlationId || `optimizer-${Date.now()}`);
-  const record = { ...entry, savedAt: new Date().toISOString() };
-  const entries = Array.isArray(state.entries) ? state.entries : [];
-  entries.push(record);
-
-  state.entries   = entries.length > 100 ? entries.slice(-100) : entries;
-  state.updatedAt = new Date().toISOString();
-  await writeJson(logFile, state);
+  const record = {
+    jsonlSchema: "box.intervention_optimizer_log.v2",
+    recordType: "intervention_optimizer_diagnostic",
+    schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
+    savedAt,
+    freshness: {
+      status: "fresh",
+      staleAfterMs,
+      expiresAt,
+    },
+    payload: { ...entry, savedAt },
+  };
+  await fs.appendFile(logFile, JSON.stringify(record) + "\n", "utf8");
 
   // Emit typed planning event (non-blocking; never throws)
   emitEvent(EVENTS.PLANNING_INTERVENTION_OPTIMIZED, EVENT_DOMAIN.PLANNING, correlationId, {

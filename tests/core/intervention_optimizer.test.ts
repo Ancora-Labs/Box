@@ -18,6 +18,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import {
   INTERVENTION_TYPE,
   OPTIMIZER_STATUS,
@@ -26,6 +29,8 @@ import {
   INTERVENTION_ERROR_CODE,
   SPARSE_DATA_THRESHOLD,
   OPTIMIZER_LOG_SCHEMA_VERSION,
+  OPTIMIZER_LOG_JSONL_SCHEMA,
+  OPTIMIZER_LOG_FRESHNESS_MS,
   BUDGET_UNIT,
   INTERVENTION_SCHEMA,
   validateIntervention,
@@ -40,6 +45,7 @@ import {
   buildPolicyImpactByInterventionId,
   scoreInterventionsAgainstRubric,
   buildBudgetFromConfig,
+  persistOptimizerLog,
 } from "../../src/core/intervention_optimizer.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -844,6 +850,49 @@ describe("full integration: plan → interventions → optimizer", () => {
     // All selected items have ev field
     for (const s of result.selected) {
       assert.ok(typeof s.ev === "number");
+    }
+  });
+});
+
+describe("persistOptimizerLog — parse-safe JSONL + freshness metadata", () => {
+  it("writes parseable JSONL entries with explicit schema and freshness metadata", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-optimizer-log-"));
+    try {
+      const result = runInterventionOptimizer([makeIntervention()], makeBudget());
+      const persisted = await persistOptimizerLog(tmpDir, result);
+      assert.equal(persisted.ok, true);
+
+      const logPath = path.join(tmpDir, "intervention_optimizer_log.jsonl");
+      const raw = await fs.readFile(logPath, "utf8");
+      const lines = raw.split("\n").filter(Boolean);
+      assert.equal(lines.length, 1);
+
+      const entry = JSON.parse(lines[0]);
+      assert.equal(entry.jsonlSchema, OPTIMIZER_LOG_JSONL_SCHEMA);
+      assert.equal(entry.recordType, "intervention_optimizer_diagnostic");
+      assert.equal(entry.schemaVersion, OPTIMIZER_LOG_SCHEMA_VERSION);
+      assert.equal(entry.freshness.status, "fresh");
+      assert.equal(entry.freshness.staleAfterMs, OPTIMIZER_LOG_FRESHNESS_MS);
+      assert.ok(typeof entry.freshness.expiresAt === "string" && entry.freshness.expiresAt.length > 0);
+      assert.equal(entry.payload.status, result.status);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("negative path: each JSONL line is independently parseable after multiple appends", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-optimizer-log-multi-"));
+    try {
+      await persistOptimizerLog(tmpDir, runInterventionOptimizer([makeIntervention({ id: "a" })], makeBudget()));
+      await persistOptimizerLog(tmpDir, runInterventionOptimizer([makeIntervention({ id: "b" })], makeBudget()));
+      const raw = await fs.readFile(path.join(tmpDir, "intervention_optimizer_log.jsonl"), "utf8");
+      const lines = raw.split("\n").filter(Boolean);
+      assert.equal(lines.length, 2);
+      for (const line of lines) {
+        assert.doesNotThrow(() => JSON.parse(line));
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 });

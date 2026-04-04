@@ -81,6 +81,8 @@ import fs from "node:fs/promises";
 
 /** Schema version for dependency_graph_diagnostics.json entries. */
 export const GRAPH_DIAGNOSTICS_SCHEMA_VERSION = 1;
+export const GRAPH_DIAGNOSTICS_JSONL_SCHEMA = "box.dependency_graph_diagnostics.v2";
+export const GRAPH_DIAGNOSTICS_FRESHNESS_MS = 6 * 60 * 60 * 1000;
 
 // ── Status enum (AC10) ────────────────────────────────────────────────────────
 
@@ -799,9 +801,18 @@ export function computeReadinessGate(
  */
 export async function persistGraphDiagnostics(stateDir, resolution, meta: any = {}) {
   const diagnosticsPath = path.join(stateDir, "dependency_graph_diagnostics.json");
+  const persistedAt = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + GRAPH_DIAGNOSTICS_FRESHNESS_MS).toISOString();
   const entry = JSON.stringify({
+    jsonlSchema: GRAPH_DIAGNOSTICS_JSONL_SCHEMA,
+    recordType: "dependency_graph_diagnostic",
     schemaVersion: GRAPH_DIAGNOSTICS_SCHEMA_VERSION,
-    persistedAt: new Date().toISOString(),
+    persistedAt,
+    freshness: {
+      status: "fresh",
+      staleAfterMs: GRAPH_DIAGNOSTICS_FRESHNESS_MS,
+      expiresAt,
+    },
     ...meta,
     status: resolution.status,
     reasonCode: resolution.reasonCode,

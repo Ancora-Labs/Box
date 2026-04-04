@@ -521,7 +521,29 @@ describe("Integration: carry-forward auto-close with verification evidence", () 
 
     // A worker completed the first task with evidence; the second has no resolution
     const resolvedItems = [
-      { taskText: verifiedLesson, verificationEvidence: "All wave ordering tests pass — PR #55 merged" },
+      {
+        taskText: verifiedLesson,
+        verificationEvidence: {
+          workerContract: {
+            passed: true,
+            artifactDetail: {
+              hasSha: true,
+              hasTestOutput: true,
+              hasCleanTreeEvidence: true,
+              hasUnfilledPlaceholder: false,
+            },
+          },
+          replayClosure: {
+            contractSatisfied: true,
+            executedCommands: ["git rev-parse HEAD", "git status --porcelain", "npm test"],
+            rawArtifactEvidenceLinks: [
+              "inline://post-merge-sha/abc1234",
+              "inline://clean-tree-status",
+              "inline://npm-test-output-block",
+            ],
+          },
+        },
+      },
     ];
 
     const closedCount = autoCloseVerifiedDebt(ledger, resolvedItems);
@@ -531,7 +553,7 @@ describe("Integration: carry-forward auto-close with verification evidence", () 
     const verifiedEntry = ledger.find(e => e.lesson === verifiedLesson);
     assert.ok(verifiedEntry?.closedAt, "Verified debt entry must be closed");
     assert.ok(
-      verifiedEntry?.closureEvidence?.includes("PR #55"),
+      verifiedEntry?.closureEvidence?.includes("replay-closure:v1"),
       "Closure evidence must be linked to the worker's verification"
     );
 

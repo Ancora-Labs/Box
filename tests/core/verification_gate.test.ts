@@ -19,6 +19,8 @@ import {
   normalizeReportValue,
   CANONICAL_REPORT_VALUES,
   applyConfigOverrides,
+  CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS,
+  buildReplayClosureEvidence,
   VERIFICATION_REPORT_TEMPLATE_GAP,
   VERIFICATION_REPORT_MALFORMED_GAP,
 } from "../../src/core/verification_gate.js";
@@ -368,6 +370,47 @@ describe("verification_gate — post-merge artifact (Packet 1/3)", () => {
     assert.equal(result.hasTestOutput, true);
     assert.equal(result.hasCleanTreeEvidence, false);
     assert.equal(result.hasArtifact, false);
+  });
+});
+
+describe("verification_gate — replay closure evidence contract", () => {
+  it("exports canonical replay commands for main-branch verification closure", () => {
+    assert.deepEqual(
+      CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS,
+      ["git rev-parse HEAD", "git status --porcelain", "npm test"],
+    );
+  });
+
+  it("buildReplayClosureEvidence marks contractSatisfied for complete replay evidence", () => {
+    const output = [
+      "git rev-parse HEAD",
+      "BOX_MERGED_SHA=abc1234",
+      "git status --porcelain",
+      "CLEAN_TREE_STATUS=clean",
+      "npm test",
+      "===NPM TEST OUTPUT START===",
+      "# tests 10 pass 10 fail 0",
+      "===NPM TEST OUTPUT END===",
+      "RAW_ARTIFACT_LINKS=state/carry_forward_replay_evidence.jsonl",
+    ].join("\n");
+    const replay = buildReplayClosureEvidence(output);
+    assert.equal(replay.contractSatisfied, true);
+    assert.equal(replay.hasCanonicalReplayCommands, true);
+    assert.equal(replay.hasRawArtifactEvidenceLinks, true);
+    assert.equal(replay.missingCommands.length, 0);
+  });
+
+  it("negative path: buildReplayClosureEvidence fails contract when canonical command evidence is incomplete", () => {
+    const output = [
+      "RAW_ARTIFACT_LINKS=state/carry_forward_replay_evidence.jsonl",
+      "===NPM TEST OUTPUT START===",
+      "# tests 10 pass 10 fail 0",
+      "===NPM TEST OUTPUT END===",
+    ].join("\n");
+    const replay = buildReplayClosureEvidence(output);
+    assert.equal(replay.contractSatisfied, false);
+    assert.ok(replay.missingCommands.includes("git rev-parse HEAD"));
+    assert.ok(replay.missingCommands.includes("git status --porcelain"));
   });
 });
 

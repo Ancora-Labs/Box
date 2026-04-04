@@ -9,6 +9,7 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { readJson, writeJson } from "./fs_utils.js";
+import { CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS } from "./verification_gate.js";
 
 /**
  * @typedef {object} DebtEntry
@@ -247,20 +248,64 @@ export function getOpenDebts(ledger) {
  * debt speculatively — evidence is required.
  *
  * @param {DebtEntry[]} ledger — carry-forward ledger (mutated in place)
- * @param {Array<{ taskText: string, verificationEvidence: string }>} resolvedItems
+ * @param {Array<{ taskText: string, verificationEvidence: unknown }>} resolvedItems
  * @returns {number} — count of newly closed entries
  */
 export function autoCloseVerifiedDebt(
   ledger: any[],
-  resolvedItems: Array<{ taskText: string; verificationEvidence: string }>
+  resolvedItems: Array<{ taskText: string; verificationEvidence: unknown }>
 ): number {
   if (!Array.isArray(resolvedItems) || resolvedItems.length === 0) return 0;
 
-  // Build fingerprint → evidence map for all resolved items with real evidence.
+  const toStringArray = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map(item => String(item || "").trim())
+      .filter(Boolean);
+  };
+
+  const buildClosureEvidence = (rawEvidence: unknown): string | null => {
+    if (!rawEvidence || typeof rawEvidence !== "object") return null;
+
+    const envelope = rawEvidence as Record<string, unknown>;
+    const workerContract = (envelope.workerContract && typeof envelope.workerContract === "object")
+      ? envelope.workerContract as Record<string, unknown>
+      : envelope;
+    const replayClosure = (envelope.replayClosure && typeof envelope.replayClosure === "object")
+      ? envelope.replayClosure as Record<string, unknown>
+      : (workerContract.replayClosure && typeof workerContract.replayClosure === "object")
+        ? workerContract.replayClosure as Record<string, unknown>
+        : null;
+
+    if (workerContract.passed !== true) return null;
+    if (!replayClosure) return null;
+
+    const artifactDetail = workerContract.artifactDetail && typeof workerContract.artifactDetail === "object"
+      ? workerContract.artifactDetail as Record<string, unknown>
+      : {};
+
+    const executedCommands = new Set(toStringArray(replayClosure.executedCommands));
+    const hasRequiredCommands = CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS.every(command => executedCommands.has(command));
+    if (!hasRequiredCommands) return null;
+    if (replayClosure.contractSatisfied !== true) return null;
+
+    const links = toStringArray(replayClosure.rawArtifactEvidenceLinks).slice(0, 6);
+    if (links.length === 0) return null;
+
+    const hasSha = artifactDetail.hasSha === true || executedCommands.has("git rev-parse HEAD");
+    const hasTestOutput = artifactDetail.hasTestOutput === true || executedCommands.has("npm test");
+    const hasCleanTree = artifactDetail.hasCleanTreeEvidence === true || executedCommands.has("git status --porcelain");
+    const hasPlaceholder = artifactDetail.hasUnfilledPlaceholder === true;
+    if (!hasSha || !hasTestOutput || !hasCleanTree || hasPlaceholder) return null;
+
+    return `replay-closure:v1 commands=[${CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS.join(", ")}] links=[${links.join(", ")}]`;
+  };
+
+  // Build fingerprint → closure-evidence map for all resolved items with full replay contract.
   const resolvedFingerprints = new Map<string, string>();
   for (const item of resolvedItems) {
-    const evidence = String(item.verificationEvidence || "").trim();
-    if (evidence.length < 5) continue;
+    const evidence = buildClosureEvidence(item.verificationEvidence);
+    if (!evidence) continue;
     const fingerprint = computeFingerprint(String(item.taskText || ""));
     if (!fingerprint) continue;
     if (!resolvedFingerprints.has(fingerprint)) {
