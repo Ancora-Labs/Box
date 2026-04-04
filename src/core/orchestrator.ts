@@ -34,7 +34,7 @@ import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REA
 import { updatePipelineProgress, readPipelineProgress } from "./pipeline_progress.js";
 import { loadEscalationQueue, sortEscalationQueue, processEscalationQueueClosures } from "./escalation_queue.js";
 import { computeCycleSLOs, persistSloMetrics, detectCoupledAlerts } from "./slo_checker.js";
-import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealth, CYCLE_PHASE } from "./cycle_analytics.js";
+import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealth, CYCLE_PHASE, computeRuntimeContractProbe } from "./cycle_analytics.js";
 import { computeBaselineRecoveryState, persistBaselineMetrics, PARSER_CONFIDENCE_RECOVERY_THRESHOLD } from "./parser_baseline_recovery.js";
 import { computeDispatchStrictness, loadReplayRegressionState, DISPATCH_STRICTNESS } from "./parser_replay_harness.js";
 import {
@@ -94,7 +94,7 @@ import {
 import { validatePlanEvidenceCoupling } from "./evidence_envelope.js";
 import { runResearchScout } from "./research_scout.js";
 import { runResearchSynthesizer } from "./research_synthesizer.js";
-import { buildReplayClosureEvidence, CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS } from "./verification_gate.js";
+import { buildReplayClosureEvidence, CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS, hasVerificationReportEvidence } from "./verification_gate.js";
 import {
   readCheckpoint as readVersionedCheckpoint,
   writeCheckpoint as writeVersionedCheckpoint,
@@ -3227,15 +3227,59 @@ async function runSingleCycle(config) {
       : [];
     const mandatoryClosedCount = replayMandatoryItems.filter((item: any) => item?.status === "closed_via_replay_contract").length;
     const mandatoryOpenCount = replayMandatoryItems.length - mandatoryClosedCount;
+    const cycleId = String((await readPipelineProgress(config))?.startedAt || `cycle-${Date.now()}`);
+
+    const seamProbe = computeRuntimeContractProbe({
+      prometheusAnalysis,
+      athenaPlanReview: planReview,
+      workerResults: allWorkerResults,
+    });
+    const doneWorkerEvidenceCount = allWorkerResults.filter((row) => {
+      const status = String(row?.status || "").toLowerCase();
+      if (status !== "done" && status !== "success") return false;
+      return hasVerificationReportEvidence(row?.verificationEvidence || "");
+    }).length;
+    const seamChecks = {
+      prometheus: {
+        pass: seamProbe.criteria.prometheusGeneratedAtAndKeyFindings.pass === true,
+        failReasons: seamProbe.criteria.prometheusGeneratedAtAndKeyFindings.pass === true
+          ? []
+          : ["prometheus_analysis missing generatedAt/keyFindings runtime-contract fields"],
+      },
+      athena: {
+        pass: seamProbe.criteria.athenaPlanReviewOverallScoreFinite.pass === true,
+        failReasons: seamProbe.criteria.athenaPlanReviewOverallScoreFinite.pass === true
+          ? []
+          : ["athena_plan_review.overallScore is missing or non-finite"],
+      },
+      worker: {
+        pass: seamProbe.criteria.doneWorkerWithVerificationReportEvidence.pass === true,
+        failReasons: seamProbe.criteria.doneWorkerWithVerificationReportEvidence.pass === true
+          ? []
+          : [`no done/success worker produced VERIFICATION_REPORT evidence (count=${doneWorkerEvidenceCount})`],
+      },
+    };
+    const seamContractSatisfied = seamChecks.prometheus.pass && seamChecks.athena.pass && seamChecks.worker.pass;
+    const seamFailReasons = [
+      ...seamChecks.prometheus.failReasons,
+      ...seamChecks.athena.failReasons,
+      ...seamChecks.worker.failReasons,
+    ];
     await writeJson(path.join(stateDir, "cycle_proof_evidence.json"), {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
+      cycleId,
       cycleCounter,
       replayClosure: {
         mandatoryLineageIds: [...MANDATORY_REPLAY_LINEAGE_IDS],
         mandatoryClosedCount,
         mandatoryOpenCount,
         contractSatisfied: mandatoryOpenCount === 0,
+      },
+      seams: {
+        contractSatisfied: seamContractSatisfied,
+        failReasons: seamFailReasons,
+        checks: seamChecks,
       },
       backlogSnapshot: replayMandatoryItems.map((item: any) => ({
         id: item?.id || null,

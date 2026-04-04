@@ -539,3 +539,136 @@ export function tagProviderDecision<T extends Record<string, unknown>>(
   }
   return { ...decision, _source: source };
 }
+
+export const MEMORY_TRUST_LEVEL = Object.freeze({
+  HIGH: "high",
+  MEDIUM: "medium",
+  LOW: "low",
+});
+
+export const MEMORY_TRUST_SOURCE = Object.freeze({
+  SYSTEM: "system",
+  MODEL: "model",
+  USER_MEDIATED: "user-mediated",
+});
+
+export type MemoryTrustLevel = typeof MEMORY_TRUST_LEVEL[keyof typeof MEMORY_TRUST_LEVEL];
+export type MemoryTrustSource = typeof MEMORY_TRUST_SOURCE[keyof typeof MEMORY_TRUST_SOURCE];
+
+export type MemoryTrustMetadata = {
+  level: MemoryTrustLevel;
+  source: MemoryTrustSource;
+  reason: string;
+  taggedAt: string;
+};
+
+export type MemoryTrustClassificationInput = {
+  source?: string;
+  sourceType?: string;
+  isUserMediated?: boolean;
+  reason?: string;
+};
+
+export function classifyMemoryTrust(input: MemoryTrustClassificationInput = {}): MemoryTrustMetadata {
+  const source = String(input.source || "").toLowerCase();
+  const sourceType = String(input.sourceType || "").toLowerCase();
+  const sourceAndReason = `${source} ${String(input.reason || "").toLowerCase()}`;
+  const userMediatedHints = ["user", "prompt", "manual", "comment", "issue", "chat", "feedback"];
+  const hasUserMediatedHint = userMediatedHints.some((hint) => sourceAndReason.includes(hint));
+  const isUserMediated = input.isUserMediated === true || sourceType === MEMORY_TRUST_SOURCE.USER_MEDIATED || hasUserMediatedHint;
+
+  if (isUserMediated) {
+    return {
+      level: MEMORY_TRUST_LEVEL.LOW,
+      source: MEMORY_TRUST_SOURCE.USER_MEDIATED,
+      reason: "contains user-mediated free text",
+      taggedAt: new Date().toISOString(),
+    };
+  }
+  if (sourceType === MEMORY_TRUST_SOURCE.SYSTEM || source.includes("system") || source.includes("deterministic")) {
+    return {
+      level: MEMORY_TRUST_LEVEL.HIGH,
+      source: MEMORY_TRUST_SOURCE.SYSTEM,
+      reason: "derived from deterministic system signals",
+      taggedAt: new Date().toISOString(),
+    };
+  }
+  return {
+    level: MEMORY_TRUST_LEVEL.MEDIUM,
+    source: MEMORY_TRUST_SOURCE.MODEL,
+    reason: "model-produced content without direct user mediation",
+    taggedAt: new Date().toISOString(),
+  };
+}
+
+export function isPrivilegedMemoryRequester(requestedBy: unknown): boolean {
+  const normalized = String(requestedBy || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return new Set([
+    "jesus",
+    "orchestratornoveltygate",
+    "governance",
+    "system",
+  ]).has(normalized);
+}
+
+export function normalizeMemoryTrustMetadata(entry: unknown): MemoryTrustMetadata {
+  const row = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+  const trust = row.trust && typeof row.trust === "object" ? row.trust as Record<string, unknown> : {};
+  const level = String(trust.level || "").toLowerCase();
+  const source = String(trust.source || "").toLowerCase();
+  const reason = String(trust.reason || "").trim();
+  const taggedAt = String(trust.taggedAt || "").trim();
+  const validLevel = level === MEMORY_TRUST_LEVEL.HIGH || level === MEMORY_TRUST_LEVEL.MEDIUM || level === MEMORY_TRUST_LEVEL.LOW;
+  const validSource = source === MEMORY_TRUST_SOURCE.SYSTEM || source === MEMORY_TRUST_SOURCE.MODEL || source === MEMORY_TRUST_SOURCE.USER_MEDIATED;
+
+  if (validLevel && validSource) {
+    return {
+      level: level as MemoryTrustLevel,
+      source: source as MemoryTrustSource,
+      reason: reason || "existing trust metadata",
+      taggedAt: taggedAt || new Date().toISOString(),
+    };
+  }
+
+  return classifyMemoryTrust({
+    source: String(row.source || ""),
+    sourceType: source || String(row.sourceType || ""),
+    reason: String(row.reason || row.hint || row.lesson || ""),
+  });
+}
+
+type FilterMemoryEntriesOptions = {
+  includeLowTrust?: boolean;
+  privilegedCaller?: boolean;
+};
+
+export function filterMemoryEntriesByTrust<T>(entries: T[], opts: FilterMemoryEntriesOptions = {}): {
+  selected: Array<T & { trust: MemoryTrustMetadata }>;
+  droppedLowTrustCount: number;
+} {
+  const rows = Array.isArray(entries) ? entries : [];
+  const includeLowTrust = opts.includeLowTrust === true && opts.privilegedCaller === true;
+  const selected: Array<T & { trust: MemoryTrustMetadata }> = [];
+  let droppedLowTrustCount = 0;
+
+  for (const raw of rows) {
+    const trust = normalizeMemoryTrustMetadata(raw);
+    const row = {
+      ...(raw as any),
+      trust,
+    } as T & { trust: MemoryTrustMetadata };
+    if (trust.level === MEMORY_TRUST_LEVEL.LOW && !includeLowTrust) {
+      droppedLowTrustCount += 1;
+      continue;
+    }
+    selected.push(row);
+  }
+
+  selected.sort((a, b) => {
+    const score = (t: MemoryTrustMetadata) => (t.level === MEMORY_TRUST_LEVEL.HIGH ? 3 : t.level === MEMORY_TRUST_LEVEL.MEDIUM ? 2 : 1);
+    return score(b.trust) - score(a.trust);
+  });
+
+  return { selected, droppedLowTrustCount };
+}
