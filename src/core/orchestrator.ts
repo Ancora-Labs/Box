@@ -24,7 +24,7 @@ import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
 import { runPrometheusAnalysis } from "./prometheus.js";
 import { runAthenaPlanReview, ATHENA_PLAN_REVIEW_REASON_CODE, hasFiniteAthenaOverallScore } from "./athena_reviewer.js";
-import { runWorkerConversation } from "./worker_runner.js";
+import { runWorkerConversation, isAnalyticsCompletedWorkerStatus } from "./worker_runner.js";
 import { runSelfImprovementCycle, shouldTriggerSelfImprovement } from "./self_improvement.js";
 import { collectEvolutionMetrics } from "./evolution_metrics.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
@@ -80,6 +80,8 @@ import {
   saveLedgerFull,
   shouldBlockOnDebt,
   autoCloseVerifiedDebt,
+  reconcileReplayClosureBacklog,
+  MANDATORY_REPLAY_LINEAGE_IDS,
 } from "./carry_forward_ledger.js";
 import { reconcileBudgetEligibility, computeRollingCompletionYield, type BudgetEligibilityContract, type RollingYieldContract } from "./budget_controller.js";
 import {
@@ -1150,8 +1152,7 @@ async function completeDispatchCheckpoint(config, checkpoint) {
 
 function isDispatchOutcomeSuccessful(workerResult) {
   const status = String(workerResult?.status || "").toLowerCase();
-  // skipped = work already done (e.g. already-merged PR); treat as successful
-  return status === "done" || status === "partial" || status === "skipped";
+  return status === "partial" || isAnalyticsCompletedWorkerStatus(status);
 }
 
 async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolean } = {}) {
@@ -1894,20 +1895,53 @@ async function runSingleCycle(config) {
   // Gate: only run Scout if synthesis is stale (>48h) AND Prometheus topic memory
   // has no more than `maxActiveResearchTopics` active (unfinished) topics.
   // This prevents Scout from piling on new topics when Prometheus hasn't acted on existing ones.
+  //
+  // ── WHY CONSUMPTION-TRIGGERED (not time-based) ──────────────────────────────
+  // Originally Scout ran on a fixed 48h timer. This was broken in two ways:
+  //
+  //   1. One-way pipeline: Scout → Prometheus → Workers had no feedback loop.
+  //      Prometheus consumed the synthesis, the knowledge was "spent", but Scout
+  //      wouldn't run again for 48h regardless of how many cycles had passed.
+  //
+  //   2. BOX itself regressed this: a worker (CF-001-CF-005, PR #183) added the
+  //      48h gate "to avoid piling on topics", which silently killed the loop.
+  //      The system optimized itself into a dead-end pipeline.
+  //
+  // Decision (2026-04-04, owner: Caner): replace the time gate with a
+  // consumption signal. Prometheus writes `lastConsumedAt` to research_synthesis.json
+  // after injecting the data into its prompt. The scout gate reads this field:
+  // if lastConsumedAt > synthesizedAt, the knowledge was used since the last scout
+  // run → run Scout now so the next cycle has fresh data.
+  //
+  // This creates a proper feedback loop:
+  //   Scout → synthesis → Prometheus (consumes, writes lastConsumedAt)
+  //     → next cycle Scout gate sees consumed → Scout runs → fresh synthesis
+  //
+  // The 1h guard on synthesisAgeHours prevents double-running within the same
+  // cycle (Scout runs at Step 1.5, Prometheus at Step 2 — both in one cycle).
+  //
+  // If BOX proposes reverting to a time-based gate, this comment explains why
+  // that was deliberately removed. Any such change should be treated as a
+  // regression unless there is explicit evidence of resource abuse.
+  // ────────────────────────────────────────────────────────────────────────────
   try {
     const stateDir = config.paths?.stateDir || "state";
-    const scoutIntervalHours = Number(config.runtime?.scoutIntervalHours ?? 48);
     const maxActiveResearchTopics = Number(config.runtime?.scoutMaxActiveTopics ?? 30);
 
-    // Check synthesis age
+    // Read synthesis state
     const synthesisPath = path.join(stateDir, "research_synthesis.json");
     let synthesisAgeHours = Infinity;
+    let synthesisConsumedAt: Date | null = null;
+    let synthJson: Record<string, unknown> | null = null;
     try {
-      const synthJson = await readJson(synthesisPath, null);
+      synthJson = await readJson(synthesisPath, null);
       if (synthJson?.synthesizedAt) {
-        synthesisAgeHours = (Date.now() - new Date(synthJson.synthesizedAt).getTime()) / (1000 * 60 * 60);
+        synthesisAgeHours = (Date.now() - new Date(synthJson.synthesizedAt as string).getTime()) / (1000 * 60 * 60);
       }
-    } catch { /* ok — file missing means first run */ }
+      if (synthJson?.lastConsumedAt) {
+        synthesisConsumedAt = new Date(synthJson.lastConsumedAt as string);
+      }
+    } catch { /* ok — file missing means first run, treat as consumed */ }
 
     // Check active topic count in Prometheus topic memory
     const topicMemoryPath = path.join(stateDir, "prometheus_topic_memory.json");
@@ -1919,11 +1953,27 @@ async function runSingleCycle(config) {
       }
     } catch { /* ok */ }
 
-    const scoutStale = synthesisAgeHours >= scoutIntervalHours;
     const topicsUnderThreshold = activeTopicCount <= maxActiveResearchTopics;
 
-    if (scoutStale && topicsUnderThreshold) {
-      await appendProgress(config, `[CYCLE] ── Step 1.5: Research Scout (synthesisAge=${synthesisAgeHours.toFixed(1)}h >= ${scoutIntervalHours}h, activeTopics=${activeTopicCount} <= ${maxActiveResearchTopics}) ──`);
+    // Consumption-triggered: Prometheus wrote lastConsumedAt after the last scout run,
+    // meaning the knowledge was used and needs refreshing before the next cycle.
+    // Also triggers on first run (no synthesis file yet — synthesisAgeHours = Infinity).
+    const synthesisConsumedSinceLastScout =
+      synthJson === null || // first run — no synthesis exists yet
+      (
+        synthesisConsumedAt !== null &&
+        synthJson?.synthesizedAt != null &&
+        synthesisConsumedAt > new Date(synthJson.synthesizedAt as string) &&
+        synthesisAgeHours >= 1  // guard: synthesis must be at least 1h old to avoid same-cycle double-run
+      );
+
+    const shouldRunScout = topicsUnderThreshold && synthesisConsumedSinceLastScout;
+
+    if (shouldRunScout) {
+      const scoutReason = synthJson === null
+        ? "first-run (no synthesis exists)"
+        : `consumption-triggered (consumed=${synthesisConsumedAt?.toISOString()}, synthesized=${synthJson.synthesizedAt})`;
+      await appendProgress(config, `[CYCLE] ── Step 1.5: Research Scout (${scoutReason}, activeTopics=${activeTopicCount}) ──`);
       await appendProgress(config, `[AGENT] ↯↯↯ RESEARCH SCOUT ↯↯↯  req#${_cycleRequests + 1} this cycle`);
       try {
         const scoutResult = await runResearchScout(config);
@@ -1931,7 +1981,7 @@ async function runSingleCycle(config) {
           await appendProgress(config, `[RESEARCH_SCOUT] Collected ${scoutResult.sourceCount} sources — running synthesizer`);
           await runResearchSynthesizer(config, scoutResult);
           await appendProgress(config, "[RESEARCH_SCOUT] Synthesis complete — Prometheus will receive updated research context");
-          await spendPremium("research-scout", "scheduled_refresh");
+          await spendPremium("research-scout", "consumption_triggered_refresh");
           await appendProgress(config, `[RESEARCH_SCOUT] ✓ Done — requests this cycle: ${_cycleRequests}`);
         } else {
           await appendProgress(config, `[RESEARCH_SCOUT] Scout returned no sources (success=${scoutResult.success}) — skipping synthesis`);
@@ -1941,7 +1991,10 @@ async function runSingleCycle(config) {
         await appendProgress(config, `[RESEARCH_SCOUT] Failed (non-fatal): ${String((scoutErr as any)?.message || scoutErr)}`);
       }
     } else {
-      await appendProgress(config, `[CYCLE] Research Scout skipped — synthesisAge=${synthesisAgeHours.toFixed(1)}h (threshold=${scoutIntervalHours}h) activeTopics=${activeTopicCount} (threshold=${maxActiveResearchTopics})`);
+      const skipReason = !topicsUnderThreshold
+        ? `activeTopics=${activeTopicCount} > threshold=${maxActiveResearchTopics}`
+        : `synthesis not yet consumed (lastConsumedAt=${synthesisConsumedAt?.toISOString() ?? "none"}, synthesizedAt=${synthJson?.synthesizedAt ?? "none"})`;
+      await appendProgress(config, `[CYCLE] Research Scout skipped — ${skipReason}`);
     }
   } catch (scoutGateErr) {
     warn(`[orchestrator] Scout gate evaluation failed (non-fatal): ${String((scoutGateErr as any)?.message || scoutGateErr)}`);
@@ -2873,7 +2926,7 @@ async function runSingleCycle(config) {
         generated:  Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
         approved:   funnelApprovedCount,
         dispatched: funnelDispatchedCount,
-        completed:  allWorkerResults.filter(r => r.status === "done" || r.status === "success").length,
+        completed:  allWorkerResults.filter(r => isAnalyticsCompletedWorkerStatus(r.status)).length,
       },
     });
     await persistCycleAnalytics(config, analyticsRecord);
@@ -3058,6 +3111,34 @@ async function runSingleCycle(config) {
         `[CARRY_FORWARD] ${closedByEvidence} debt item(s) auto-closed by replay closure evidence contract`
       );
     }
+
+    const carryForwardBacklogPath = path.join(stateDir, "carry_forward_backlog.json");
+    const carryForwardBacklog = await readJson(carryForwardBacklogPath, { schemaVersion: 1, items: [] });
+    const reconciledBacklog = reconcileReplayClosureBacklog(carryForwardBacklog, updatedLedger);
+    await writeJson(carryForwardBacklogPath, reconciledBacklog);
+
+    const replayMandatoryItems = Array.isArray(reconciledBacklog.items)
+      ? reconciledBacklog.items.filter((item: any) => MANDATORY_REPLAY_LINEAGE_IDS.includes(String(item?.id || "")))
+      : [];
+    const mandatoryClosedCount = replayMandatoryItems.filter((item: any) => item?.status === "closed_via_replay_contract").length;
+    const mandatoryOpenCount = replayMandatoryItems.length - mandatoryClosedCount;
+    await writeJson(path.join(stateDir, "cycle_proof_evidence.json"), {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      cycleCounter,
+      replayClosure: {
+        mandatoryLineageIds: [...MANDATORY_REPLAY_LINEAGE_IDS],
+        mandatoryClosedCount,
+        mandatoryOpenCount,
+        contractSatisfied: mandatoryOpenCount === 0,
+      },
+      backlogSnapshot: replayMandatoryItems.map((item: any) => ({
+        id: item?.id || null,
+        status: item?.status || null,
+        debtId: item?.debtId || null,
+        resolutionEvidence: item?.resolutionEvidence || null,
+      })),
+    });
 
     const newCycleCounter = cycleCounter + 1;
     await saveLedgerFull(config, updatedLedger, newCycleCounter);

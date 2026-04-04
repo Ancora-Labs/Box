@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   buildRoleExecutionBatches,
   MAX_PLANS_PER_DEPENDENCY_BATCH,
@@ -1218,6 +1221,51 @@ describe("buildTokenFirstBatches — specialist threshold routing", () => {
     assert.equal(typeof target.requiredSpecializedCount, "number");
     assert.equal(typeof target.achievedSpecializedCount, "number");
     assert.equal(typeof target.targetMet, "boolean");
+  });
+
+  it("feeds lane ROI/completion telemetry into per-lane specialist fit thresholds", () => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), "box-lane-telemetry-"));
+    try {
+      writeFileSync(
+        path.join(stateDir, "cycle_analytics.json"),
+        JSON.stringify({
+          lastCycle: {
+            laneTelemetry: {
+              governance: {
+                completed: 1,
+                failed: 4,
+                completionRate: 0.95,
+                roi: 4,
+              },
+            },
+          },
+        }),
+        "utf8"
+      );
+
+      const feedbackConfig = {
+        ...config,
+        paths: { stateDir },
+        workerPool: {
+          specializationTargets: { fitScoreThreshold: 0.72 },
+        },
+      };
+      const plans = [
+        makePlan("governance-worker", "Update governance freeze policy rules"),
+      ];
+      const batches = buildTokenFirstBatches(plans, feedbackConfig);
+      assert.equal(batches.length, 1);
+      assert.equal(batches[0].role, "governance-worker", "telemetry-adjusted threshold should preserve specialist lane");
+
+      const target = (batches[0] as any).specialistUtilizationTarget;
+      const governanceTarget = target.laneUtilizationTargets.governance;
+      assert.ok(governanceTarget.fitScoreThreshold < target.fitScoreThreshold, "lane threshold should be lowered by strong ROI/completion telemetry");
+      assert.equal(governanceTarget.completionRate, 0.95);
+      assert.equal(governanceTarget.roi, 4);
+      assert.equal(governanceTarget.targetMet, true);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("separates same-role conflicting file plans into distinct token-first batches", () => {

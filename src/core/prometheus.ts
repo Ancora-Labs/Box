@@ -506,6 +506,53 @@ async function readLatestJsonlRecord(filePath: string): Promise<any | null> {
   return null;
 }
 
+async function readLegacyDiagnosticsFallback(stateDir: string, label: string): Promise<any | null> {
+  if (label !== "intervention_optimizer") return null;
+  const fallbackPath = path.join(stateDir, "intervention_optimizer_log.json");
+  try {
+    const legacy = await readJson(fallbackPath, null);
+    const entries = Array.isArray(legacy?.entries) ? legacy.entries : [];
+    if (entries.length === 0) return null;
+    const latest = entries[entries.length - 1];
+    const savedAt = String(latest?.generatedAt || legacy?.updatedAt || "").trim() || new Date().toISOString();
+    const staleAfterMs = DIAGNOSTICS_FRESHNESS_MAX_AGE_MS;
+    return {
+      jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+      recordType: OPTIMIZER_LOG_RECORD_TYPE,
+      schemaVersion: Number(legacy?.schemaVersion || 1),
+      savedAt,
+      freshness: {
+        status: "fresh",
+        staleAfterMs,
+        expiresAt: new Date(new Date(savedAt).getTime() + staleAfterMs).toISOString(),
+      },
+      payload: latest,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDiagnosticsRecord(record: any, expectedSchema: string, expectedRecordType: string): any | null {
+  if (isDiagnosticsRecordContractValid(record, expectedSchema, expectedRecordType)) return record;
+  if (!record || typeof record !== "object") return null;
+  const timestamp = String(record.savedAt || record.persistedAt || record.resolvedAt || record.recordedAt || "").trim();
+  if (!timestamp) return null;
+  const staleAfterMs = DIAGNOSTICS_FRESHNESS_MAX_AGE_MS;
+  return {
+    jsonlSchema: expectedSchema,
+    recordType: expectedRecordType,
+    schemaVersion: Number(record.schemaVersion || 1),
+    savedAt: timestamp,
+    freshness: {
+      status: "fresh",
+      staleAfterMs,
+      expiresAt: new Date(new Date(timestamp).getTime() + staleAfterMs).toISOString(),
+    },
+    payload: record.payload && typeof record.payload === "object" ? record.payload : record,
+  };
+}
+
 function isDiagnosticsRecordContractValid(
   record: any,
   expectedSchema: string,
@@ -554,20 +601,22 @@ async function buildDiagnosticsFreshnessPromptSection(stateDir: string): Promise
   for (const item of diagnostics) {
     const filePath = path.join(stateDir, item.file);
     const latest = await readLatestJsonlRecord(filePath);
-    if (!isDiagnosticsRecordContractValid(latest, item.jsonlSchema, item.recordType)) {
+    const normalized = normalizeDiagnosticsRecord(latest, item.jsonlSchema, item.recordType)
+      || await readLegacyDiagnosticsFallback(stateDir, item.label);
+    if (!normalized || !isDiagnosticsRecordContractValid(normalized, item.jsonlSchema, item.recordType)) {
       lines.push(`- ${item.label}: missing_or_unparseable (${item.file})`);
       continue;
     }
 
     const recordedAtRaw = String(
-      latest.savedAt
-      || latest.persistedAt
-      || latest.recordedAt
-      || latest.generatedAt
+      normalized.savedAt
+      || normalized.persistedAt
+      || normalized.recordedAt
+      || normalized.generatedAt
       || "",
     ).trim();
     const recordedAtMs = recordedAtRaw ? new Date(recordedAtRaw).getTime() : NaN;
-    const staleAfterMsRaw = Number((latest as any)?.freshness?.staleAfterMs);
+    const staleAfterMsRaw = Number((normalized as any)?.freshness?.staleAfterMs);
     const staleAfterMs = Number.isFinite(staleAfterMsRaw) && staleAfterMsRaw > 0
       ? staleAfterMsRaw
       : DIAGNOSTICS_FRESHNESS_MAX_AGE_MS;
@@ -2913,6 +2962,9 @@ export function buildDriftDebtTasks(
       capacityDelta: 0.05,
       requestROI: 1.2,
       leverage_rank: ["quality"],
+      implementationEvidence: [
+        `architecture_drift report lists stale reference(s) in ${doc}`,
+      ],
     });
   }
 
@@ -2956,6 +3008,9 @@ export function buildDriftDebtTasks(
       capacityDelta: 0.05,
       requestROI: 1.2,
       leverage_rank: ["quality"],
+      implementationEvidence: [
+        `architecture_drift report lists deprecated token usage(s) in ${doc}`,
+      ],
     });
   }
 
@@ -3357,19 +3412,15 @@ export function seedDiscoveryGapPackets(
   }));
 }
 
-function ensurePersistedAnalysisTimestamps<T extends Record<string, unknown>>(analysis: T): T & {
+export function ensurePersistedAnalysisTimestamps<T extends Record<string, unknown>>(analysis: T): T & {
   generatedAt: string;
   analyzedAt: string;
 } {
-  const generatedAt = String(analysis?.generatedAt ?? "").trim();
-  const analyzedAt = String(analysis?.analyzedAt ?? "").trim();
   const nowIso = new Date().toISOString();
-  const normalizedAnalyzedAt = analyzedAt || nowIso;
-  const normalizedGeneratedAt = generatedAt || normalizedAnalyzedAt;
   return {
     ...analysis,
-    generatedAt: normalizedGeneratedAt,
-    analyzedAt: normalizedAnalyzedAt,
+    generatedAt: nowIso,
+    analyzedAt: nowIso,
   };
 }
 
@@ -3491,6 +3542,16 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
         config,
         `[PROMETHEUS] Injecting research synthesis: ${researchTopicCount} topic(s) from ${researchSourceCount} source(s)`
       );
+      // Mark synthesis as consumed so the scout gate can trigger a refresh on the next cycle.
+      try {
+        const synthPath = path.join(stateDir, "research_synthesis.json");
+        const synthRaw = await readJson(synthPath, null);
+        if (synthRaw && typeof synthRaw === "object") {
+          const updated = { ...(synthRaw as Record<string, unknown>), lastConsumedAt: new Date().toISOString() };
+          const { writeFile } = await import("node:fs/promises");
+          await writeFile(synthPath, JSON.stringify(updated, null, 2), "utf8");
+        }
+      } catch { /* non-fatal — consumption tracking must never block planning */ }
     }
   } catch {
     // Optional signal; continue without research injection.
@@ -4579,27 +4640,29 @@ Mandatory requirements:
     // Filter uses deterministic PACKET_VIOLATION_CODE codes (canonical taxonomy from
     // plan_contract_validator.ts) rather than field-name string equality, so matching
     // is immune to field rename and consistent with the generation-boundary gate codes.
-    const CAPACITY_ROI_VIOLATION_CODES: Set<string> = new Set([
+    const ADMISSION_REJECTION_VIOLATION_CODES: Set<string> = new Set([
       PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA,
       PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA,
       PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI,
       PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI,
+      PACKET_VIOLATION_CODE.MISSING_IMPLEMENTATION_EVIDENCE,
+      PACKET_VIOLATION_CODE.MISSING_CAPACITY_FIRST_JUSTIFICATION,
     ]);
-    const capacityRoiViolatingIndices = contractResult.results
+    const admissionRejectIndices = contractResult.results
       .filter(r => !r.valid && r.violations.some(v =>
-        CAPACITY_ROI_VIOLATION_CODES.has(v.code) &&
+        ADMISSION_REJECTION_VIOLATION_CODES.has(v.code) &&
         v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
       ))
       .map(r => r.planIndex)
       .sort((a, b) => b - a); // reverse order for safe in-place splice
-    if (capacityRoiViolatingIndices.length > 0) {
-      for (const idx of capacityRoiViolatingIndices) {
+    if (admissionRejectIndices.length > 0) {
+      for (const idx of admissionRejectIndices) {
         parsed.plans.splice(idx, 1);
       }
       await appendProgress(config,
-        `[PROMETHEUS][CONTRACT] Hard-filtered ${capacityRoiViolatingIndices.length} plan(s) missing valid capacityDelta/requestROI — secondary safety net`
+        `[PROMETHEUS][CONTRACT] Hard-filtered ${admissionRejectIndices.length} low-quality/redundant admission packet(s) missing required evidence or capacity-first justification`
       );
-      parsed._capacityRoiFilteredCount = capacityRoiViolatingIndices.length;
+      parsed._capacityRoiFilteredCount = admissionRejectIndices.length;
     }
   }
 

@@ -1,9 +1,16 @@
-import { getRoleRegistry } from "./role_registry.js";
+import { getRoleRegistry, getSpecialistLaneNames } from "./role_registry.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
-import { enforceLaneDiversity, selectWorkerByFitScore, LanePerformanceLedger, buildLanePerformanceFromCycleTelemetry } from "./capability_pool.js";
+import {
+  enforceLaneDiversity,
+  selectWorkerByFitScore,
+  LanePerformanceLedger,
+  buildLanePerformanceFromCycleTelemetry,
+  buildLaneTelemetrySignals,
+  computeSpecialistFitThreshold,
+} from "./capability_pool.js";
 import { compactSingletonWaves } from "./dag_scheduler.js";
 import { rankModelsByTaskKindExpectedValue } from "./model_policy.js";
 import {
@@ -1140,22 +1147,53 @@ export function buildTokenFirstBatches(
   const telemetry = loadCycleAnalyticsTelemetry(config);
   const laneTelemetry = telemetry?.lastCycle?.laneTelemetry ?? {};
   const lanePerformance = buildLanePerformanceFromCycleTelemetry(laneTelemetry);
+  const laneTelemetrySignals = buildLaneTelemetrySignals(laneTelemetry);
   const specialistFitThreshold = resolveSpecialistFitThreshold(config);
   const minSpecializedShare = Number((config as any)?.workerPool?.specializationTargets?.minSpecializedShare ?? 0.35);
   const requiredSpecializedCount = Math.max(0, Math.ceil(workingPlans.length * minSpecializedShare));
   let specialistAssignedCount = 0;
+  const laneUtilizationTargets = Object.fromEntries(
+    getSpecialistLaneNames().map((lane) => {
+      const signal = laneTelemetrySignals[lane] ?? { completionRate: 0, roi: 0 };
+      return [lane, {
+        fitScoreThreshold: computeSpecialistFitThreshold(specialistFitThreshold, lane, laneTelemetrySignals),
+        fitEligibleCount: 0,
+        achievedSpecializedCount: 0,
+        completionRate: signal.completionRate,
+        roi: signal.roi,
+      }];
+    })
+  ) as Record<string, {
+    fitScoreThreshold: number;
+    fitEligibleCount: number;
+    achievedSpecializedCount: number;
+    completionRate: number;
+    roi: number;
+  }>;
 
   // Dispatch-time specialist utilization target:
   // lock specialist routing when fit score clears the configured threshold.
   for (const plan of workingPlans) {
     const selection = selectWorkerByFitScore(plan, config, lanePerformance);
+    const laneFitThreshold = computeSpecialistFitThreshold(
+      specialistFitThreshold,
+      selection.lane,
+      laneTelemetrySignals
+    );
     plan._fitScore = selection.fitScore;
     plan._fitLane = selection.lane;
-    if (selection.role !== "Evolution Worker" && selection.fitScore >= specialistFitThreshold) {
+    plan._fitScoreThreshold = laneFitThreshold;
+    if (selection.role !== "Evolution Worker" && selection.fitScore >= laneFitThreshold) {
+      if (laneUtilizationTargets[selection.lane]) {
+        laneUtilizationTargets[selection.lane].fitEligibleCount += 1;
+      }
       plan._originalRole = plan.role;
       plan.role = selection.role;
       plan._specialistFitLocked = true;
       specialistAssignedCount += 1;
+      if (laneUtilizationTargets[selection.lane]) {
+        laneUtilizationTargets[selection.lane].achievedSpecializedCount += 1;
+      }
     }
   }
 
@@ -1286,6 +1324,13 @@ export function buildTokenFirstBatches(
       requiredSpecializedCount,
       achievedSpecializedCount: specialistAssignedCount,
       targetMet: specialistAssignedCount >= requiredSpecializedCount,
+      laneUtilizationTargets: Object.fromEntries(
+        Object.entries(laneUtilizationTargets).map(([lane, target]) => [lane, {
+          ...target,
+          targetMet: target.achievedSpecializedCount >= target.fitEligibleCount,
+        }])
+      ),
+      laneTelemetrySignals,
     },
     ...(reroutedRoles.length > 0 ? { specialistReroutes: reroutedRoles } : {}),
   }));

@@ -50,7 +50,8 @@ import { SLO_TIMESTAMP_CONTRACT, SLO_METRIC } from "./slo_checker.js";
 import { hasVerificationReportEvidence } from "./verification_gate.js";
 import { hasFiniteAthenaOverallScore } from "./athena_reviewer.js";
 import { hasPrometheusRuntimeContractSignals } from "./prometheus.js";
-import { getLaneForWorkerName } from "./role_registry.js";
+import { getLaneForWorkerName, isSpecialistLane } from "./role_registry.js";
+import { isAnalyticsCompletedWorkerStatus } from "./worker_runner.js";
 
 // ── Funnel helpers ─────────────────────────────────────────────────────────────
 
@@ -233,6 +234,7 @@ function computeLaneTelemetry(workerResults: Array<{ roleName: string; status: s
   failed: number;
   completionRate: number;
   roi: number;
+  specialistLane: boolean;
 }> {
   if (!Array.isArray(workerResults) || workerResults.length === 0) return {};
   const byLane = new Map<string, { dispatched: number; completed: number; failed: number }>();
@@ -245,7 +247,7 @@ function computeLaneTelemetry(workerResults: Array<{ roleName: string; status: s
     if (status === "error" || status === "failed") current.failed += 1;
     byLane.set(lane, current);
   }
-  const output: Record<string, { dispatched: number; completed: number; failed: number; completionRate: number; roi: number }> = {};
+  const output: Record<string, { dispatched: number; completed: number; failed: number; completionRate: number; roi: number; specialistLane: boolean }> = {};
   for (const [lane, row] of byLane.entries()) {
     const completionRate = row.dispatched > 0 ? row.completed / row.dispatched : 0;
     const roi = row.completed / Math.max(1, row.failed);
@@ -255,6 +257,7 @@ function computeLaneTelemetry(workerResults: Array<{ roleName: string; status: s
       failed: row.failed,
       completionRate: Math.round(completionRate * 1000) / 1000,
       roi: Math.round(roi * 1000) / 1000,
+      specialistLane: isSpecialistLane(lane),
     };
   }
   return output;
@@ -441,9 +444,16 @@ function computeOutcomeStatus(phase, workerResults, planCount) {
   }
 
   const failed = workerResults.filter(w => w.status === "error" || w.status === "failed").length;
-  const done = workerResults.filter(w => w.status === "done" || w.status === "success").length;
+  const done = workerResults.filter(w => isAnalyticsCompletedWorkerStatus(w.status)).length;
+  const partial = workerResults.filter(w => w.status === "partial").length;
+  const hasDispatch = typeof planCount === "number" && planCount > 0;
 
-  if (failed === 0) return CYCLE_OUTCOME_STATUS.SUCCESS;
+  if (hasDispatch && done === 0) {
+    if (partial > 0) return CYCLE_OUTCOME_STATUS.PARTIAL;
+    if (failed > 0) return CYCLE_OUTCOME_STATUS.FAILED;
+    return CYCLE_OUTCOME_STATUS.UNKNOWN;
+  }
+  if (failed === 0 && partial === 0 && done > 0) return CYCLE_OUTCOME_STATUS.SUCCESS;
   if (done > 0) return CYCLE_OUTCOME_STATUS.PARTIAL;
   return CYCLE_OUTCOME_STATUS.FAILED;
 }
@@ -551,7 +561,7 @@ export function computeCycleAnalytics(config, {
   // Outcomes
   const tasksDispatched = planCount !== null ? planCount : null;
   const tasksCompleted = Array.isArray(safeWorkerResults)
-    ? safeWorkerResults.filter(w => w.status === "done" || w.status === "success").length
+    ? safeWorkerResults.filter(w => isAnalyticsCompletedWorkerStatus(w.status)).length
     : null;
   const tasksFailed = Array.isArray(safeWorkerResults)
     ? safeWorkerResults.filter(w => w.status === "error" || w.status === "failed").length
