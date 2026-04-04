@@ -4,7 +4,12 @@ import { ensureParent, readJson, writeJson } from "./fs_utils.js";
 import { emitEvent } from "./logger.js";
 import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 import { validateLineageEntry, buildFailureClusters, detectLoop, LINEAGE_ERROR_CODE, LINEAGE_THRESHOLDS } from "./lineage_graph.js";
-import { OPTIMIZER_LOG_SCHEMA_VERSION } from "./intervention_optimizer.js";
+import {
+  OPTIMIZER_LOG_SCHEMA_VERSION,
+  OPTIMIZER_LOG_JSONL_SCHEMA,
+  OPTIMIZER_LOG_FRESHNESS_MS,
+  OPTIMIZER_LOG_RECORD_TYPE,
+} from "./intervention_optimizer.js";
 
 // ── Alert severity enum — deterministic constants for all alert records ───────
 export const ALERT_SEVERITY = {
@@ -534,7 +539,7 @@ export async function loadInterventionOptimizerLog(config) {
   const jsonlFile = path.join(stateDir, "intervention_optimizer_log.jsonl");
   const fallbackJsonFile = path.join(stateDir, "intervention_optimizer_log.json");
   const nowMs = Date.now();
-  const defaultFreshnessMs = 6 * 60 * 60 * 1000;
+  const defaultFreshnessMs = OPTIMIZER_LOG_FRESHNESS_MS;
 
   try {
     const raw = await fs.readFile(jsonlFile, "utf8");
@@ -545,10 +550,19 @@ export async function loadInterventionOptimizerLog(config) {
 
     const entries = [];
     for (const record of records as any[]) {
+      if (
+        record?.jsonlSchema !== OPTIMIZER_LOG_JSONL_SCHEMA
+        || record?.recordType !== OPTIMIZER_LOG_RECORD_TYPE
+      ) {
+        continue;
+      }
       const freshness = record?.freshness && typeof record.freshness === "object"
         ? record.freshness
         : {};
-      const staleAfterMs = Number(freshness?.staleAfterMs || defaultFreshnessMs);
+      const staleAfterMsRaw = Number(freshness?.staleAfterMs);
+      const staleAfterMs = Number.isFinite(staleAfterMsRaw) && staleAfterMsRaw > 0
+        ? staleAfterMsRaw
+        : defaultFreshnessMs;
       const savedAt = String(record?.savedAt || record?.persistedAt || "").trim();
       const savedAtMs = savedAt ? new Date(savedAt).getTime() : NaN;
       if (!Number.isFinite(savedAtMs)) continue;
@@ -564,11 +578,19 @@ export async function loadInterventionOptimizerLog(config) {
     };
   } catch {
     // Backward compatibility: accept the legacy JSON object file when JSONL does not exist.
-    return readJson(fallbackJsonFile, {
+    const fallback = await readJson(fallbackJsonFile, {
       schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
       updatedAt:     new Date().toISOString(),
       entries:       [],
     });
+    const updatedAtRaw = String(fallback?.updatedAt || "").trim();
+    const updatedAtMs = updatedAtRaw ? new Date(updatedAtRaw).getTime() : NaN;
+    const isFresh = Number.isFinite(updatedAtMs) && (nowMs - updatedAtMs) <= defaultFreshnessMs;
+    return {
+      schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
+      updatedAt: new Date().toISOString(),
+      entries: isFresh && Array.isArray(fallback?.entries) ? fallback.entries : [],
+    };
   }
 }
 
@@ -638,12 +660,12 @@ export async function appendInterventionOptimizerEntry(config, entry) {
   const stateDir = config?.paths?.stateDir || "state";
   const logFile = path.join(stateDir, "intervention_optimizer_log.jsonl");
   const savedAt = new Date().toISOString();
-  const staleAfterMs = 6 * 60 * 60 * 1000;
+  const staleAfterMs = OPTIMIZER_LOG_FRESHNESS_MS;
   const expiresAt = new Date(Date.now() + staleAfterMs).toISOString();
   const correlationId = String(entry?.correlationId || `optimizer-${Date.now()}`);
   const record = {
-    jsonlSchema: "box.intervention_optimizer_log.v2",
-    recordType: "intervention_optimizer_diagnostic",
+    jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+    recordType: OPTIMIZER_LOG_RECORD_TYPE,
     schemaVersion: OPTIMIZER_LOG_SCHEMA_VERSION,
     savedAt,
     freshness: {

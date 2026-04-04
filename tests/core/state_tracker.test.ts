@@ -3,7 +3,22 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { ALERT_SEVERITY, appendProgress, loadTestsState, updateTaskInTestsState, CACHE_COMPLETION_OUTCOME, appendCacheOutcome, appendPolicyClosureEvidence, loadPolicyClosureHistory } from "../../src/core/state_tracker.js";
+import {
+  ALERT_SEVERITY,
+  appendProgress,
+  loadTestsState,
+  updateTaskInTestsState,
+  CACHE_COMPLETION_OUTCOME,
+  appendCacheOutcome,
+  appendPolicyClosureEvidence,
+  loadPolicyClosureHistory,
+  loadInterventionOptimizerLog,
+  appendInterventionOptimizerEntry,
+} from "../../src/core/state_tracker.js";
+import {
+  OPTIMIZER_LOG_JSONL_SCHEMA,
+  OPTIMIZER_LOG_RECORD_TYPE,
+} from "../../src/core/intervention_optimizer.js";
 
 describe("state_tracker", () => {
   let stateDir: string;
@@ -212,6 +227,103 @@ describe("loadPolicyClosureHistory", () => {
     assert.equal(history.length, 2);
     assert.equal(history[0].policyId, "ok");
     assert.equal(history[1].policyId, "also-ok");
+  });
+});
+
+describe("loadInterventionOptimizerLog", () => {
+  let optimizerStateDir: string;
+  let config: any;
+
+  beforeEach(async () => {
+    optimizerStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-optimizer-state-"));
+    config = { paths: { stateDir: optimizerStateDir } };
+  });
+
+  afterEach(async () => {
+    await fs.rm(optimizerStateDir, { recursive: true, force: true });
+  });
+
+  it("loads only fresh, contract-valid JSONL records", async () => {
+    const now = Date.now();
+    const staleSavedAt = new Date(now - (8 * 60 * 60 * 1000)).toISOString();
+    const freshSavedAt = new Date(now).toISOString();
+    const logFile = path.join(optimizerStateDir, "intervention_optimizer_log.jsonl");
+
+    const lines = [
+      JSON.stringify({
+        jsonlSchema: "wrong.schema",
+        recordType: OPTIMIZER_LOG_RECORD_TYPE,
+        savedAt: freshSavedAt,
+        freshness: { staleAfterMs: 6 * 60 * 60 * 1000 },
+        payload: { id: "invalid-schema" },
+      }),
+      JSON.stringify({
+        jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+        recordType: "wrong_type",
+        savedAt: freshSavedAt,
+        freshness: { staleAfterMs: 6 * 60 * 60 * 1000 },
+        payload: { id: "invalid-type" },
+      }),
+      JSON.stringify({
+        jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+        recordType: OPTIMIZER_LOG_RECORD_TYPE,
+        savedAt: staleSavedAt,
+        freshness: { staleAfterMs: 6 * 60 * 60 * 1000 },
+        payload: { id: "stale" },
+      }),
+      JSON.stringify({
+        jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
+        recordType: OPTIMIZER_LOG_RECORD_TYPE,
+        savedAt: freshSavedAt,
+        freshness: { staleAfterMs: 6 * 60 * 60 * 1000 },
+        payload: { id: "fresh-valid" },
+      }),
+    ];
+
+    await fs.writeFile(logFile, `${lines.join("\n")}\n`, "utf8");
+    const result = await loadInterventionOptimizerLog(config);
+    assert.equal(result.entries.length, 1);
+    assert.equal(result.entries[0].id, "fresh-valid");
+  });
+
+  it("returns no entries when legacy fallback file is stale", async () => {
+    const fallbackFile = path.join(optimizerStateDir, "intervention_optimizer_log.json");
+    await fs.writeFile(
+      fallbackFile,
+      JSON.stringify({
+        schemaVersion: 1,
+        updatedAt: new Date(Date.now() - (8 * 60 * 60 * 1000)).toISOString(),
+        entries: [{ id: "legacy-stale" }],
+      }),
+      "utf8",
+    );
+
+    const result = await loadInterventionOptimizerLog(config);
+    assert.deepEqual(result.entries, []);
+  });
+});
+
+describe("appendInterventionOptimizerEntry", () => {
+  let optimizerAppendDir: string;
+  let config: any;
+
+  beforeEach(async () => {
+    optimizerAppendDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-optimizer-append-"));
+    config = { paths: { stateDir: optimizerAppendDir } };
+  });
+
+  afterEach(async () => {
+    await fs.rm(optimizerAppendDir, { recursive: true, force: true });
+  });
+
+  it("writes standardized contract fields for optimizer diagnostics JSONL", async () => {
+    await appendInterventionOptimizerEntry(config, { status: "ok", selected: [], rejected: [] });
+    const logFile = path.join(optimizerAppendDir, "intervention_optimizer_log.jsonl");
+    const line = (await fs.readFile(logFile, "utf8")).trim();
+    const record = JSON.parse(line);
+    assert.equal(record.jsonlSchema, OPTIMIZER_LOG_JSONL_SCHEMA);
+    assert.equal(record.recordType, OPTIMIZER_LOG_RECORD_TYPE);
+    assert.equal(record.freshness.status, "fresh");
   });
 });
 

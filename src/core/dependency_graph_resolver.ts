@@ -83,6 +83,7 @@ import fs from "node:fs/promises";
 export const GRAPH_DIAGNOSTICS_SCHEMA_VERSION = 1;
 export const GRAPH_DIAGNOSTICS_JSONL_SCHEMA = "box.dependency_graph_diagnostics.v2";
 export const GRAPH_DIAGNOSTICS_FRESHNESS_MS = 6 * 60 * 60 * 1000;
+export const GRAPH_DIAGNOSTICS_RECORD_TYPE = "dependency_graph_diagnostic";
 
 // ── Status enum (AC10) ────────────────────────────────────────────────────────
 
@@ -803,9 +804,32 @@ export async function persistGraphDiagnostics(stateDir, resolution, meta: any = 
   const diagnosticsPath = path.join(stateDir, "dependency_graph_diagnostics.json");
   const persistedAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + GRAPH_DIAGNOSTICS_FRESHNESS_MS).toISOString();
+  const reservedKeys = new Set([
+    "jsonlSchema",
+    "recordType",
+    "schemaVersion",
+    "persistedAt",
+    "freshness",
+    "status",
+    "reasonCode",
+    "resolvedAt",
+    "totalTasks",
+    "parallelTasks",
+    "serializedTasks",
+    "waveCount",
+    "conflictCount",
+    "cycleCount",
+    "errorMessage",
+    "waves",
+    "conflictPairs",
+    "cycles",
+  ]);
+  const safeMeta = meta && typeof meta === "object" && !Array.isArray(meta)
+    ? Object.fromEntries(Object.entries(meta).filter(([key]) => !reservedKeys.has(key)))
+    : {};
   const entry = JSON.stringify({
     jsonlSchema: GRAPH_DIAGNOSTICS_JSONL_SCHEMA,
-    recordType: "dependency_graph_diagnostic",
+    recordType: GRAPH_DIAGNOSTICS_RECORD_TYPE,
     schemaVersion: GRAPH_DIAGNOSTICS_SCHEMA_VERSION,
     persistedAt,
     freshness: {
@@ -813,7 +837,7 @@ export async function persistGraphDiagnostics(stateDir, resolution, meta: any = 
       staleAfterMs: GRAPH_DIAGNOSTICS_FRESHNESS_MS,
       expiresAt,
     },
-    ...meta,
+    ...safeMeta,
     status: resolution.status,
     reasonCode: resolution.reasonCode,
     resolvedAt: resolution.resolvedAt,
