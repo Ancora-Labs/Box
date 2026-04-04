@@ -3787,6 +3787,30 @@ ${compiledCycleDelta}`;
   //   - strategicNarrative is non-empty
   // Retry once with an explicit diff; fail-closed on second failure.
   const parsedContractCandidate = aiResult?.parsed || buildNarrativeFallbackParsed({ ...aiResult, raw });
+
+  // Pre-fill inferrable fields to avoid spurious PARSER_CONTRACT retries.
+  // projectHealth can always be inferred from raw text; requestBudget.estimatedPremiumRequestsTotal
+  // can be computed deterministically from the plan list. Filling these here means the contract
+  // only fires for keyFindings / strategicNarrative, which are genuinely narrative.
+  if (!String(parsedContractCandidate.projectHealth ?? "").trim()) {
+    parsedContractCandidate.projectHealth = inferProjectHealth(raw);
+  }
+  if (
+    !parsedContractCandidate.requestBudget ||
+    parsedContractCandidate.requestBudget.estimatedPremiumRequestsTotal == null ||
+    !Number.isFinite(Number(parsedContractCandidate.requestBudget.estimatedPremiumRequestsTotal))
+  ) {
+    const deterministicBudget = buildDeterministicRequestBudget(
+      Array.isArray(parsedContractCandidate.plans) ? parsedContractCandidate.plans : [],
+      parsedContractCandidate.executionStrategy ?? {}
+    );
+    parsedContractCandidate.requestBudget = {
+      ...deterministicBudget,
+      ...(parsedContractCandidate.requestBudget || {}),
+      estimatedPremiumRequestsTotal: deterministicBudget.estimatedPremiumRequestsTotal,
+    };
+  }
+
   let retryAiResult: any = null;
   const parserContractResult = await enforceParserContractBeforeNormalization(
     parsedContractCandidate,
