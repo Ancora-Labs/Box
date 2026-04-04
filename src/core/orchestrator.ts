@@ -1902,10 +1902,15 @@ async function runSingleCycle(config) {
     // Check synthesis age
     const synthesisPath = path.join(stateDir, "research_synthesis.json");
     let synthesisAgeHours = Infinity;
+    let synthesisConsumedAt: Date | null = null;
+    let synthJson: Record<string, unknown> | null = null;
     try {
-      const synthJson = await readJson(synthesisPath, null);
+      synthJson = await readJson(synthesisPath, null);
       if (synthJson?.synthesizedAt) {
-        synthesisAgeHours = (Date.now() - new Date(synthJson.synthesizedAt).getTime()) / (1000 * 60 * 60);
+        synthesisAgeHours = (Date.now() - new Date(synthJson.synthesizedAt as string).getTime()) / (1000 * 60 * 60);
+      }
+      if (synthJson?.lastConsumedAt) {
+        synthesisConsumedAt = new Date(synthJson.lastConsumedAt as string);
       }
     } catch { /* ok — file missing means first run */ }
 
@@ -1922,8 +1927,22 @@ async function runSingleCycle(config) {
     const scoutStale = synthesisAgeHours >= scoutIntervalHours;
     const topicsUnderThreshold = activeTopicCount <= maxActiveResearchTopics;
 
-    if (scoutStale && topicsUnderThreshold) {
-      await appendProgress(config, `[CYCLE] ── Step 1.5: Research Scout (synthesisAge=${synthesisAgeHours.toFixed(1)}h >= ${scoutIntervalHours}h, activeTopics=${activeTopicCount} <= ${maxActiveResearchTopics}) ──`);
+    // Consumption-triggered refresh: if Prometheus consumed the synthesis since the last
+    // scout run, the knowledge is "spent" and a new scout run should follow promptly.
+    // Only fires when synthesis is not brand-new (>= 1h) to avoid double-running at startup.
+    const synthesisConsumedSinceLastScout =
+      synthesisConsumedAt !== null &&
+      synthJson?.synthesizedAt != null &&
+      synthesisConsumedAt > new Date(synthJson.synthesizedAt as string) &&
+      synthesisAgeHours >= 1;
+
+    const shouldRunScout = topicsUnderThreshold && (scoutStale || synthesisConsumedSinceLastScout);
+    const scoutReason = scoutStale
+      ? `synthesisAge=${synthesisAgeHours.toFixed(1)}h >= ${scoutIntervalHours}h`
+      : `consumption-triggered (Prometheus consumed synthesis at ${synthesisConsumedAt?.toISOString()})`;
+
+    if (shouldRunScout) {
+      await appendProgress(config, `[CYCLE] ── Step 1.5: Research Scout (${scoutReason}, activeTopics=${activeTopicCount} <= ${maxActiveResearchTopics}) ──`);
       await appendProgress(config, `[AGENT] ↯↯↯ RESEARCH SCOUT ↯↯↯  req#${_cycleRequests + 1} this cycle`);
       try {
         const scoutResult = await runResearchScout(config);
@@ -1931,7 +1950,7 @@ async function runSingleCycle(config) {
           await appendProgress(config, `[RESEARCH_SCOUT] Collected ${scoutResult.sourceCount} sources — running synthesizer`);
           await runResearchSynthesizer(config, scoutResult);
           await appendProgress(config, "[RESEARCH_SCOUT] Synthesis complete — Prometheus will receive updated research context");
-          await spendPremium("research-scout", "scheduled_refresh");
+          await spendPremium("research-scout", scoutStale ? "scheduled_refresh" : "consumption_triggered_refresh");
           await appendProgress(config, `[RESEARCH_SCOUT] ✓ Done — requests this cycle: ${_cycleRequests}`);
         } else {
           await appendProgress(config, `[RESEARCH_SCOUT] Scout returned no sources (success=${scoutResult.success}) — skipping synthesis`);

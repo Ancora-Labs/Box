@@ -3491,6 +3491,16 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
         config,
         `[PROMETHEUS] Injecting research synthesis: ${researchTopicCount} topic(s) from ${researchSourceCount} source(s)`
       );
+      // Mark synthesis as consumed so the scout gate can trigger a refresh on the next cycle.
+      try {
+        const synthPath = path.join(stateDir, "research_synthesis.json");
+        const synthRaw = await readJson(synthPath, null);
+        if (synthRaw && typeof synthRaw === "object") {
+          const updated = { ...(synthRaw as Record<string, unknown>), lastConsumedAt: new Date().toISOString() };
+          const { writeFile } = await import("node:fs/promises");
+          await writeFile(synthPath, JSON.stringify(updated, null, 2), "utf8");
+        }
+      } catch { /* non-fatal — consumption tracking must never block planning */ }
     }
   } catch {
     // Optional signal; continue without research injection.
