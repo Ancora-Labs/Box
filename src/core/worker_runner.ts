@@ -811,30 +811,33 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
 
   parts.push("\n## OUTPUT FORMAT");
   parts.push("Think deeply and work naturally. Write your full reasoning, analysis, and implementation details.");
-  parts.push("At the END of your response, include these optional machine-readable markers (if applicable):");
-  parts.push("BOX_STATUS=<done|partial|blocked|error>");
-  parts.push("BOX_PR_URL=<url>   (if you created/updated a PR)");
-  parts.push("BOX_BRANCH=<name>  (if you created/switched a branch)");
+  parts.push("At the END of your response, include these REQUIRED machine-readable markers:");
+  parts.push("BOX_STATUS=<done|partial|blocked|error>  ← REQUIRED — do NOT omit");
+  parts.push("BOX_PR_URL=<url>   (required when you created/updated a PR)");
+  parts.push("BOX_BRANCH=<name>  (required when you created/switched a branch)");
   parts.push("BOX_FILES_TOUCHED=<comma-separated list>  (files you edited/created)");
   parts.push("BOX_ACCESS=repo:<ok|blocked>;files:<ok|blocked>;tools:<ok|blocked>;api:<ok|blocked>  (if you encountered access issues)");
-  parts.push("If BOX_STATUS is omitted, it defaults to done.");
   parts.push("PR POLICY: If your task changes code, open or update your PR and carry it to merge when checks are green.");
-  parts.push("");
-  parts.push("## DONE-PATH ARTIFACT REQUIREMENTS (MANDATORY for BOX_STATUS=done on merge tasks)");
-  parts.push("When reporting BOX_STATUS=done after merging code, you MUST include BOTH of the following:");
-  parts.push("1. BOX_MERGED_SHA=<7-40 char hex commit SHA from the merged state>");
-  parts.push("   Example: BOX_MERGED_SHA=abc1234");
-  parts.push("   Run: git rev-parse HEAD   (after merge is confirmed)");
-  parts.push("2. CLEAN_TREE_STATUS=clean from a clean-tree check on merged state:");
-  parts.push("   Run: git status --porcelain   (must be empty), then output CLEAN_TREE_STATUS=clean");
-  parts.push("3. A raw npm test output block wrapped in explicit markers:");
-  parts.push("   ===NPM TEST OUTPUT START===");
-  parts.push("   <paste full stdout from targeted test run on the merged branch>");
-  parts.push("   ===NPM TEST OUTPUT END===");
-  parts.push("   Use targeted tests: 'npm test -- tests/core/<relevant>.test.ts tests/core/<other>.test.ts'");
-  parts.push("   Only run test files related to the files you changed. Do NOT run the full suite.");
-  parts.push("   If unsure which test files are relevant, run tests matching the modules you modified.");
-  parts.push("Omitting either artifact will cause the verification gate to reject your done status.");
+
+  // Mandatory completion gate checklist injected immediately before the task so the
+  // model sees it right before the work description and again when writing its response.
+  // Omitting any item → verification gate rejects the done status and triggers rework.
+  if (!isDiscoverySafeTask(instruction.taskKind)) {
+    parts.push("");
+    parts.push("## ⛔ MANDATORY COMPLETION GATE — CHECK BEFORE WRITING BOX_STATUS=done");
+    parts.push("At the end of your response, you MUST include ALL four of these — the gate scans for them literally:");
+    parts.push("  ✓ BOX_MERGED_SHA=<actual sha>            ← run: git rev-parse HEAD after merge");
+    parts.push("  ✓ CLEAN_TREE_STATUS=clean                ← run: git status --porcelain (must produce empty output)");
+    parts.push("  ✓ ===NPM TEST OUTPUT START===            ← run: npm test -- <relevant test files>");
+    parts.push("    <paste full raw test stdout here>");
+    parts.push("    ===NPM TEST OUTPUT END===");
+    parts.push("  ✓ ===VERIFICATION_REPORT===              ← use pass/fail/n/a, not placeholders");
+    parts.push("    BUILD=pass  TESTS=pass  SECURITY=pass  ...etc.");
+    parts.push("    ===END_VERIFICATION===");
+    parts.push("If ANY item is missing, unfilled, or uses an old format → write BOX_STATUS=partial and list what could not be completed.");
+    parts.push("⚠️ Do NOT use POST_MERGE_TEST_OUTPUT — that format is rejected. Use ===NPM TEST OUTPUT START/END=== instead.");
+  }
+
   parts.push(String(instruction.task || ""));
 
   // Warn when the task text provides no specific test file targets so the worker

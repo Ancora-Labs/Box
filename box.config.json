@@ -396,7 +396,7 @@
   "slo": {
     "enabled": true,
     "thresholds": {
-      "decisionLatencyMs": 120000,
+      "decisionLatencyMs": 900000,
       "dispatchLatencyMs": 30000,
       "verificationCompletionMs": 3600000
     },
