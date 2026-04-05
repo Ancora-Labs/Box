@@ -1627,3 +1627,56 @@ describe("buildTokenFirstBatches — wave topology preservation", () => {
     }
   });
 });
+
+// ── Wave boundary idle gap instrumentation ─────────────────────────────────────
+import {
+  measureWaveBoundaryIdleGap,
+  shouldPackAcrossWaveBoundary,
+} from "../../src/core/worker_batch_planner.js";
+
+describe("measureWaveBoundaryIdleGap", () => {
+  it("returns correct idleMs from timestamps", () => {
+    const record = measureWaveBoundaryIdleGap(1, 2, 1000, 3000, 4);
+    assert.equal(record.waveFrom, 1);
+    assert.equal(record.waveTo, 2);
+    assert.equal(record.idleMs, 2000);
+    assert.equal(record.batchCount, 4);
+    assert.ok(record.idleStartedAt.length > 0);
+    assert.ok(record.idleEndedAt.length > 0);
+  });
+
+  it("returns idleMs=0 when start and end are equal", () => {
+    const record = measureWaveBoundaryIdleGap(2, 3, 5000, 5000, 1);
+    assert.equal(record.idleMs, 0);
+  });
+
+  it("clamps negative idleMs to 0", () => {
+    const record = measureWaveBoundaryIdleGap(1, 2, 9000, 8000, 2);
+    assert.ok(record.idleMs >= 0);
+  });
+});
+
+describe("shouldPackAcrossWaveBoundary", () => {
+  it("returns true for singleton from-wave and dep-free to-wave batch", () => {
+    const fromBatches = [{ plans: [{ task: "a" }] }];
+    const toBatches = [{ plans: [{ task: "b", dependencies: [] }] }];
+    assert.equal(shouldPackAcrossWaveBoundary(fromBatches, toBatches), true);
+  });
+
+  it("returns false when to-wave batch has dependency on from-wave", () => {
+    const fromBatches = [{ plans: [{ task: "a" }] }];
+    const toBatches = [{ plans: [{ task: "b", dependencies: ["a"] }] }];
+    assert.equal(shouldPackAcrossWaveBoundary(fromBatches, toBatches), false);
+  });
+
+  it("returns false when the last from-wave batch has multiple plans", () => {
+    const fromBatches = [{ plans: [{ task: "a" }, { task: "c" }] }];
+    const toBatches = [{ plans: [{ task: "b", dependencies: [] }] }];
+    assert.equal(shouldPackAcrossWaveBoundary(fromBatches, toBatches), false);
+  });
+
+  it("returns false when to-wave batches array is empty", () => {
+    const fromBatches = [{ plans: [{ task: "a" }] }];
+    assert.equal(shouldPackAcrossWaveBoundary(fromBatches, []), false);
+  });
+});

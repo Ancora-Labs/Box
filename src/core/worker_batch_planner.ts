@@ -1603,3 +1603,101 @@ export function buildFitScoredBatches(
 
   return buildRoleExecutionBatches(assignedPlans, config);
 }
+
+// ── Wave-boundary idle gap instrumentation ─────────────────────────────────────
+//
+// Measures elapsed time at wave boundaries (when the orchestrator transitions
+// from one wave to the next) and provides a packing heuristic to reduce stall
+// time without violating dependency ordering.
+
+/**
+ * Canonical idle-gap record emitted at each wave boundary crossing.
+ * Persisted to state/wave_boundary_idle.jsonl for observability.
+ */
+export interface WaveBoundaryIdleRecord {
+  /** Wave number that just completed. */
+  waveFrom: number;
+  /** Wave number about to start. */
+  waveTo: number;
+  /** ISO timestamp when the last batch of waveFrom completed. */
+  idleStartedAt: string;
+  /** ISO timestamp when the first batch of waveTo started dispatching. */
+  idleEndedAt: string;
+  /** Idle duration in milliseconds. */
+  idleMs: number;
+  /** Total number of batches dispatched during the completed wave. */
+  batchCount: number;
+}
+
+/**
+ * Construct a WaveBoundaryIdleRecord from measured timestamps.
+ *
+ * Pure function — no I/O.
+ *
+ * @param waveFrom   - wave number that just finished
+ * @param waveTo     - wave number about to start
+ * @param startMs    - ms timestamp when idle period began (last batch of waveFrom done)
+ * @param endMs      - ms timestamp when idle period ended (first batch of waveTo starting)
+ * @param batchCount - number of batches in the completed wave
+ */
+export function measureWaveBoundaryIdleGap(
+  waveFrom: number,
+  waveTo: number,
+  startMs: number,
+  endMs: number,
+  batchCount: number,
+): WaveBoundaryIdleRecord {
+  const idleMs = Math.max(0, endMs - startMs);
+  return {
+    waveFrom,
+    waveTo,
+    idleStartedAt: new Date(startMs).toISOString(),
+    idleEndedAt: new Date(endMs).toISOString(),
+    idleMs,
+    batchCount: Math.max(0, batchCount),
+  };
+}
+
+/**
+ * Wave-packing heuristic: returns true when the last batch in waveFrom consists
+ * of exactly one singleton plan AND no plan in waveTo declares a dependency on
+ * that singleton.
+ *
+ * When true, the wave boundary stall can be avoided by co-packing the singleton
+ * into waveTo.  The caller is responsible for performing the actual repack; this
+ * function only signals whether it is safe.
+ *
+ * Returns false conservatively whenever dependency analysis is uncertain.
+ *
+ * @param waveFromBatches - all batches assigned to the completing wave
+ * @param waveToBatches   - all batches assigned to the next wave
+ */
+export function shouldPackAcrossWaveBoundary(
+  waveFromBatches: Array<{ plans: any[] }>,
+  waveToBatches: Array<{ plans: any[] }>,
+): boolean {
+  if (!Array.isArray(waveFromBatches) || waveFromBatches.length === 0) return false;
+  if (!Array.isArray(waveToBatches) || waveToBatches.length === 0) return false;
+
+  const lastFromBatch = waveFromBatches[waveFromBatches.length - 1];
+  const fromPlans = Array.isArray(lastFromBatch?.plans) ? lastFromBatch.plans : [];
+  // Only co-pack when the completing wave has exactly one singleton plan remaining
+  if (fromPlans.length !== 1) return false;
+
+  const fromPlanId = String(
+    fromPlans[0]?.task_id || fromPlans[0]?.id || fromPlans[0]?.task || "",
+  );
+  if (!fromPlanId) return false;
+
+  // Conservatively reject if any plan in waveTo depends on the singleton
+  for (const batch of waveToBatches) {
+    const toPlans = Array.isArray(batch?.plans) ? batch.plans : [];
+    for (const plan of toPlans) {
+      const deps = Array.isArray(plan?.dependencies) ? plan.dependencies : [];
+      if (deps.map(String).includes(fromPlanId)) return false;
+    }
+  }
+
+  return true;
+}
+
