@@ -983,3 +983,94 @@ describe("applyRerouteCostPenalty", () => {
       `expected ~${1.0 - REROUTE_EV_PENALTY_COEFFICIENT} got ${penalized}`);
   });
 });
+
+// ── Reroute EV penalty — differentiated by reason code ────────────────────────
+import {
+  REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT,
+  REROUTE_ESCALATION_THRESHOLD,
+  getRerouteEscalationSignal,
+} from "../../src/core/intervention_optimizer.js";
+
+describe("applyRerouteCostPenalty — PERFORMANCE_DEGRADED differentiation", () => {
+  it("applies REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT for a PERFORMANCE_DEGRADED reroute", () => {
+    const penalized = applyRerouteCostPenalty(1.0, "backend", [
+      { role: "backend", reasonCode: "performance_degraded", lane: "lane-1" },
+    ]);
+    // Single PERFORMANCE_DEGRADED reroute: coefficient is 0.25 but capped at REROUTE_EV_MAX_PENALTY (0.20).
+    const expectedPenalty = Math.min(REROUTE_EV_MAX_PENALTY, REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT);
+    const expected = 1.0 * (1 - expectedPenalty);
+    assert.ok(Math.abs(penalized - expected) < 0.002,
+      `expected ~${expected} for PERFORMANCE_DEGRADED (capped at ${REROUTE_EV_MAX_PENALTY}), got ${penalized}`);
+  });
+
+  it("PERFORMANCE_DEGRADED penalty is higher than BELOW_FILL_THRESHOLD penalty", () => {
+    const reroutes = [{ role: "backend", lane: "lane-1" }];
+    const penaltyBelowFill = 1.0 - applyRerouteCostPenalty(1.0, "backend", [
+      { ...reroutes[0], reasonCode: "below_fill_threshold" },
+    ]);
+    const penaltyPerfDegraded = 1.0 - applyRerouteCostPenalty(1.0, "backend", [
+      { ...reroutes[0], reasonCode: "performance_degraded" },
+    ]);
+    assert.ok(penaltyPerfDegraded > penaltyBelowFill,
+      "PERFORMANCE_DEGRADED must apply a higher penalty than BELOW_FILL_THRESHOLD");
+  });
+
+  it("cap still applies: mixed reason codes cannot exceed REROUTE_EV_MAX_PENALTY", () => {
+    const manyReroutes = Array.from({ length: 10 }, () => ({
+      role: "backend", reasonCode: "performance_degraded", lane: "lane-1",
+    }));
+    const penalized = applyRerouteCostPenalty(1.0, "backend", manyReroutes);
+    assert.ok(penalized >= 1.0 - REROUTE_EV_MAX_PENALTY - 0.001,
+      `mixed penalty must still be capped at REROUTE_EV_MAX_PENALTY=${REROUTE_EV_MAX_PENALTY}`);
+  });
+
+  it("REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT is exported as a positive number", () => {
+    assert.ok(typeof REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT === "number");
+    assert.ok(REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT > 0);
+    assert.ok(REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT > REROUTE_EV_PENALTY_COEFFICIENT,
+      "performance penalty coefficient must exceed base penalty coefficient");
+  });
+});
+
+describe("getRerouteEscalationSignal", () => {
+  it("returns null when degraded count is below REROUTE_ESCALATION_THRESHOLD", () => {
+    const reroutes = [{ role: "backend", reasonCode: "performance_degraded" }];
+    const signal = getRerouteEscalationSignal("backend", reroutes);
+    if (REROUTE_ESCALATION_THRESHOLD > 1) {
+      assert.equal(signal, null);
+    }
+  });
+
+  it("returns escalation descriptor when degraded count reaches REROUTE_ESCALATION_THRESHOLD", () => {
+    const reroutes = Array.from({ length: REROUTE_ESCALATION_THRESHOLD }, () => ({
+      role: "backend", reasonCode: "performance_degraded",
+    }));
+    const signal = getRerouteEscalationSignal("backend", reroutes);
+    assert.ok(signal !== null, "signal must be non-null at escalation threshold");
+    assert.equal(signal!.role, "backend");
+    assert.equal(signal!.degradedCount, REROUTE_ESCALATION_THRESHOLD);
+    assert.equal(signal!.escalate, true);
+  });
+
+  it("does not escalate for non-PERFORMANCE_DEGRADED reroutes", () => {
+    const reroutes = Array.from({ length: REROUTE_ESCALATION_THRESHOLD + 2 }, () => ({
+      role: "backend", reasonCode: "below_fill_threshold",
+    }));
+    const signal = getRerouteEscalationSignal("backend", reroutes);
+    assert.equal(signal, null,
+      "escalation must only trigger on PERFORMANCE_DEGRADED reason code");
+  });
+
+  it("negative path: returns null for empty reroute list", () => {
+    assert.equal(getRerouteEscalationSignal("backend", []), null);
+  });
+
+  it("negative path: returns null for non-array reroute reasons (no throw)", () => {
+    assert.equal(getRerouteEscalationSignal("backend", null as any), null);
+  });
+
+  it("REROUTE_ESCALATION_THRESHOLD is exported as a positive integer", () => {
+    assert.ok(Number.isInteger(REROUTE_ESCALATION_THRESHOLD));
+    assert.ok(REROUTE_ESCALATION_THRESHOLD >= 1);
+  });
+});

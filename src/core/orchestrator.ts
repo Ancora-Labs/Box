@@ -1273,9 +1273,38 @@ async function completeDispatchCheckpoint(config, checkpoint) {
   await writeDispatchCheckpoint(config, checkpoint);
 }
 
+async function failCloseDispatchCheckpoint(config, checkpoint, detail: {
+  reasonCode?: string | null;
+  retryClass?: string | null;
+  workerStatus?: string | null;
+  batchIndex?: number | null;
+  totalBatches?: number | null;
+}) {
+  if (!checkpoint) return;
+  checkpoint.status = "failed_closed";
+  checkpoint.updatedAt = new Date().toISOString();
+  checkpoint.failClose = {
+    failedAt: checkpoint.updatedAt,
+    reasonCode: detail?.reasonCode || null,
+    retryClass: detail?.retryClass || null,
+    workerStatus: detail?.workerStatus || null,
+    batchIndex: Number.isFinite(Number(detail?.batchIndex)) ? Number(detail?.batchIndex) : null,
+    totalBatches: Number.isFinite(Number(detail?.totalBatches)) ? Number(detail?.totalBatches) : null,
+  };
+  await writeDispatchCheckpoint(config, checkpoint);
+}
+
 function isDispatchOutcomeSuccessful(workerResult) {
   const status = String(workerResult?.status || "").toLowerCase();
   return status === "partial" || isAnalyticsCompletedWorkerStatus(status);
+}
+
+function shouldFailCloseDispatchOutcome(workerResult) {
+  const status = String(workerResult?.status || "").toLowerCase();
+  if (status !== "error" && status !== "blocked") return false;
+  const retryClass = String(workerResult?.retryClass || "").toLowerCase();
+  const reasonCode = String(workerResult?.reasonCode || "").toUpperCase();
+  return retryClass === "no_retry" || reasonCode === "WIN32_PROCESS_TERMINATED";
 }
 
 async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolean } = {}) {
@@ -1448,6 +1477,25 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
     }
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {
+      if (shouldFailCloseDispatchOutcome(workerResult)) {
+        await failCloseDispatchCheckpoint(config, checkpoint, {
+          reasonCode: workerResult?.reasonCode || null,
+          retryClass: workerResult?.retryClass || null,
+          workerStatus: workerResult?.status || null,
+          batchIndex: index + 1,
+          totalBatches: workerBatches.length,
+        });
+        await appendProgress(config,
+          `[RESUME][FAIL_CLOSE] Worker batch ${index + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"} reason_code=${workerResult?.reasonCode || "unknown"} retry_class=${workerResult?.retryClass || "none"}; checkpoint marked failed_closed (no retry)`
+        );
+        await safeUpdatePipelineProgress(config, "cycle_complete", `Resumed dispatch fail-closed at batch ${index + 1}/${workerBatches.length}`, {
+          workersTotal: workerBatches.length,
+          workersDone: index,
+          resumedFromCheckpoint: true,
+          forcedResume: force,
+        });
+        return true;
+      }
       await appendProgress(config,
         `[RESUME] Worker batch ${index + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"}; checkpoint not advanced so it can be retried`
       );
@@ -3154,6 +3202,24 @@ async function runSingleCycle(config) {
     }
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {
+      if (shouldFailCloseDispatchOutcome(workerResult)) {
+        await failCloseDispatchCheckpoint(config, dispatchCheckpoint, {
+          reasonCode: workerResult?.reasonCode || null,
+          retryClass: workerResult?.retryClass || null,
+          workerStatus: workerResult?.status || null,
+          batchIndex: workersDone + 1,
+          totalBatches: workerBatches.length,
+        });
+        await appendProgress(config,
+          `[CYCLE][FAIL_CLOSE] Worker batch ${workersDone + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"} reason_code=${workerResult?.reasonCode || "unknown"} retry_class=${workerResult?.retryClass || "none"}; checkpoint marked failed_closed (no retry)`
+        );
+        await safeUpdatePipelineProgress(config, "cycle_complete", `Dispatch fail-closed at batch ${workersDone + 1}/${workerBatches.length}`, {
+          workersTotal: workerBatches.length,
+          workersDone,
+          currentWorker: batch.role,
+        });
+        return;
+      }
       await appendProgress(config,
         `[CYCLE] Worker batch ${workersDone + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"}; checkpoint not advanced so it can be retried`
       );
@@ -3375,6 +3441,31 @@ async function runSingleCycle(config) {
     const sloState = await readSloMetrics(config);
     const sloRecord = sloState?.lastCycle ?? null;
 
+    // ── Tier counts: classify dispatched plans by riskLevel ──────────────────
+    // T1 = routine (riskLevel absent or "low"), T2 = medium, T3 = architectural ("high"|"critical").
+    // Computed from the plans array after all gates so counts reflect actual dispatch distribution.
+    const tierCountsForAnalytics = Array.isArray(plans) && plans.length > 0
+      ? (() => {
+          let T1 = 0; let T2 = 0; let T3 = 0;
+          for (const p of plans as any[]) {
+            const risk = String(p?.riskLevel || "").toLowerCase();
+            if (risk === "high" || risk === "critical") T3 += 1;
+            else if (risk === "medium") T2 += 1;
+            else T1 += 1;
+          }
+          return { T1, T2, T3 };
+        })()
+      : null;
+
+    // ── Fast-path counts: Athena auto-approve vs full AI review ──────────────
+    // planReview.autoApproved=true means all plans cleared the deterministic gate.
+    // Counts are plan-level: all funnelApprovedCount plans are either all auto-approved or all full-reviewed.
+    const fastPathCountsForAnalytics = typeof funnelApprovedCount === "number" && funnelApprovedCount >= 0
+      ? (planReview?.autoApproved === true
+          ? { athenaAutoApproved: funnelApprovedCount, athenaFullReview: 0 }
+          : { athenaAutoApproved: 0, athenaFullReview: funnelApprovedCount })
+      : null;
+
     const analyticsRecord = computeCycleAnalytics(config, {
       sloRecord,
       pipelineProgress: progressForAnalytics,
@@ -3385,6 +3476,8 @@ async function runSingleCycle(config) {
       athenaPlanReview: planReview,
       parserBaselineRecovery: baselineRecoveryRecord ?? null,
       optimizerUsage,
+      tierCounts: tierCountsForAnalytics,
+      fastPathCounts: fastPathCountsForAnalytics,
       funnelCounts: {
         generated:  Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
         approved:   funnelApprovedCount,
@@ -3519,7 +3612,7 @@ async function runSingleCycle(config) {
       );
 
       const totalWorkers = allWorkerResults?.length ?? 0;
-      const completedWorkers = allWorkerResults?.filter((w: any) => w.status === "completed" || w.status === "success").length ?? 0;
+      const completedWorkers = allWorkerResults?.filter((w: any) => isAnalyticsCompletedWorkerStatus(w.status)).length ?? 0;
       const completionRate = totalWorkers > 0 ? completedWorkers / totalWorkers : null;
       const crashCount = allWorkerResults?.filter((w: any) => w.status === "crashed" || w.status === "error").length ?? 0;
       const crashRate = totalWorkers > 0 ? crashCount / totalWorkers : null;

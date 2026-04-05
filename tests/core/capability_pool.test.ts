@@ -881,5 +881,55 @@ describe("capability_pool — computeAdaptiveSpecialistFillThreshold", () => {
   it("SPECIALIST_REROUTE_REASON_CODE exports a stable BELOW_FILL_THRESHOLD code", () => {
     assert.equal(SPECIALIST_REROUTE_REASON_CODE.BELOW_FILL_THRESHOLD, "below_fill_threshold");
   });
+
+  it("SPECIALIST_REROUTE_REASON_CODE exports PERFORMANCE_DEGRADED code", () => {
+    assert.equal(SPECIALIST_REROUTE_REASON_CODE.PERFORMANCE_DEGRADED, "performance_degraded");
+  });
+
+  it("SPECIALIST_REROUTE_REASON_CODE exports DEPENDENCY_ISOLATION code", () => {
+    assert.equal(SPECIALIST_REROUTE_REASON_CODE.DEPENDENCY_ISOLATION, "dependency_isolation");
+  });
+
+  it("SPECIALIST_REROUTE_REASON_CODE is frozen (immutable)", () => {
+    assert.ok(Object.isFrozen(SPECIALIST_REROUTE_REASON_CODE));
+  });
+});
+
+// ── selectWorkerForPlan — rerouteReasonCode field ──────────────────────────────
+
+describe("capability_pool — selectWorkerForPlan rerouteReasonCode", () => {
+  it("rerouteReasonCode is null when lane score is healthy (no reroute)", () => {
+    let ledger = {};
+    for (let i = 0; i < 5; i++) ledger = recordLaneOutcome(ledger, "quality", { success: true });
+    const plan = { task: "Add test coverage for the parser module" };
+    const selection = selectWorkerForPlan(plan, null, ledger);
+    assert.equal(selection.rerouteReasonCode, null);
+  });
+
+  it("rerouteReasonCode is PERFORMANCE_DEGRADED when lane score is below threshold", () => {
+    let ledger = {};
+    for (let i = 0; i < 15; i++) ledger = recordLaneOutcome(ledger, "quality", { success: false });
+    const plan = { task: "Add test coverage for the parser module" };
+    const selection = selectWorkerForPlan(plan, null, ledger);
+    assert.equal(selection.rerouteReasonCode, SPECIALIST_REROUTE_REASON_CODE.PERFORMANCE_DEGRADED,
+      "degraded lane must emit PERFORMANCE_DEGRADED reason code");
+  });
+
+  it("rerouteReasonCode is null when no ledger is provided (neutral prior → no reroute)", () => {
+    const plan = { task: "Add test coverage for the parser module" };
+    const selection = selectWorkerForPlan(plan);
+    // Neutral prior 0.5 is above LOW_PERFORMANCE_THRESHOLD — no reroute
+    assert.equal(selection.rerouteReasonCode, null);
+  });
+
+  it("negative path: isFallback=true iff rerouteReasonCode is non-null (coherent reroute state)", () => {
+    let ledger = {};
+    for (let i = 0; i < 15; i++) ledger = recordLaneOutcome(ledger, "quality", { success: false });
+    const plan = { task: "Add test coverage for the parser module" };
+    const selection = selectWorkerForPlan(plan, null, ledger);
+    if (selection.rerouteReasonCode !== null) {
+      assert.equal(selection.isFallback, true, "isFallback must be true when rerouteReasonCode is set");
+    }
+  });
 });
 

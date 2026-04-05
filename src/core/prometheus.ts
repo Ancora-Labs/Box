@@ -90,6 +90,7 @@ import {
 // Re-export so existing callers that import from prometheus.ts continue to work
 export { _splitWavesIntoMicrowaves as splitWavesIntoMicrowaves, _MICROWAVE_MAX_TASKS_DEFAULT as MICROWAVE_MAX_TASKS_DEFAULT };
 
+import { warn, emitEvent } from "./logger.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 
 // ── Span contract emitter ─────────────────────────────────────────────────────
@@ -5287,7 +5288,18 @@ Mandatory requirements:
     },
   });
 
-  await writeJson(path.join(stateDir, "prometheus_analysis.json"), addSchemaVersion(analysis, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS));
+  try {
+    await writeJson(path.join(stateDir, "prometheus_analysis.json"), addSchemaVersion(analysis, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS));
+  } catch (writeErr) {
+    // Critical planning ledger write failed — emit structured WARN so the orchestrator
+    // can detect degraded state without halting the cycle (fail-open contract).
+    warn(`[prometheus] prometheus_analysis.json write failed (degraded): ${String((writeErr as any)?.message || writeErr)}`);
+    emitEvent(EVENTS.ORCHESTRATION_HEALTH_DEGRADED, EVENT_DOMAIN.PLANNING, "prometheus_analysis_write", {
+      source: "prometheus",
+      ledger: "prometheus_analysis.json",
+      error: String((writeErr as any)?.message || writeErr),
+    });
+  }
 
   const planCount = Array.isArray(analysis.plans) ? analysis.plans.length : 0;
   await appendProgress(config, `[PROMETHEUS] Analysis complete — ${planCount} work items | health=${analysis.projectHealth}`);
@@ -5312,7 +5324,13 @@ Mandatory requirements:
       );
     }
   } catch (tmErr) {
-    await appendProgress(config, `[PROMETHEUS][WARN] Topic memory update failed (non-fatal): ${String(tmErr?.message || tmErr)}`).catch(() => {});
+    warn(`[prometheus] Topic memory update failed (degraded): ${String((tmErr as any)?.message || tmErr)}`);
+    emitEvent(EVENTS.ORCHESTRATION_HEALTH_DEGRADED, EVENT_DOMAIN.PLANNING, "prometheus_topic_memory", {
+      source: "prometheus",
+      ledger: "topic_memory",
+      error: String((tmErr as any)?.message || tmErr),
+    });
+    await appendProgress(config, `[PROMETHEUS][WARN] Topic memory update failed (non-fatal): ${String((tmErr as any)?.message || tmErr)}`).catch(() => {});
   }
 
   // ── Budget-aware intervention optimizer (non-blocking) ────────────────────

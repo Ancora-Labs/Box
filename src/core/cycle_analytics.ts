@@ -46,6 +46,8 @@
 
 import path from "node:path";
 import { readJson, writeJson } from "./fs_utils.js";
+import { warn, emitEvent } from "./logger.js";
+import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 import { SLO_TIMESTAMP_CONTRACT, SLO_METRIC } from "./slo_checker.js";
 import { hasVerificationReportEvidence } from "./verification_gate.js";
 import { hasFiniteAthenaOverallScore } from "./athena_reviewer.js";
@@ -889,12 +891,24 @@ export async function persistCycleAnalytics(config, record) {
     history.length = maxEntries;
   }
 
-  await writeJson(filePath, {
-    schemaVersion: CYCLE_ANALYTICS_SCHEMA.schemaVersion,
-    lastCycle: record,
-    history,
-    updatedAt: new Date().toISOString(),
-  });
+  try {
+    await writeJson(filePath, {
+      schemaVersion: CYCLE_ANALYTICS_SCHEMA.schemaVersion,
+      lastCycle: record,
+      history,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (writeErr) {
+    // Fail-open: cycle analytics write failure must be observable, not silent.
+    warn(`[cycle_analytics] persistCycleAnalytics write failed (degraded): ${String((writeErr as any)?.message || writeErr)}`);
+    emitEvent(EVENTS.ORCHESTRATION_HEALTH_DEGRADED, EVENT_DOMAIN.ORCHESTRATION, "cycle_analytics_persist", {
+      source: "cycle_analytics",
+      ledger: "cycle_analytics.json",
+      error: String((writeErr as any)?.message || writeErr),
+    });
+    // Re-throw so the orchestrator's wrapping try/catch can log the full context too.
+    throw writeErr;
+  }
 }
 
 /**
