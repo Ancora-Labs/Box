@@ -534,4 +534,22 @@ describe("appendJesusOutcomeLedger", () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("fail-open: does NOT throw when the state dir is invalid (write failure is non-fatal)", async () => {
+    // Point at a path that cannot be written to (state dir is a file, not a directory).
+    const tmpBase = mkdtempSync(path.join(tmpdir(), "jesus-ledger-ioerr-"));
+    const blockerFile = path.join(tmpBase, "state-as-file");
+    writeFileSync(blockerFile, "not-a-dir");
+    const outcome = buildJesusDecisionOutcome({
+      directiveHash: "hashErr",
+      plansGenerated: 1,
+      plansExecuted: 0,
+    });
+    // Must not throw — fail-open contract
+    await assert.doesNotReject(
+      () => appendJesusOutcomeLedger(path.join(blockerFile, "subdir"), outcome),
+      "appendJesusOutcomeLedger must not throw on write failure (fail-open)",
+    );
+    rmSync(tmpBase, { recursive: true, force: true });
+  });
 });

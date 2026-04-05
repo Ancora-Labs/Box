@@ -20,7 +20,7 @@ import { readJson, readJsonSafe, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
-import { chatLog } from "./logger.js";
+import { chatLog, warn } from "./logger.js";
 import {
   validateLeadershipContract,
   LEADERSHIP_CONTRACT_TYPE,
@@ -1120,6 +1120,9 @@ export async function appendJesusOutcomeLedger(
     const filePath = path.join(stateDir, "jesus_outcome_ledger.jsonl");
     const entry = JSON.stringify(outcome) + "\n";
     appendFileSync(filePath, entry, "utf8");
-  } catch { /* non-fatal */ }
+  } catch (err) {
+    // Fail-open: ledger write is non-fatal but must be observable.
+    warn(`[jesus_supervisor] appendJesusOutcomeLedger write failed (degraded): ${String((err as any)?.message || err)}`);
+  }
 }
 

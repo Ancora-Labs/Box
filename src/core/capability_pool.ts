@@ -122,6 +122,7 @@ export function computeAdaptiveSpecializedShareTarget(
  * @property {string} reason — why this worker was selected
  * @property {boolean} isFallback — true if using fallback worker
  * @property {number} performanceScore — Laplace-smoothed success rate (0–1); 0.5 when no data
+ * @property {string|null} [rerouteReasonCode] — SPECIALIST_REROUTE_REASON_CODE value when rerouted; null otherwise
  */
 export interface WorkerSelection {
   role: string;
@@ -129,6 +130,7 @@ export interface WorkerSelection {
   reason: string;
   isFallback: boolean;
   performanceScore: number;
+  rerouteReasonCode?: string | null;
 }
 
 /**
@@ -208,6 +210,7 @@ export function selectWorkerForPlan(plan, config?, lanePerformance?: LanePerform
       : `Capability "${capTag}" → lane "${mapping.lane}" → worker "${selectedRole}"`,
     isFallback,
     performanceScore: score,
+    rerouteReasonCode: performanceDegraded ? SPECIALIST_REROUTE_REASON_CODE.PERFORMANCE_DEGRADED : null,
   };
 }
 
@@ -637,11 +640,22 @@ export function computeSpecialistFitThreshold(
 
 /**
  * Stable reason codes emitted when a specialist worker is rerouted to
- * evolution-worker by the fill-threshold admission gate.
+ * evolution-worker by the fill-threshold admission gate or performance gate.
  * Consumers can pattern-match on these codes without parsing free-text.
  */
 export const SPECIALIST_REROUTE_REASON_CODE = Object.freeze({
+  /** Specialist group's token total fell below the adaptive fill threshold. */
   BELOW_FILL_THRESHOLD: "below_fill_threshold",
+  /**
+   * Lane's Laplace-smoothed performance score fell below LOW_PERFORMANCE_THRESHOLD.
+   * Indicates a persistent failure pattern — optimizer applies a higher EV penalty.
+   */
+  PERFORMANCE_DEGRADED: "performance_degraded",
+  /**
+   * Dependency-wave isolation caused the specialist group to be separated;
+   * the resulting sub-batch is too thin to justify a standalone specialist spawn.
+   */
+  DEPENDENCY_ISOLATION: "dependency_isolation",
 } as const);
 
 export type SpecialistRerouteReasonCode =

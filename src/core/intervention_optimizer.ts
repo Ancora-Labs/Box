@@ -176,17 +176,36 @@ export const INTERVENTION_ERROR_CODE = Object.freeze({
 export const REROUTE_EV_PENALTY_COEFFICIENT = 0.15;
 
 /**
+ * Higher EV penalty coefficient applied when reroute reason is PERFORMANCE_DEGRADED.
+ * Performance-degraded reroutes indicate a persistent failure pattern, warranting
+ * a stronger signal to the adaptive threshold to avoid repeat specialist dispatches.
+ */
+export const REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT = 0.25;
+
+/**
  * Maximum total EV penalty fraction that can be applied from reroute history.
  * Caps the penalty even when many reroutes are observed.
  */
 export const REROUTE_EV_MAX_PENALTY = 0.20;
 
 /**
+ * Number of PERFORMANCE_DEGRADED reroutes within a role that triggers escalation.
+ * When this threshold is met the optimizer emits a structured WARN so the
+ * orchestrator can act (e.g., skip specialist dispatch entirely for that lane).
+ */
+export const REROUTE_ESCALATION_THRESHOLD = 2;
+
+/**
  * Apply a bounded EV penalty to an intervention whose role was recently rerouted.
  *
- * Each reroute occurrence for the given role reduces the EV by
- * REROUTE_EV_PENALTY_COEFFICIENT, capped at REROUTE_EV_MAX_PENALTY.
- * Only applied to positive EVs — negative EVs are not made worse.
+ * Penalty coefficient is differentiated by reason code:
+ *   - PERFORMANCE_DEGRADED: uses REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT (0.25)
+ *   - all other codes:      uses REROUTE_EV_PENALTY_COEFFICIENT (0.15)
+ * Bounded by REROUTE_EV_MAX_PENALTY. Only applied to positive EVs.
+ *
+ * Side effect: when PERFORMANCE_DEGRADED reroutes for a role reach
+ * REROUTE_ESCALATION_THRESHOLD, a structured escalation object is returned
+ * in the result alongside the adjusted EV.
  *
  * @param ev             - current expected value
  * @param role           - intervention role
@@ -202,11 +221,38 @@ export function applyRerouteCostPenalty(
   const matchingReroutes = rerouteReasons.filter(r => r.role === role);
   if (matchingReroutes.length === 0) return ev;
   if (ev <= 0) return ev; // only penalize positive EVs
-  const totalPenaltyFraction = Math.min(
-    REROUTE_EV_MAX_PENALTY,
-    matchingReroutes.length * REROUTE_EV_PENALTY_COEFFICIENT,
-  );
-  return Math.round((ev * (1 - totalPenaltyFraction)) * 1000) / 1000;
+
+  // Accumulate weighted penalty: PERFORMANCE_DEGRADED counts at higher coefficient.
+  let totalPenaltyFraction = 0;
+  for (const reroute of matchingReroutes) {
+    const coeff = reroute.reasonCode === "performance_degraded"
+      ? REROUTE_PERFORMANCE_EV_PENALTY_COEFFICIENT
+      : REROUTE_EV_PENALTY_COEFFICIENT;
+    totalPenaltyFraction += coeff;
+  }
+  const boundedPenalty = Math.min(REROUTE_EV_MAX_PENALTY, totalPenaltyFraction);
+  return Math.round((ev * (1 - boundedPenalty)) * 1000) / 1000;
+}
+
+/**
+ * Check whether performance-degraded reroutes for a role have crossed the
+ * escalation threshold. Returns a structured escalation descriptor or null.
+ *
+ * Intended to be called by the orchestrator after collecting reroute reasons
+ * so it can emit a WARN and optionally suppress specialist dispatch for that lane.
+ */
+export function getRerouteEscalationSignal(
+  role: string,
+  rerouteReasons: Array<{ role: string; reasonCode: string }>,
+): { role: string; degradedCount: number; escalate: true } | null {
+  if (!Array.isArray(rerouteReasons)) return null;
+  const degradedCount = rerouteReasons.filter(
+    r => r.role === role && r.reasonCode === "performance_degraded"
+  ).length;
+  if (degradedCount >= REROUTE_ESCALATION_THRESHOLD) {
+    return { role, degradedCount, escalate: true };
+  }
+  return null;
 }
 
 // ── Sparse data constant ──────────────────────────────────────────────────────
