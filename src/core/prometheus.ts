@@ -541,6 +541,152 @@ async function getLatestResearchArtifactUpdatedAtMs(stateDir: string): Promise<n
 
 const DIAGNOSTICS_FRESHNESS_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
+// ── Diagnostics freshness admission gate (exported) ──────────────────────────
+
+/**
+ * A single diagnostics source record for freshness evaluation.
+ * Callers supply one entry per diagnostics artifact (intervention_optimizer,
+ * dependency_graph, etc.).
+ */
+export interface DiagnosticsFreshnessRecord {
+  /** Human-readable label for the diagnostics source (used in reasons). */
+  label: string;
+  /** ISO 8601 timestamp when the record was last written, or null if absent. */
+  recordedAt: string | null;
+  /**
+   * Maximum age in ms before the record is considered stale.
+   * Defaults to DIAGNOSTICS_FRESHNESS_MAX_AGE_MS (6 h).
+   */
+  staleAfterMs?: number;
+}
+
+/**
+ * Result returned by computeDiagnosticsFreshnessAdmission.
+ */
+export interface DiagnosticsFreshnessAdmission {
+  /** True when ALL diagnostics sources are fresh (no stale or missing entries). */
+  allFresh: boolean;
+  /** Labels of sources that are stale or missing. */
+  staleSources: string[];
+  /**
+   * Machine-readable reasons, one per stale/missing source.
+   * Format: "stale_diagnostics:<label>:ageMinutes=<N>:staleAfterMs=<M>"
+   * or      "missing_diagnostics:<label>"
+   */
+  freshnessReasons: string[];
+}
+
+/**
+ * Deterministic freshness gate for diagnostics records.
+ *
+ * Pure function — no I/O.  Callers pass pre-loaded timestamp metadata;
+ * this function computes admission status from those values alone.
+ *
+ * @param records — array of diagnostics source descriptors
+ * @param nowMs   — current time in ms (defaults to Date.now())
+ * @returns DiagnosticsFreshnessAdmission
+ */
+export function computeDiagnosticsFreshnessAdmission(
+  records: DiagnosticsFreshnessRecord[],
+  nowMs: number = Date.now(),
+): DiagnosticsFreshnessAdmission {
+  const safeRecords = Array.isArray(records) ? records : [];
+  const staleSources: string[] = [];
+  const freshnessReasons: string[] = [];
+
+  for (const record of safeRecords) {
+    const label = String(record.label || "unknown");
+    const staleAfterMs = Number.isFinite(record.staleAfterMs) && (record.staleAfterMs as number) > 0
+      ? (record.staleAfterMs as number)
+      : DIAGNOSTICS_FRESHNESS_MAX_AGE_MS;
+
+    if (!record.recordedAt) {
+      staleSources.push(label);
+      freshnessReasons.push(`missing_diagnostics:${label}`);
+      continue;
+    }
+
+    const recordedAtMs = new Date(record.recordedAt).getTime();
+    if (!Number.isFinite(recordedAtMs)) {
+      staleSources.push(label);
+      freshnessReasons.push(`missing_diagnostics:${label}:invalid_timestamp`);
+      continue;
+    }
+
+    const ageMs = nowMs - recordedAtMs;
+    if (ageMs > staleAfterMs) {
+      staleSources.push(label);
+      const ageMinutes = Math.round(ageMs / 60_000);
+      freshnessReasons.push(
+        `stale_diagnostics:${label}:ageMinutes=${ageMinutes}:staleAfterMs=${staleAfterMs}`,
+      );
+    }
+  }
+
+  return {
+    allFresh: staleSources.length === 0,
+    staleSources,
+    freshnessReasons,
+  };
+}
+
+/**
+ * Tag plans that reference stale diagnostics sources with machine-readable
+ * quarantine metadata.  Plans are tagged when:
+ *   1. The freshness admission result reports at least one stale source, AND
+ *   2. The plan's task or context text explicitly references a known stale label
+ *      OR the plan has no independent backing signals (no implementationEvidence
+ *      and no explicit novelty score above the collapse threshold).
+ *
+ * Tagged plans receive `_staleDiagnosticsGated: true` and
+ * `_staleDiagnosticsReason: string` so downstream validators can reject them
+ * deterministically without re-reading the diagnostics files.
+ *
+ * Pure function — mutates plan objects in-place and returns the same array.
+ *
+ * @param plans             — plan objects to evaluate
+ * @param freshnessResult   — result from computeDiagnosticsFreshnessAdmission
+ * @returns the same plans array (with mutated entries)
+ */
+export function tagStaleDiagnosticsBackedPlans(
+  plans: any[],
+  freshnessResult: DiagnosticsFreshnessAdmission,
+): any[] {
+  if (!Array.isArray(plans) || freshnessResult.allFresh) return plans;
+
+  const staleLabels = new Set(freshnessResult.staleSources.map(l => l.toLowerCase()));
+  const reasonSummary = freshnessResult.freshnessReasons.join("; ");
+
+  for (const plan of plans) {
+    if (!plan || typeof plan !== "object") continue;
+
+    const taskText = String(plan.task || plan.title || "").toLowerCase();
+    const contextText = String(plan.context || "").toLowerCase();
+    const combined = taskText + " " + contextText;
+
+    // Check if the plan explicitly references a stale source by label
+    const referencesStaleSource = [...staleLabels].some(label => combined.includes(label));
+
+    // Check for independent backing: implementationEvidence or novelty
+    const hasImplementationEvidence =
+      Array.isArray(plan.implementationEvidence) &&
+      plan.implementationEvidence.some((e: unknown) => String(e || "").trim().length > 0);
+    const hasNoveltyScore =
+      typeof plan._noveltyScore === "number" && plan._noveltyScore > 0;
+
+    const hasIndependentBacking = hasImplementationEvidence || hasNoveltyScore;
+
+    if (referencesStaleSource || !hasIndependentBacking) {
+      plan._staleDiagnosticsGated = true;
+      plan._staleDiagnosticsReason =
+        `stale_diagnostics_backed: plan lacks independent backing and diagnostics are stale — ` +
+        reasonSummary;
+    }
+  }
+
+  return plans;
+}
+
 async function readLatestJsonlRecord(filePath: string): Promise<any | null> {
   try {
     const raw = await fs.readFile(filePath, "utf8");

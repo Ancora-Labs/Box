@@ -1270,10 +1270,13 @@ export function buildTokenFirstBatches(
 ): ReturnType<typeof buildRoleExecutionBatches> {
   if (!Array.isArray(plans) || plans.length === 0) return [];
 
-  // ── Wave compaction ────────────────────────────────────────────────────────
-  // Wave barriers are fully disabled.  All plans collapse to wave 1 so they
-  // can be packed purely by role + token capacity.
-  const workingPlans: any[] = plans.map(p => ({ ...p, wave: 1 }));
+  // ── Wave-topology preservation ────────────────────────────────────────────
+  // Wave barriers are preserved so that dependency-ordered plans from different
+  // waves are never co-packed into the same context batch.  Token packing is
+  // applied WITHIN each wave group, not across wave boundaries.
+  // This supersedes the previous unconditional wave=1 collapse which broke
+  // dependency ordering when callers supplied multi-wave plan sets.
+  const workingPlans: any[] = plans.map(p => ({ ...p }));
   const telemetry = loadCycleAnalyticsTelemetry(config);
   const laneTelemetry = telemetry?.lastCycle?.laneTelemetry ?? {};
   const lanePerformance = buildLanePerformanceFromCycleTelemetry(laneTelemetry);
@@ -1439,55 +1442,71 @@ export function buildTokenFirstBatches(
     // Sort by priority within group (lower number = higher priority = dispatched first)
     groupPlans.sort((a, b) => Number(a.priority ?? 99) - Number(b.priority ?? 99));
 
-    // ── Greedy token-first packing within the group ────────────────────────
-    // All plans in a group share the same role; open a new batch only when
-    // context capacity is full.
+    // ── Greedy token-first packing within the group (wave-aware) ──────────
+    // Plans in a group share the same role.  Wave topology is preserved:
+    // plans from different waves are never co-packed into the same batch.
+    // Within each wave, batches are filled greedily by token capacity.
     const roleCoeff = getCoeff(role);
-    const batches: Array<{ plans: any[]; tokens: number }> = [];
+
+    // Group plans by wave number (preserving insertion order within each wave)
+    const plansByWave = new Map<number, any[]>();
     for (const plan of groupPlans) {
-      const planTokens = estimatePlanTokens(plan, roleCoeff);
-      let placed = false;
-      for (const batch of batches) {
-        const hasConflict = batch.plans.some(existing => hasConflictFiles(plan, existing));
-        if (!hasConflict && batch.tokens + planTokens <= usableTokens) {
-          batch.plans.push(plan);
-          batch.tokens += planTokens;
-          placed = true;
-          break;
+      const waveNum = Number.isFinite(Number(plan.wave)) && Number(plan.wave) > 0
+        ? Number(plan.wave)
+        : 1;
+      if (!plansByWave.has(waveNum)) plansByWave.set(waveNum, []);
+      plansByWave.get(waveNum)!.push(plan);
+    }
+    const sortedWaveNums = [...plansByWave.keys()].sort((a, b) => a - b);
+
+    for (const waveNum of sortedWaveNums) {
+      const wavePlans = plansByWave.get(waveNum)!;
+      const batches: Array<{ plans: any[]; tokens: number }> = [];
+      for (const plan of wavePlans) {
+        const planTokens = estimatePlanTokens(plan, roleCoeff);
+        let placed = false;
+        for (const batch of batches) {
+          const hasConflict = batch.plans.some(existing => hasConflictFiles(plan, existing));
+          if (!hasConflict && batch.tokens + planTokens <= usableTokens) {
+            batch.plans.push(plan);
+            batch.tokens += planTokens;
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          batches.push({ plans: [plan], tokens: planTokens });
         }
       }
-      if (!placed) {
-        batches.push({ plans: [plan], tokens: planTokens });
-      }
-    }
 
-    batches.forEach((batch, index) => {
-      const taskKind = String(
-        batch.plans[0]?.taskKind || batch.plans[0]?.kind || "implementation"
-      );
-      const sharedBranch = buildSharedBranchName(role, batch.plans);
-      const utilization = usableTokens > 0
-        ? Math.round((batch.tokens / usableTokens) * 100)
-        : 0;
+      batches.forEach((batch, index) => {
+        const taskKind = String(
+          batch.plans[0]?.taskKind || batch.plans[0]?.kind || "implementation"
+        );
+        const sharedBranch = buildSharedBranchName(role, batch.plans);
+        const utilization = usableTokens > 0
+          ? Math.round((batch.tokens / usableTokens) * 100)
+          : 0;
 
-      flattened.push({
-        role,
-        plans: batch.plans,
-        model: defaultModel,
-        contextWindowTokens,
-        usableContextTokens: usableTokens,
-        estimatedTokens: batch.tokens,
-        contextUtilizationPercent: utilization,
-        taskKind,
-        sharedBranch,
-        wave: 1,
-        roleBatchIndex: index + 1,
-        roleBatchTotal: batches.length,
-        githubFinalizer: index === batches.length - 1,
-        tokenFirstPacked: true,
-        diversityViolation: null,
+        flattened.push({
+          role,
+          plans: batch.plans,
+          model: defaultModel,
+          contextWindowTokens,
+          usableContextTokens: usableTokens,
+          estimatedTokens: batch.tokens,
+          contextUtilizationPercent: utilization,
+          taskKind,
+          sharedBranch,
+          wave: waveNum,
+          roleBatchIndex: index + 1,
+          roleBatchTotal: batches.length,
+          githubFinalizer: index === batches.length - 1,
+          tokenFirstPacked: true,
+          diversityViolation: null,
+        });
       });
-    });
+    }
   }
 
   return flattened.map((batch, index) => ({

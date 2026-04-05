@@ -598,3 +598,98 @@ describe("validateActionablePacketCompleteness()", () => {
     assert.equal(result.complete, true);
   });
 });
+
+// ── buildContextShortlist and compilePrometheusContextShortlist (Task 4) ──────
+
+import {
+  buildContextShortlist,
+  compilePrometheusContextShortlist,
+  TOKEN_PARTITION_LIMITS,
+} from "../../src/core/prompt_compiler.js";
+
+describe("buildContextShortlist", () => {
+  const items = [
+    { id: "a", text: "Critical finding about authentication bypass", recencyScore: 0.9, impactScore: 1.0 },
+    { id: "b", text: "Warning about slow query in dashboard", recencyScore: 0.6, impactScore: 0.5 },
+    { id: "c", text: "Old resolved issue about parser", recencyScore: 0.1, impactScore: 0.25, resolved: true },
+    { id: "d", text: "Important unresolved dependency graph drift", recencyScore: 0.8, impactScore: 0.75 },
+  ];
+
+  it("selects items in rank-descending order (60% impact, 40% recency)", () => {
+    const selected = buildContextShortlist(items, "healthFindings");
+    // item a: 0.6*1.0 + 0.4*0.9 = 0.96
+    // item d: 0.6*0.75 + 0.4*0.8 = 0.77
+    // item b: 0.6*0.5 + 0.4*0.6 = 0.54
+    // item c is resolved — excluded
+    assert.equal(selected[0].id, "a", "highest-ranked item must be first");
+    assert.equal(selected[1].id, "d");
+  });
+
+  it("excludes resolved items by default", () => {
+    const selected = buildContextShortlist(items, "healthFindings");
+    const ids = selected.map(i => i.id);
+    assert.ok(!ids.includes("c"), "resolved item must be excluded");
+  });
+
+  it("includes resolved items when includeResolved=true", () => {
+    const selected = buildContextShortlist(items, "healthFindings", { includeResolved: true });
+    const ids = selected.map(i => i.id);
+    assert.ok(ids.includes("c"), "resolved item must be included when requested");
+  });
+
+  it("enforces hard token partition limit", () => {
+    // Each item text is ~40-50 chars = ~10 tokens; set a tiny limit to force exclusion
+    const selected = buildContextShortlist(items, "healthFindings", { tokenLimit: 15 });
+    // Only one item (~12 tokens) should fit
+    assert.ok(selected.length <= 2, "token limit must restrict selection");
+  });
+
+  it("respects maxItems limit", () => {
+    const selected = buildContextShortlist(items, "healthFindings", { maxItems: 1 });
+    assert.equal(selected.length, 1);
+    assert.equal(selected[0].id, "a");
+  });
+
+  it("negative: empty items list returns empty array", () => {
+    const selected = buildContextShortlist([], "carryForward");
+    assert.deepEqual(selected, []);
+  });
+
+  it("TOKEN_PARTITION_LIMITS contains expected categories", () => {
+    assert.ok(typeof TOKEN_PARTITION_LIMITS.carryForward === "number");
+    assert.ok(typeof TOKEN_PARTITION_LIMITS.healthFindings === "number");
+    assert.ok(typeof TOKEN_PARTITION_LIMITS.diagnostics === "number");
+    assert.ok(typeof TOKEN_PARTITION_LIMITS.behaviorPatterns === "number");
+    assert.ok(typeof TOKEN_PARTITION_LIMITS.research === "number");
+    assert.ok(typeof TOKEN_PARTITION_LIMITS.topicMemory === "number");
+  });
+});
+
+describe("compilePrometheusContextShortlist", () => {
+  const items = [
+    { id: "x", text: "High-priority finding: orchestrator dispatch stall", recencyScore: 0.95, impactScore: 1.0 },
+    { id: "y", text: "Medium finding: slow worker startup", recencyScore: 0.5, impactScore: 0.5 },
+  ];
+
+  it("returns a formatted section string with heading and numbered items", () => {
+    const output = compilePrometheusContextShortlist("HEALTH FINDINGS", items, "healthFindings");
+    assert.ok(output.startsWith("## HEALTH FINDINGS"), "must start with heading");
+    assert.ok(output.includes("1. High-priority finding"), "first item must be first in output");
+    assert.ok(output.includes("2. Medium finding"), "second item must follow");
+  });
+
+  it("returns empty string when items list is empty", () => {
+    const output = compilePrometheusContextShortlist("EMPTY", [], "healthFindings");
+    assert.equal(output, "");
+  });
+
+  it("appends stale warning footer when staleWarning=true", () => {
+    const output = compilePrometheusContextShortlist("TEST", items, "carryForward", { staleWarning: true });
+    assert.ok(output.includes("STALE"), "stale warning must be present");
+  });
+
+  it("negative: staleWarning=false produces no warning footer", () => {
+    const output = compilePrometheusContextShortlist("TEST", items, "carryForward", { staleWarning: false });
+    assert.ok(!output.includes("STALE"), "no stale warning when not requested");
+  });
+});

@@ -1665,3 +1665,37 @@ describe("pipeline progress — terminology drift prevention (stage IDs)", () =>
     }
   });
 });
+
+// ── Wave topology preservation integration (Task 3) ──────────────────────────
+
+import { buildTokenFirstBatches } from "../../src/core/worker_batch_planner.js";
+
+describe("orchestrator dispatch — wave topology preserved in token-first planner (Task 3)", () => {
+  const tokenFirstConfig = {
+    copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 },
+    runtime: { workerContextTokenLimit: 200_000 },
+  };
+
+  it("wave-1 batches appear before wave-2 batches in dispatch order when using buildTokenFirstBatches", () => {
+    const plans = [
+      { role: "Evolution Worker", task: "Wave-2 dependent task — update orchestrator", wave: 2, target_files: ["src/core/orchestrator.ts"] },
+      { role: "Evolution Worker", task: "Wave-1 foundational task — add verification gate", wave: 1, target_files: ["src/core/verification_gate.ts"] },
+    ];
+    const batches = buildTokenFirstBatches(plans, tokenFirstConfig);
+    const firstBatchWave = batches[0]?.wave;
+    const lastBatchWave = batches[batches.length - 1]?.wave;
+    assert.equal(firstBatchWave, 1, "first batch must be wave 1");
+    assert.equal(lastBatchWave, 2, "last batch must be wave 2");
+  });
+
+  it("negative: single-wave plans all produce batches with the same wave number", () => {
+    const plans = [
+      { role: "Evolution Worker", task: "Task A", wave: 1, target_files: ["src/a.ts"] },
+      { role: "Evolution Worker", task: "Task B", wave: 1, target_files: ["src/b.ts"] },
+    ];
+    const batches = buildTokenFirstBatches(plans, tokenFirstConfig);
+    for (const batch of batches) {
+      assert.equal(batch.wave, 1, "all batches must be wave 1");
+    }
+  });
+});

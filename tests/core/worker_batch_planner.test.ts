@@ -1203,18 +1203,24 @@ describe("buildTokenFirstBatches — specialist threshold routing", () => {
     assert.equal(batches[0].role, "evolution-worker");
   });
 
-  it("collapses all waves to 1 when rerouting (wave barriers disabled in buildTokenFirstBatches)", () => {
-    // buildTokenFirstBatches intentionally collapses all plan waves to 1 so plans
-    // can be packed purely by role + token capacity without wave-level barriers.
+  it("preserves wave topology — plans from different waves are packed in separate batches (wave barriers enabled in buildTokenFirstBatches)", () => {
+    // buildTokenFirstBatches now preserves dependency-aware wave topology.
+    // Plans from different waves must not be co-packed into the same batch.
     const plans = [
       { ...makePlan("governance-worker", "gov w1"), wave: 1, dependsOn: [] },
       { ...makePlan("governance-worker", "gov w2"), wave: 2, dependencies: ["gov w1"] },
     ];
 
     const batches = buildTokenFirstBatches(plans, rerouteConfig);
-    // All output batches must have wave 1 (wave collapsing is the documented behavior)
+    // Wave 1 plan must appear in a wave-1 batch, wave 2 in a wave-2 batch
+    const wave1Batches = batches.filter(b => b.wave === 1);
+    const wave2Batches = batches.filter(b => b.wave === 2);
+    assert.ok(wave1Batches.length > 0, "must have at least one wave-1 batch");
+    assert.ok(wave2Batches.length > 0, "must have at least one wave-2 batch");
+    // No batch should mix plans from different waves
     for (const batch of batches) {
-      assert.equal(batch.wave, 1, "buildTokenFirstBatches must collapse all waves to 1");
+      const waveNums = new Set((batch.plans as any[]).map((p: any) => Number(p.wave) || 1));
+      assert.equal(waveNums.size, 1, `batch wave=${batch.wave} must not mix plans from different waves`);
     }
   });
 
@@ -1457,5 +1463,76 @@ describe("checkPacketSizeCap", () => {
 
   it("returns null for non-array input", () => {
     assert.equal(checkPacketSizeCap(null as any), null);
+  });
+});
+
+// ── buildTokenFirstBatches wave topology preservation (Task 3) ───────────────
+
+describe("buildTokenFirstBatches — wave topology preservation", () => {
+  const config = {
+    copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 },
+    runtime: { workerContextTokenLimit: 200_000 },
+  };
+
+  function makePlan(task: string, wave: number, file?: string) {
+    return {
+      role: "Evolution Worker",
+      task,
+      wave,
+      target_files: [file ?? `src/core/${task.replace(/\s+/g, "_").toLowerCase()}.ts`],
+    };
+  }
+
+  it("plans from different waves produce separate batches with correct wave numbers", () => {
+    const plans = [
+      makePlan("Wave-1 task A", 1),
+      makePlan("Wave-1 task B", 1),
+      makePlan("Wave-2 task C", 2),
+    ];
+    const batches = buildTokenFirstBatches(plans, config);
+    const wave1 = batches.filter(b => b.wave === 1);
+    const wave2 = batches.filter(b => b.wave === 2);
+    assert.ok(wave1.length > 0, "must have wave-1 batches");
+    assert.ok(wave2.length > 0, "must have wave-2 batches");
+  });
+
+  it("token packing applies within each wave — same-wave plans fit into one batch when under token budget", () => {
+    const plans = [
+      makePlan("W1 small A", 1),
+      makePlan("W1 small B", 1),
+    ];
+    const batches = buildTokenFirstBatches(plans, config);
+    const wave1 = batches.filter(b => b.wave === 1);
+    // Both plans should fit in a single batch (well under 200k token limit)
+    assert.equal(wave1.length, 1, "both wave-1 plans must be packed into a single batch");
+    assert.equal((wave1[0].plans as any[]).length, 2);
+  });
+
+  it("negative: wave-2 plans are never co-batched with wave-1 plans", () => {
+    const plans = [
+      makePlan("Wave-1 task", 1),
+      makePlan("Wave-2 dependent task", 2),
+    ];
+    const batches = buildTokenFirstBatches(plans, config);
+    for (const batch of batches) {
+      const waveNums = new Set((batch.plans as any[]).map((p: any) => Number(p.wave)));
+      assert.equal(waveNums.size, 1, `batch must not mix waves; found waves ${[...waveNums].join(",")}`);
+    }
+  });
+
+  it("tokenFirstPacked flag is set on all batches", () => {
+    const plans = [makePlan("Task A", 1), makePlan("Task B", 2)];
+    const batches = buildTokenFirstBatches(plans, config);
+    for (const batch of batches) {
+      assert.equal((batch as any).tokenFirstPacked, true);
+    }
+  });
+
+  it("single-wave plans produce batches all with the same wave number", () => {
+    const plans = [makePlan("A", 3), makePlan("B", 3)];
+    const batches = buildTokenFirstBatches(plans, config);
+    for (const batch of batches) {
+      assert.equal(batch.wave, 3);
+    }
   });
 });
