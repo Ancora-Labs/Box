@@ -4012,3 +4012,115 @@ describe("normalizeScalarContractField — parse-boundary normalization", () => 
     assert.equal(result.provenance, null);
   });
 });
+
+// ── computeDiagnosticsFreshnessAdmission ──────────────────────────────────────
+
+import {
+  computeDiagnosticsFreshnessAdmission,
+  tagStaleDiagnosticsBackedPlans,
+} from "../../src/core/prometheus.js";
+
+describe("computeDiagnosticsFreshnessAdmission", () => {
+  const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+
+  it("returns allFresh=true when all records are within staleAfterMs", () => {
+    const nowMs = Date.now();
+    const records = [
+      { label: "intervention_optimizer", recordedAt: new Date(nowMs - 10_000).toISOString(), staleAfterMs: SIX_HOURS_MS },
+      { label: "dependency_graph", recordedAt: new Date(nowMs - 30_000).toISOString(), staleAfterMs: SIX_HOURS_MS },
+    ];
+    const result = computeDiagnosticsFreshnessAdmission(records, nowMs);
+    assert.equal(result.allFresh, true);
+    assert.deepEqual(result.staleSources, []);
+    assert.deepEqual(result.freshnessReasons, []);
+  });
+
+  it("returns allFresh=false and stale source when record is beyond staleAfterMs", () => {
+    const nowMs = Date.now();
+    const records = [
+      { label: "intervention_optimizer", recordedAt: new Date(nowMs - SIX_HOURS_MS - 1000).toISOString(), staleAfterMs: SIX_HOURS_MS },
+    ];
+    const result = computeDiagnosticsFreshnessAdmission(records, nowMs);
+    assert.equal(result.allFresh, false);
+    assert.ok(result.staleSources.includes("intervention_optimizer"), "intervention_optimizer must be in staleSources");
+    assert.ok(result.freshnessReasons[0].startsWith("stale_diagnostics:intervention_optimizer:"), "reason must start with stale_diagnostics prefix");
+  });
+
+  it("treats missing recordedAt as a stale source with missing_diagnostics reason", () => {
+    const result = computeDiagnosticsFreshnessAdmission(
+      [{ label: "dependency_graph", recordedAt: null }],
+      Date.now(),
+    );
+    assert.equal(result.allFresh, false);
+    assert.ok(result.staleSources.includes("dependency_graph"));
+    assert.equal(result.freshnessReasons[0], "missing_diagnostics:dependency_graph");
+  });
+
+  it("negative: empty records list returns allFresh=true", () => {
+    const result = computeDiagnosticsFreshnessAdmission([], Date.now());
+    assert.equal(result.allFresh, true);
+    assert.deepEqual(result.staleSources, []);
+  });
+
+  it("handles invalid timestamp as missing_diagnostics", () => {
+    const result = computeDiagnosticsFreshnessAdmission(
+      [{ label: "my_source", recordedAt: "not-a-date" }],
+      Date.now(),
+    );
+    assert.equal(result.allFresh, false);
+    assert.ok(result.freshnessReasons[0].includes("missing_diagnostics"));
+  });
+});
+
+describe("tagStaleDiagnosticsBackedPlans", () => {
+  const staleFreshness = {
+    allFresh: false,
+    staleSources: ["intervention_optimizer"],
+    freshnessReasons: ["stale_diagnostics:intervention_optimizer:ageMinutes=480:staleAfterMs=21600000"],
+  };
+
+  it("tags plans that reference a stale source label in task text", () => {
+    const plans = [
+      { task: "Use intervention_optimizer findings to address bottlenecks", role: "Evolution Worker" },
+    ];
+    tagStaleDiagnosticsBackedPlans(plans, staleFreshness);
+    assert.equal(plans[0]._staleDiagnosticsGated, true);
+    assert.ok(typeof plans[0]._staleDiagnosticsReason === "string");
+    assert.ok((plans[0]._staleDiagnosticsReason as string).includes("stale_diagnostics_backed"));
+  });
+
+  it("tags plans without independent backing when diagnostics are stale", () => {
+    const plans = [
+      { task: "Implement generic optimization", role: "Evolution Worker" },
+    ];
+    tagStaleDiagnosticsBackedPlans(plans, staleFreshness);
+    // Plan has no implementationEvidence or _noveltyScore — tagged as stale-backed
+    assert.equal(plans[0]._staleDiagnosticsGated, true);
+  });
+
+  it("does NOT tag plans that have implementationEvidence when they don't reference stale source", () => {
+    const plans = [
+      {
+        task: "Refactor parser baseline recovery module",
+        role: "Evolution Worker",
+        implementationEvidence: ["src/core/parser_baseline_recovery.ts already has gap at line 42"],
+      },
+    ];
+    tagStaleDiagnosticsBackedPlans(plans, staleFreshness);
+    assert.equal(plans[0]._staleDiagnosticsGated, undefined, "plan with implementationEvidence must not be tagged");
+  });
+
+  it("does NOT tag plans when all diagnostics are fresh", () => {
+    const freshResult = { allFresh: true, staleSources: [], freshnessReasons: [] };
+    const plans = [{ task: "Some task", role: "Evolution Worker" }];
+    tagStaleDiagnosticsBackedPlans(plans, freshResult);
+    assert.equal(plans[0]._staleDiagnosticsGated, undefined);
+  });
+
+  it("negative: returns same array reference when no tagging needed (all fresh)", () => {
+    const fresh = { allFresh: true, staleSources: [], freshnessReasons: [] };
+    const plans = [{ task: "Some task" }];
+    const result = tagStaleDiagnosticsBackedPlans(plans, fresh);
+    assert.equal(result, plans, "same array reference must be returned");
+  });
+});

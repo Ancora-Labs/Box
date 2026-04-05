@@ -88,6 +88,12 @@ export const PACKET_VIOLATION_CODE = Object.freeze({
   MISSING_IMPLEMENTATION_EVIDENCE: "missing_implementation_evidence",
   /** Low-leverage or redundant packets must include measurable capacity-first justification. */
   MISSING_CAPACITY_FIRST_JUSTIFICATION: "missing_capacity_first_justification",
+  /**
+   * Plan is tagged as backed by stale diagnostics data and lacks independent
+   * justification.  Stale-backed plans must be quarantined until diagnostics
+   * are refreshed or the plan provides independent evidence.
+   */
+  STALE_DIAGNOSTICS_BACKED: "stale_diagnostics_backed",
 });
 
 /**
@@ -367,6 +373,22 @@ export function validatePlanContract(plan): { valid: boolean; violations: PlanVi
       message: String(plan._thinPacketReason || "Thin packet rejected by dispatch admission contract"),
       severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
       code: PACKET_VIOLATION_CODE.THIN_PACKET_REJECTED,
+    });
+  }
+
+  // Stale diagnostics admission gate: plans tagged by the diagnostics freshness
+  // gate are quarantined until diagnostics are refreshed or independent evidence
+  // is supplied.  The tag is set by tagStaleDiagnosticsBackedPlans() in prometheus.ts
+  // and carries a machine-readable reason string.
+  if (plan._staleDiagnosticsGated === true) {
+    violations.push({
+      field: "diagnosticsFreshness",
+      message: String(
+        plan._staleDiagnosticsReason
+        || "Plan is backed by stale diagnostics and must be quarantined until diagnostics are refreshed",
+      ),
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED,
     });
   }
 

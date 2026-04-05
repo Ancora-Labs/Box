@@ -570,3 +570,158 @@ export function compileRankedContextSection(
   }
   return lines.length > 1 ? lines.join("\n") : "";
 }
+
+// ── Prometheus context shortlist compiler ─────────────────────────────────────
+
+/**
+ * Hard token partition limits for each Prometheus context category.
+ *
+ * These are enforced caps — no category can exceed its limit regardless of
+ * how many items are available.  The limits are designed so that the total
+ * across all categories fits within a typical Prometheus prompt budget while
+ * leaving sufficient room for invariant sections (role, output format, etc.).
+ *
+ * Operators may override per-category by passing opts.tokenLimits to
+ * compilePrometheusContextShortlist().
+ */
+export const TOKEN_PARTITION_LIMITS = Object.freeze({
+  /** Carry-forward / unresolved follow-ups from prior postmortems. */
+  carryForward:     2000,
+  /** High-severity health-audit findings (critical + important only). */
+  healthFindings:   1500,
+  /** Diagnostics freshness status lines. */
+  diagnostics:       400,
+  /** Recent postmortem lessons and patterns. */
+  behaviorPatterns: 1500,
+  /** Research intelligence summaries. */
+  research:         3000,
+  /** Topic memory fragments. */
+  topicMemory:      1800,
+});
+
+export type TokenPartitionCategory = keyof typeof TOKEN_PARTITION_LIMITS;
+
+/**
+ * A single item for the shortlist.  Callers supply one per candidate entry;
+ * the compiler selects the highest-ranked subset that fits the token budget.
+ */
+export interface ShortlistItem {
+  /** Stable identifier (finding ID, lesson fingerprint, topic key, etc.). */
+  id: string;
+  /** Rendered text shown in the prompt. */
+  text: string;
+  /**
+   * Recency score: higher = more recent.  Computed by the caller as
+   * `1 / (1 + ageMs / referenceMs)` or any monotone-decreasing function of age.
+   */
+  recencyScore: number;
+  /**
+   * Impact score: higher = more important.  Severity mapping:
+   *   critical → 1.0, important → 0.75, warning → 0.5, low → 0.25
+   */
+  impactScore: number;
+  /**
+   * Resolution status.  Items marked `resolved` are excluded from the shortlist
+   * unless `opts.includeResolved` is explicitly true.
+   */
+  resolved?: boolean;
+}
+
+/**
+ * Select the highest-ranked unresolved items from a candidate list and enforce
+ * the hard token partition limit for the given category.
+ *
+ * Ranking formula: `0.6 * impactScore + 0.4 * recencyScore`
+ * Items are sorted descending and included until the token budget is exhausted.
+ *
+ * @param items        — candidate list
+ * @param category     — partition category (used to look up the default limit)
+ * @param opts.tokenLimit — override the default limit for this call
+ * @param opts.maxItems   — maximum number of items regardless of token budget
+ * @param opts.includeResolved — include resolved items (default: false)
+ * @returns selected items in rank-descending order
+ */
+export function buildContextShortlist(
+  items: ShortlistItem[],
+  category: TokenPartitionCategory,
+  opts: {
+    tokenLimit?: number;
+    maxItems?: number;
+    includeResolved?: boolean;
+  } = {},
+): ShortlistItem[] {
+  const safeItems = Array.isArray(items) ? items : [];
+  const hardLimit = Number.isFinite(opts.tokenLimit) && (opts.tokenLimit as number) > 0
+    ? (opts.tokenLimit as number)
+    : TOKEN_PARTITION_LIMITS[category];
+  const maxItems = Number.isFinite(opts.maxItems) && (opts.maxItems as number) > 0
+    ? Math.floor(opts.maxItems as number)
+    : Infinity;
+  const includeResolved = opts.includeResolved === true;
+
+  // Filter resolved items unless explicitly included
+  const candidates = safeItems.filter(item => includeResolved || !item.resolved);
+
+  // Rank: 60% impact, 40% recency (both normalised to [0, 1] by the caller)
+  const ranked = [...candidates].sort((a, b) => {
+    const scoreA = 0.6 * Math.max(0, Math.min(1, a.impactScore))
+                 + 0.4 * Math.max(0, Math.min(1, a.recencyScore));
+    const scoreB = 0.6 * Math.max(0, Math.min(1, b.impactScore))
+                 + 0.4 * Math.max(0, Math.min(1, b.recencyScore));
+    return scoreB - scoreA; // descending
+  });
+
+  const selected: ShortlistItem[] = [];
+  let usedTokens = 0;
+  for (const item of ranked) {
+    if (selected.length >= maxItems) break;
+    const itemTokens = estimateTokens(item.text);
+    if (usedTokens + itemTokens > hardLimit) break;
+    selected.push(item);
+    usedTokens += itemTokens;
+  }
+  return selected;
+}
+
+/**
+ * Compile a formatted prompt section from a shortlist of items.
+ *
+ * Applies `buildContextShortlist` internally to enforce the token partition limit,
+ * then renders the selected items as a numbered list under the given heading.
+ *
+ * @param title    — section heading
+ * @param items    — candidate list (see ShortlistItem)
+ * @param category — partition category for hard limit lookup
+ * @param opts     — forwarded to buildContextShortlist + optional staleness label
+ * @returns formatted section string, or empty string when no items are selected
+ */
+export function compilePrometheusContextShortlist(
+  title: string,
+  items: ShortlistItem[],
+  category: TokenPartitionCategory,
+  opts: {
+    tokenLimit?: number;
+    maxItems?: number;
+    includeResolved?: boolean;
+    /** When true, append a staleness warning footer to the section. */
+    staleWarning?: boolean;
+  } = {},
+): string {
+  const selected = buildContextShortlist(items, category, opts);
+  if (selected.length === 0) return "";
+
+  const heading = String(title || "CONTEXT").trim();
+  const lines: string[] = [`## ${heading}`];
+  selected.forEach((item, idx) => {
+    lines.push(`${idx + 1}. ${item.text.trim()}`);
+  });
+
+  if (opts.staleWarning) {
+    lines.push(
+      "\n⚠️ STALE: Some items above are from diagnostics older than the freshness threshold. " +
+      "Do NOT treat these as current priorities without independent verification.",
+    );
+  }
+
+  return lines.join("\n");
+}

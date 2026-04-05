@@ -1455,3 +1455,84 @@ describe("computeCycleHealth — sustainedBreachSignatures", () => {
     }
   });
 });
+
+// ── DISPATCH_BLOCK_REMEDIATION outcome binding ────────────────────────────────
+
+describe("cycle_analytics — DISPATCH_BLOCK_REMEDIATION outcome binding (Task 2)", () => {
+  const makeConfig = (stateDir = "state") => ({
+    paths: { stateDir },
+    slo: { thresholds: {} },
+  });
+
+  it("forces DISPATCH_BLOCK_REMEDIATION when blocked workers omit dispatchBlockReason and outcome would be SUCCESS", () => {
+    const record = computeCycleAnalytics(makeConfig(), {
+      workerResults: [
+        // done worker WITH verification evidence (satisfies seam)
+        { roleName: "coder", status: "done", dispatchContract: { doneWorkerWithVerificationReportEvidence: true } },
+        // blocked worker WITHOUT dispatchBlockReason (violates dispatch-block contract)
+        { roleName: "qa", status: "blocked", dispatchContract: { dispatchBlockReason: null } },
+      ],
+      planCount: 2,
+      phase: CYCLE_PHASE.COMPLETED,
+    });
+    assert.equal(
+      record.outcomes.status,
+      CYCLE_OUTCOME_STATUS.DISPATCH_BLOCK_REMEDIATION,
+      "outcome must be DISPATCH_BLOCK_REMEDIATION when blocked workers lack explicit dispatchBlockReason",
+    );
+    assert.ok(record.outcomes.probeFailureRemediation, "probeFailureRemediation must be populated");
+    assert.ok(
+      Array.isArray(record.outcomes.probeFailureRemediation!.blockedBy) &&
+      record.outcomes.probeFailureRemediation!.blockedBy.includes("dispatchBlockReasonOutcomes"),
+      "blockedBy must contain dispatchBlockReasonOutcomes",
+    );
+    assert.ok(
+      Array.isArray(record.outcomes.probeFailureRemediation!.remediationActions) &&
+      record.outcomes.probeFailureRemediation!.remediationActions.length > 0,
+      "remediationActions must be non-empty",
+    );
+  });
+
+  it("forces DISPATCH_BLOCK_REMEDIATION when blocked workers omit dispatchBlockReason and outcome would be PARTIAL", () => {
+    // Use "partial" + "blocked" so base outcome is PARTIAL (not FAILED), then verify override.
+    const record = computeCycleAnalytics(makeConfig(), {
+      workerResults: [
+        { roleName: "coder", status: "partial" },
+        { roleName: "qa", status: "blocked" }, // no dispatchBlockReason
+      ],
+      planCount: 2,
+      phase: CYCLE_PHASE.COMPLETED,
+    });
+    assert.equal(record.outcomes.status, CYCLE_OUTCOME_STATUS.DISPATCH_BLOCK_REMEDIATION);
+    assert.ok(record.outcomes.probeFailureRemediation, "probeFailureRemediation must be populated for PARTIAL→DISPATCH_BLOCK");
+  });
+
+  it("probeFailureRemediation is null when dispatch-block criterion passes", () => {
+    const record = computeCycleAnalytics(makeConfig(), {
+      workerResults: [
+        { roleName: "coder", status: "done", dispatchContract: { doneWorkerWithVerificationReportEvidence: true } },
+      ],
+      planCount: 1,
+      phase: CYCLE_PHASE.COMPLETED,
+    });
+    assert.equal(record.outcomes.probeFailureRemediation, null);
+  });
+
+  it("negative: prometheus/athena signal absence alone does NOT trigger DISPATCH_BLOCK_REMEDIATION", () => {
+    // No prometheusAnalysis or athenaPlanReview supplied — those criteria fail,
+    // but that is expected in headless/test invocations and must not change outcome.
+    const record = computeCycleAnalytics(makeConfig(), {
+      workerResults: [
+        { roleName: "coder", status: "done", dispatchContract: { doneWorkerWithVerificationReportEvidence: true } },
+      ],
+      planCount: 1,
+      phase: CYCLE_PHASE.COMPLETED,
+    });
+    assert.equal(record.outcomes.status, CYCLE_OUTCOME_STATUS.SUCCESS);
+    assert.equal(record.outcomes.probeFailureRemediation, null);
+  });
+
+  it("DISPATCH_BLOCK_REMEDIATION is a member of CYCLE_OUTCOME_STATUS", () => {
+    assert.equal(CYCLE_OUTCOME_STATUS.DISPATCH_BLOCK_REMEDIATION, "dispatch_block_remediation");
+  });
+});

@@ -1356,3 +1356,61 @@ describe("isPacketQuarantined", () => {
     assert.equal(QUARANTINE_CONFIDENCE_THRESHOLD, 0.5);
   });
 });
+
+// ── STALE_DIAGNOSTICS_BACKED violation gate ───────────────────────────────────
+
+describe("validatePlanContract — stale diagnostics gate", () => {
+  const basePlan = {
+    task: "Implement deterministic stale-diagnostics admission gating",
+    role: "Evolution Worker",
+    wave: 1,
+    verification: "tests/core/plan_contract_validator.test.ts — test: stale diagnostics gate",
+    acceptance_criteria: ["Gate rejects stale-backed plans"],
+    dependencies: [],
+    capacityDelta: 0.5,
+    requestROI: 1.5,
+  };
+
+  it("rejects plan tagged with _staleDiagnosticsGated=true as CRITICAL violation", () => {
+    const plan = {
+      ...basePlan,
+      _staleDiagnosticsGated: true,
+      _staleDiagnosticsReason: "stale_diagnostics_backed: intervention_optimizer stale 480 min",
+    };
+    const result = validatePlanContract(plan);
+    assert.equal(result.valid, false, "stale-gated plan must be invalid");
+    const v = result.violations.find(v => v.code === PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED);
+    assert.ok(v, "must have STALE_DIAGNOSTICS_BACKED violation");
+    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.CRITICAL);
+    assert.ok(v!.message.includes("stale_diagnostics_backed"), "message must contain machine-readable reason");
+  });
+
+  it("uses fallback message when _staleDiagnosticsReason is absent", () => {
+    const plan = { ...basePlan, _staleDiagnosticsGated: true };
+    const result = validatePlanContract(plan);
+    const v = result.violations.find(v => v.code === PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED);
+    assert.ok(v, "must have STALE_DIAGNOSTICS_BACKED violation");
+    assert.ok(v!.message.length > 0, "message must be non-empty");
+  });
+
+  it("negative: plan without _staleDiagnosticsGated passes this gate", () => {
+    const result = validatePlanContract(basePlan);
+    const v = result.violations.find(v => v.code === PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED);
+    assert.equal(v, undefined, "clean plan must not have STALE_DIAGNOSTICS_BACKED violation");
+  });
+
+  it("negative: _staleDiagnosticsGated=false does not trigger violation", () => {
+    const plan = { ...basePlan, _staleDiagnosticsGated: false };
+    const result = validatePlanContract(plan);
+    const v = result.violations.find(v => v.code === PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED);
+    assert.equal(v, undefined);
+  });
+
+  it("STALE_DIAGNOSTICS_BACKED code is defined in PACKET_VIOLATION_CODE", () => {
+    assert.equal(
+      typeof PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED,
+      "string",
+    );
+    assert.equal(PACKET_VIOLATION_CODE.STALE_DIAGNOSTICS_BACKED, "stale_diagnostics_backed");
+  });
+});

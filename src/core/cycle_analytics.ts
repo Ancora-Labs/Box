@@ -114,6 +114,13 @@ export const CYCLE_OUTCOME_STATUS = Object.freeze({
   NO_PLANS: "no_plans",
   REJECTED: "rejected",
   UNKNOWN: "unknown",
+  /**
+   * Full runtimeContractProbe failed and the cycle cannot be treated as
+   * SUCCESS or benign-PARTIAL without explicit remediation.  Consumers
+   * must inspect `outcomes.probeFailureRemediation` for the blocking criteria
+   * and required remediation actions before re-dispatching.
+   */
+  DISPATCH_BLOCK_REMEDIATION: "dispatch_block_remediation",
 });
 
 /**
@@ -675,10 +682,53 @@ export function computeCycleAnalytics(config, {
   // produced a VERIFICATION_REPORT, the cycle cannot be SUCCESS-shaped."
   // PARTIAL and FAILED are preserved unchanged. Cycles with no workers (null) are not gated.
   const seamContractSatisfied = runtimeContractProbe.criteria.doneWorkerWithVerificationReportEvidence.pass;
-  const boundOutcomeStatus =
-    outcomeStatus === CYCLE_OUTCOME_STATUS.SUCCESS && !seamContractSatisfied
-      ? CYCLE_OUTCOME_STATUS.PARTIAL
-      : outcomeStatus;
+
+  // ── Dispatch-block fail-close binding ────────────────────────────────────────
+  // When blocked workers exist but lack explicit dispatchBlockReason, the cycle
+  // cannot be SUCCESS or PARTIAL-shaped — it must carry an explicit remediation
+  // state so that the root cause is observable and actionable.
+  // Prometheus/Athena signal absence is NOT a dispatch-block condition (those
+  // signals are optional in headless and test invocations).
+  const dispatchBlockPass = runtimeContractProbe.criteria.dispatchBlockReasonOutcomes.pass;
+
+  // Compute the failing dispatch-block criteria for machine-readable metadata.
+  const dispatchFailingCriteria: string[] = [];
+  if (!dispatchBlockPass) dispatchFailingCriteria.push("dispatchBlockReasonOutcomes");
+  if (!seamContractSatisfied) dispatchFailingCriteria.push("doneWorkerWithVerificationReportEvidence");
+
+  let boundOutcomeStatus: string;
+  let probeFailureRemediation: null | {
+    blockedBy: string[];
+    remediationActions: string[];
+    detectedAt: string;
+  } = null;
+
+  if (!dispatchBlockPass && (
+    outcomeStatus === CYCLE_OUTCOME_STATUS.SUCCESS ||
+    outcomeStatus === CYCLE_OUTCOME_STATUS.PARTIAL
+  )) {
+    // Blocked workers without explicit reasons: force dispatch-block remediation state.
+    boundOutcomeStatus = CYCLE_OUTCOME_STATUS.DISPATCH_BLOCK_REMEDIATION;
+    probeFailureRemediation = {
+      blockedBy: dispatchFailingCriteria,
+      remediationActions: dispatchFailingCriteria.map((criterion) => {
+        switch (criterion) {
+          case "dispatchBlockReasonOutcomes":
+            return "ensure all blocked workers carry an explicit dispatchBlockReason";
+          case "doneWorkerWithVerificationReportEvidence":
+            return "ensure at least one done worker includes a ===VERIFICATION_REPORT=== block";
+          default:
+            return `remediate failing criterion: ${criterion}`;
+        }
+      }),
+      detectedAt: new Date().toISOString(),
+    };
+  } else if (outcomeStatus === CYCLE_OUTCOME_STATUS.SUCCESS && !seamContractSatisfied) {
+    // Seam-only: done workers exist but none produced VERIFICATION_REPORT — degrade to PARTIAL.
+    boundOutcomeStatus = CYCLE_OUTCOME_STATUS.PARTIAL;
+  } else {
+    boundOutcomeStatus = outcomeStatus;
+  }
 
   const outcomes = {
     tasksDispatched,
@@ -690,6 +740,9 @@ export function computeCycleAnalytics(config, {
     selfImprovementRan: null,  // set externally after self-improvement cycle
     status: boundOutcomeStatus,
     seamContractSatisfied,
+    // Populated when the full runtimeContractProbe failed and the outcome was
+    // forced to DISPATCH_BLOCK_REMEDIATION.  null in all other cases.
+    probeFailureRemediation,
   };
 
   // Explicit reason code when outcome status is UNKNOWN (no silent ambiguity).
