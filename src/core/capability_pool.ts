@@ -401,7 +401,7 @@ export function buildWorkerChain(plan, hints: any = {}) {
       {
         stage: "verification",
         lane: "quality",
-        task: `[VERIFY] Validate the implementation of: ${task}. Run npm test, check edge cases, confirm acceptance criteria are met. Output pass/fail per criterion.`,
+        task: `[VERIFY] Validate the implementation of: ${task}. Run only targeted tests related to changed files and acceptance criteria (avoid full-suite runs unless explicitly required), check edge cases, confirm acceptance criteria are met. Output pass/fail per criterion.`,
       },
     ],
   };
