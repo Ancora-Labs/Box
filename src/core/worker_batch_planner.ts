@@ -18,7 +18,7 @@ import {
   buildReroutePenaltyLedger,
   ReroutePenaltyLedger,
 } from "./capability_pool.js";
-import { compactSingletonWaves } from "./dag_scheduler.js";
+import { compactSingletonWaves, computeWaveParallelismBound } from "./dag_scheduler.js";
 import { rankModelsByTaskKindExpectedValue } from "./model_policy.js";
 import {
   buildThinPacketRejectionReason,
@@ -1613,10 +1613,19 @@ export function buildTokenFirstBatches(
     ...(specialistRerouteReasons.length > 0 ? { specialistRerouteReasons } : {}),
   }));
 
+  // ── DAG parallelism bound ──────────────────────────────────────────────────
+  // Compute a safe concurrency cap from wave topology: max wave number is a
+  // proxy for critical-path depth.  Stamp on the first batch for orchestrator
+  // observability without changing dispatch behavior.
+  const waveNumbers = workingPlans.map((p: any) => Number(p.wave) || 1).filter(Number.isFinite);
+  const maxWave = waveNumbers.length > 0 ? Math.max(...waveNumbers) : 1;
+  const dagParallelismBound = computeWaveParallelismBound(workingPlans.length, maxWave);
+
   return mapped.map((batch, index) => ({
     ...batch,
     bundleIndex: index + 1,
     totalBundles: mapped.length,
+    ...(index === 0 ? { dagParallelismBound } : {}),
   }));
 }
 

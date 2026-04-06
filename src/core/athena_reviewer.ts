@@ -256,6 +256,8 @@ export const ATHENA_PLAN_REVIEW_REASON_CODE = Object.freeze({
   ATHENA_BATCH_METADATA_MISSING: "ATHENA_BATCH_METADATA_MISSING",
   REVIEW_EXCEPTION: "REVIEW_EXCEPTION",
   ACTIVE_GOVERNANCE_GATE_INFEASIBLE: "ACTIVE_GOVERNANCE_GATE_INFEASIBLE",
+  /** One or more mandatory health-audit findings (critical/important) are not covered by the plan. */
+  MANDATORY_COVERAGE_INCOMPLETE: "MANDATORY_COVERAGE_INCOMPLETE",
 });
 
 /** Set of all valid RATIONALE_CLASS values for O(1) lookup. */
@@ -2216,24 +2218,24 @@ export async function assessGovernanceGateBlockRisk(config): Promise<GateBlockRi
  * Plans must each score ≥ this threshold in scorePlanQuality() for the batch to
  * qualify. The bar (vs PLAN_QUALITY_MIN_SCORE=40) ensures only well-specified,
  * clearly-measurable low-risk batches bypass AI review without a prior approval.
- * Recalibrated from 80 → 65 so routine high-quality batches flow through more
- * often without consuming premium review requests.
+ * Recalibrated from 80 → 65 → 60 to cut premium review requests on routine
+ * high-quality batches while keeping the bar above PLAN_QUALITY_MIN_SCORE.
  */
-export const AUTO_APPROVE_HIGH_QUALITY_THRESHOLD = 65;
+export const AUTO_APPROVE_HIGH_QUALITY_THRESHOLD = 60;
 
 /**
  * Quality score (0-100) that each plan in a changed low-risk batch must reach
  * for the delta-review fast path to approve the batch without a full AI call.
  *
- * Set lower than HIGH_QUALITY_LOW_RISK (65) because a prior cached review IS
+ * Set lower than HIGH_QUALITY_LOW_RISK (60) because a prior cached review IS
  * present on disk: this path covers incremental improvements to already-reviewed
  * batches.  Plans that were reviewed before and have only minor spec changes can
  * satisfy a lower bar while still preserving meaningful quality enforcement.
- * Recalibrated from 80 → 60.
+ * Recalibrated from 80 → 60 → 55.
  *
  * Can be overridden via config.runtime.autoApproveDeltaReviewThreshold.
  */
-export const AUTO_APPROVE_DELTA_REVIEW_THRESHOLD = 60;
+export const AUTO_APPROVE_DELTA_REVIEW_THRESHOLD = 55;
 
 // ── Plan Review (pre-work gate) ─────────────────────────────────────────────
 
@@ -2397,6 +2399,35 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
     };
   }
 
+  // ── Deterministic mandatory coverage gate (runs before AI and auto-approve) ──
+  // If Prometheus already evaluated mandatory health-audit coverage and found gaps,
+  // Athena must enforce this contract before approving any plan batch.
+  // This gate is retryable — Prometheus can re-plan to address the missing findings.
+  const coverageGate = prometheusAnalysis?._mandatoryTaskCoverageGate;
+  if (coverageGate && typeof coverageGate === "object" && coverageGate.ok === false) {
+    const missing: string[] = Array.isArray(coverageGate.missing) ? coverageGate.missing : [];
+    const invalid: string[] = Array.isArray(coverageGate.invalid) ? coverageGate.invalid : [];
+    if (missing.length > 0 || invalid.length > 0) {
+      const gapSummary = [
+        missing.length > 0 ? `missing=[${missing.slice(0, 5).join(", ")}]` : "",
+        invalid.length > 0 ? `invalid=[${invalid.slice(0, 5).join(", ")}]` : "",
+      ].filter(Boolean).join("; ");
+      const message = `Mandatory health-audit coverage incomplete — ${gapSummary}`;
+      const reason = { code: ATHENA_PLAN_REVIEW_REASON_CODE.MANDATORY_COVERAGE_INCOMPLETE, message };
+      // Coverage gaps are retryable — Prometheus can re-plan to address missing findings.
+      const blocker = { stage: "athena_plan_review", code: reason.code, source: "athena_reviewer", retryable: true };
+      await appendProgress(config, `[ATHENA] Mandatory coverage gate FAILED — ${message}`);
+      await appendProgress(config, `[ATHENA][BLOCKER] code=${blocker.code} stage=${blocker.stage} retryable=${String(blocker.retryable)}`);
+      chatLog(stateDir, athenaName, `Mandatory coverage gate failed: ${message}`);
+      return {
+        approved: false,
+        reason,
+        blocker,
+        corrections: [...missing.map(id => `finding ${id} not covered`), ...invalid.map(id => `invalid coverage for ${id}`)],
+      };
+    }
+  }
+
   // ── Deterministic auto-approve path (low-risk unchanged plan batches) ─────
   // When ALL plans are low-risk and the plan batch fingerprint matches the last
   // approved review, skip the AI call and return the cached result immediately.
@@ -2439,6 +2470,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
             code: "LOW_RISK_UNCHANGED",
             message: "All plans are low-risk and unchanged since last approval"
           },
+          gateBlockRisk: gateRisk.gateBlockRisk,
           reviewedAt: new Date().toISOString(),
         };
       }
@@ -2483,6 +2515,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
             code: ATHENA_FAST_PATH_REASON.HIGH_QUALITY_LOW_RISK,
             message: `All plans are low-risk and cleared the high-quality threshold (≥ ${highQualityThreshold})`,
           },
+          gateBlockRisk: gateRisk.gateBlockRisk,
           reviewedAt: new Date().toISOString(),
         };
       }
@@ -2523,6 +2556,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
             code: ATHENA_FAST_PATH_REASON.DELTA_REVIEW_APPROVED,
             message: `All plans are low-risk with changed fingerprint and cleared the delta-review threshold (≥ ${deltaThreshold})`,
           },
+          gateBlockRisk: gateRisk.gateBlockRisk,
           reviewedAt: new Date().toISOString(),
         };
       }

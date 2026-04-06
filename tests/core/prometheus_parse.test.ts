@@ -58,6 +58,11 @@ import {
   normalizeScalarContractField,
   isResearchDegradedModeActive,
   sanitizePlanningFieldForPersistence,
+  STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH,
+  isStrategicFieldToolTraceContaminated,
+  PROCESS_NARRATION_LEXICAL_PATTERNS,
+  SEMANTIC_TOOL_TRACE_PATTERNS,
+  hasPrometheusRuntimeContractSignals,
 } from "../../src/core/prometheus.js";
 import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
 import {
@@ -2448,13 +2453,23 @@ describe("buildTopicMemoryPromptSection", () => {
           knowledgeFragments: [],
           completedSummary: "Completed summary",
         },
+        "archived-topic": {
+          status: "archived",
+          runCount: 1,
+          firstSeenAt: "2026-03-30T00:00:00.000Z",
+          lastUpdatedAt: "2026-03-31T00:00:00.000Z",
+          knowledgeFragments: [],
+          completedSummary: null,
+          archivedSummary: "Archived as informational",
+        },
       },
     });
 
-    assert.ok(prompt.includes("Active topics tracked: 2. Completed topics tracked: 1."));
+    assert.ok(prompt.includes("Active topics tracked: 2. Completed topics tracked: 1. Archived topics tracked: 1."));
     assert.ok(prompt.includes("useful-active"));
     assert.ok(!prompt.includes("**empty-active**"), "empty active topics should not consume prompt budget");
     assert.ok(prompt.includes("done-topic"));
+    assert.ok(prompt.includes("archived-topic"));
   });
 
   it("returns an empty string when no topic memory exists", () => {
@@ -4245,7 +4260,228 @@ describe("estimateTokenCost", () => {
   it("returns 0 for zero tokens", () => {
     assert.equal(estimateTokenCost(0), 0);
   });
+});
 
+// ── Task 1: Semantic strategic-field validation ──────────────────────────────
+
+describe("STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH", () => {
+  it("is a positive integer >= 10", () => {
+    assert.ok(Number.isFinite(STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH));
+    assert.ok(STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH >= 10);
+  });
+});
+
+describe("isStrategicFieldToolTraceContaminated", () => {
+  it("returns false for a clean semantic string", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("CI is failing on main branch due to import error in worker.ts"), false);
+  });
+
+  it("returns true for tool_call prefix", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("tool_call: read_file src/core/prometheus.ts"), true);
+  });
+
+  it("returns true for assistant: prefix", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("assistant: Let me analyze the codebase..."), true);
+  });
+
+  it("returns true for <thinking> block", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("<thinking>Planning the next steps...</thinking>"), true);
+  });
+
+  it("returns true for [THINKING] marker", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("[THINKING] The system has gaps in coverage"), true);
+  });
+
+  it("returns true for copilot> prefix", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("copilot> reading the file..."), true);
+  });
+
+  it("returns true for [synthesizer_start] marker", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated("[synthesizer_start] beginning synthesis"), true);
+  });
+
+  it("returns false for empty string", () => {
+    assert.equal(isStrategicFieldToolTraceContaminated(""), false);
+  });
+});
+
+// ── isStrategicFieldToolTraceContaminated: process narration lexical patterns ──
+
+describe("isStrategicFieldToolTraceContaminated — process narration lexical patterns", () => {
+  it("rejects 'Let me analyze' first-person action narration", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("Let me analyze the codebase for coverage gaps..."),
+      true,
+      "'Let me analyze' is first-person process narration and must be rejected",
+    );
+  });
+
+  it("rejects 'I'm going to read' first-person action narration", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("I'm going to read the file src/core/prometheus.ts now"),
+      true,
+      "'I'm going to read' is first-person process narration and must be rejected",
+    );
+  });
+
+  it("rejects 'I will now scan' narration", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("I will now scan the repository to find existing patterns"),
+      true,
+      "'I will now scan' is process narration and must be rejected",
+    );
+  });
+
+  it("rejects 'I'll now check' narration", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("I'll now check the existing tests to understand coverage"),
+      true,
+      "'I'll now check' is process narration and must be rejected",
+    );
+  });
+
+  it("does NOT reject legitimate strategic content containing action words mid-sentence", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated(
+        "The CI pipeline will scan all PRs before merge to enforce quality gates"
+      ),
+      false,
+      "Action words mid-sentence in legitimate strategic content must not be rejected",
+    );
+  });
+
+  it("does NOT reject legitimate findings with first-person absent", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated(
+        "Authentication module lacks input validation on user-supplied parameters"
+      ),
+      false,
+      "Clean strategic finding without process narration must not be rejected",
+    );
+  });
+});
+
+// ── isStrategicFieldToolTraceContaminated: semantic tool-trace patterns ────────
+
+describe("isStrategicFieldToolTraceContaminated — semantic tool-trace fragments", () => {
+  it("rejects view_file() tool invocation trace", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("view_file(path='src/core/prometheus.ts')"),
+      true,
+      "Tool invocation trace view_file() must be rejected",
+    );
+  });
+
+  it("rejects read_file() tool invocation trace", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("read_file('src/core/research_synthesizer.ts')"),
+      true,
+      "Tool invocation trace read_file() must be rejected",
+    );
+  });
+
+  it("rejects 'tool output:' block header", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("tool output: { status: 'ok', lines: 150 }"),
+      true,
+      "'tool output:' is a tool-trace block header and must be rejected",
+    );
+  });
+
+  it("rejects 'function result:' output block", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("function result: successfully read 3 files"),
+      true,
+      "'function result:' is a tool-trace fragment and must be rejected",
+    );
+  });
+
+  it("rejects 'reading the file' present-progressive at line start", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("reading the file src/core/prometheus.ts to understand structure"),
+      true,
+      "'reading the file' at line start is a semantic tool-trace and must be rejected",
+    );
+  });
+
+  it("rejects 'scanning the codebase' present-progressive at line start", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated("scanning the codebase for import errors"),
+      true,
+      "'scanning the codebase' at line start is a semantic tool-trace and must be rejected",
+    );
+  });
+
+  it("does NOT reject legitimate content where 'reading' appears mid-sentence", () => {
+    assert.equal(
+      isStrategicFieldToolTraceContaminated(
+        "The authentication module is worth reading carefully before refactoring"
+      ),
+      false,
+      "'reading' mid-sentence in legitimate content must not trigger tool-trace rejection",
+    );
+  });
+});
+
+// ── PROCESS_NARRATION_LEXICAL_PATTERNS and SEMANTIC_TOOL_TRACE_PATTERNS exports ─
+
+describe("PROCESS_NARRATION_LEXICAL_PATTERNS and SEMANTIC_TOOL_TRACE_PATTERNS", () => {
+  it("PROCESS_NARRATION_LEXICAL_PATTERNS is a frozen non-empty array", () => {
+    assert.ok(Array.isArray(PROCESS_NARRATION_LEXICAL_PATTERNS));
+    assert.ok(PROCESS_NARRATION_LEXICAL_PATTERNS.length > 0);
+    assert.ok(Object.isFrozen(PROCESS_NARRATION_LEXICAL_PATTERNS));
+  });
+
+  it("SEMANTIC_TOOL_TRACE_PATTERNS is a frozen non-empty array", () => {
+    assert.ok(Array.isArray(SEMANTIC_TOOL_TRACE_PATTERNS));
+    assert.ok(SEMANTIC_TOOL_TRACE_PATTERNS.length > 0);
+    assert.ok(Object.isFrozen(SEMANTIC_TOOL_TRACE_PATTERNS));
+  });
+});
+
+describe("hasPrometheusRuntimeContractSignals — semantic validation", () => {
+  it("returns false when keyFindings is below minimum semantic length", () => {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      keyFindings: "ok",  // 2 chars — below STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH
+    };
+    assert.equal(hasPrometheusRuntimeContractSignals(payload), false);
+  });
+
+  it("returns false when keyFindings contains tool_call contamination", () => {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      keyFindings: "tool_call: read_file src/core/prometheus.ts — loading context",
+    };
+    assert.equal(hasPrometheusRuntimeContractSignals(payload), false);
+  });
+
+  it("returns false when keyFindings contains <thinking> marker", () => {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      keyFindings: "<thinking>The system needs improvement in several areas</thinking>",
+    };
+    assert.equal(hasPrometheusRuntimeContractSignals(payload), false);
+  });
+
+  it("returns true for semantically valid keyFindings of sufficient length", () => {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      keyFindings: "Worker dispatch is blocked due to missing CI evidence; 3 high-risk plans require pre-mortem.",
+    };
+    assert.equal(hasPrometheusRuntimeContractSignals(payload), true);
+  });
+
+  it("negative: returns false for missing generatedAt even with valid keyFindings", () => {
+    const payload = {
+      generatedAt: "",
+      keyFindings: "CI is failing on main branch and blocking all workers from being dispatched.",
+    };
+    assert.equal(hasPrometheusRuntimeContractSignals(payload), false);
+  });
+});
+
+describe("estimateTokenCost — additional cases", () => {
   it("returns 0 for negative tokens (clamped)", () => {
     assert.ok(estimateTokenCost(-1) === 0);
   });
@@ -4451,7 +4687,7 @@ describe("sanitizeResearchSynthesisForPersistence — prometheusReadySummary fal
     assert.ok(src.prometheusReadySummary.length > 0, "prometheusReadySummary must be derived from scoutFindings");
   });
 
-  it("negative: all content fields empty → prometheusReadySummary remains empty string", () => {
+  it("negative: all content fields empty → topic is filtered out (no actionable artifact)", () => {
     const synthesis = makePayload([{
       title: "Source A",
       url: "https://example.com/a",
@@ -4460,8 +4696,9 @@ describe("sanitizeResearchSynthesisForPersistence — prometheusReadySummary fal
       scoutFindings: "",
     }]);
     const result = sanitizeResearchSynthesisForPersistence(synthesis) as any;
-    const src = result.topics[0].sources[0];
-    assert.strictEqual(src.prometheusReadySummary, "");
+    // A topic whose only source has all-empty signal fields has no actionable artifact
+    // and must be dropped by the topic-level invariant filter at persistence time.
+    assert.strictEqual(result.topics.length, 0, "empty-signal topic must be removed by actionable-artifact filter");
   });
 });
 
@@ -4669,7 +4906,7 @@ describe("sanitizeResearchSynthesisForPersistence — topic-level prometheusRead
     assert.ok(t.prometheusReadySummary.length > 0, "prometheusReadySummary must derive from applicableIdeas");
   });
 
-  it("negative: topic-level prometheusReadySummary is empty string when no signal exists", () => {
+  it("negative: topic-level prometheusReadySummary is empty string when no signal exists → topic is filtered out", () => {
     const payload = makePayload({
       topic: "Unknown Topic",
       sources: [],
@@ -4677,9 +4914,9 @@ describe("sanitizeResearchSynthesisForPersistence — topic-level prometheusRead
       applicableIdeas: [],
     });
     const result = sanitizeResearchSynthesisForPersistence(payload) as any;
-    const t = result.topics[0];
-    assert.ok("prometheusReadySummary" in t, "prometheusReadySummary key must always be present on topic");
-    assert.strictEqual(t.prometheusReadySummary, "", "empty signal → empty string, not undefined");
+    // A topic with no sources, no netFindings, and no applicableIdeas has no actionable artifact.
+    // The topic-level invariant filter must remove it at persistence time.
+    assert.strictEqual(result.topics.length, 0, "no-signal topic must be removed by actionable-artifact filter");
   });
 });
 

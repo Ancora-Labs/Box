@@ -51,7 +51,7 @@ import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 import { SLO_TIMESTAMP_CONTRACT, SLO_METRIC } from "./slo_checker.js";
 import { hasVerificationReportEvidence } from "./verification_gate.js";
 import { hasFiniteAthenaOverallScore } from "./athena_reviewer.js";
-import { hasPrometheusRuntimeContractSignals } from "./prometheus.js";
+import { hasPrometheusRuntimeContractSignals, isStrategicFieldToolTraceContaminated, STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH } from "./prometheus.js";
 import { getLaneForWorkerName, isSpecialistLane } from "./role_registry.js";
 import { isAnalyticsCompletedWorkerStatus } from "./worker_runner.js";
 
@@ -300,12 +300,19 @@ export function computeRuntimeContractProbe(opts: {
   const athenaPass = hasFiniteAthenaOverallScore(opts.athenaPlanReview);
   const workerPass = hasDoneWorkerWithVerificationEvidence(opts.workerResults);
   const dispatchReasonPass = hasDispatchBlockReasonOutcomes(opts.workerResults);
-  const passed = prometheusPass && athenaPass && workerPass && dispatchReasonPass;
+  // Semantic-valid check: keyFindings must be long enough and free of tool-trace contamination.
+  const keyFindings = String((opts.prometheusAnalysis as any)?.keyFindings ?? "").trim();
+  const keyFindingsSemanticValid = (
+    keyFindings.length >= STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH &&
+    !isStrategicFieldToolTraceContaminated(keyFindings)
+  );
+  const passed = prometheusPass && athenaPass && workerPass && dispatchReasonPass && keyFindingsSemanticValid;
   return {
     checkedAt: new Date().toISOString(),
     passed,
     criteria: {
       prometheusGeneratedAtAndKeyFindings: { pass: prometheusPass },
+      prometheusKeyFindingsSemanticValid: { pass: keyFindingsSemanticValid },
       athenaPlanReviewOverallScoreFinite: { pass: athenaPass },
       doneWorkerWithVerificationReportEvidence: { pass: workerPass },
       dispatchBlockReasonOutcomes: { pass: dispatchReasonPass },
@@ -852,6 +859,7 @@ export function computeCycleAnalytics(config, {
   // ── Fast-path counts: Athena auto-approve vs full-review ──────────────────
   // fastPathRate is derived from the two counts; null when either is absent.
   // autoApproveReasonCode populates byReasonCode for per-path utilization tracking.
+  // gateBlockRiskAtApproval tracks the governance gate state at time of auto-approve.
   const rawAutoApproved = (fastPathCounts && typeof fastPathCounts.athenaAutoApproved === "number") ? fastPathCounts.athenaAutoApproved : null;
   const rawFullReview   = (fastPathCounts && typeof fastPathCounts.athenaFullReview   === "number") ? fastPathCounts.athenaFullReview   : null;
   const totalReviews = (rawAutoApproved !== null && rawFullReview !== null)
@@ -860,7 +868,11 @@ export function computeCycleAnalytics(config, {
   const rawReasonCode = (fastPathCounts && typeof fastPathCounts.autoApproveReasonCode === "string")
     ? fastPathCounts.autoApproveReasonCode
     : null;
+  const rawGateBlockRisk = (fastPathCounts && typeof fastPathCounts.gateBlockRiskAtApproval === "string")
+    ? fastPathCounts.gateBlockRiskAtApproval
+    : null;
   const KNOWN_FAST_PATH_CODES = ["LOW_RISK_UNCHANGED", "HIGH_QUALITY_LOW_RISK", "DELTA_REVIEW_APPROVED"];
+  const KNOWN_GATE_RISKS = ["low", "medium", "high"];
   const byReasonCode: Record<string, number | null> = {
     LOW_RISK_UNCHANGED:    null,
     HIGH_QUALITY_LOW_RISK: null,
@@ -874,6 +886,12 @@ export function computeCycleAnalytics(config, {
     athenaFullReview:   rawFullReview,
     fastPathRate:       safeRatio(rawAutoApproved, totalReviews),
     byReasonCode,
+    // Gate-feasibility risk at the time of auto-approve decision.
+    // "low" indicates gate was clear; "medium"/"high" should not occur (fast path
+    // is blocked when requiresCorrection=true) but is recorded for observability.
+    gateBlockRiskAtApproval: (rawGateBlockRisk !== null && KNOWN_GATE_RISKS.includes(rawGateBlockRisk))
+      ? rawGateBlockRisk
+      : null,
   };
 
   if (fastPathCounts === null || fastPathCounts === undefined) {
