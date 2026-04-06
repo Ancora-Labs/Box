@@ -15,8 +15,8 @@
  */
 
 import path from "node:path";
-import { appendFileSync, readFileSync, readdirSync } from "node:fs";
-import { readJson, readJsonSafe, writeJson, spawnAsync } from "./fs_utils.js";
+import { appendFileSync } from "node:fs";
+import { readJson, readJsonSafe, writeJson, spawnAsync, buildIncrementalSignatureIndex } from "./fs_utils.js";
 import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
@@ -118,32 +118,23 @@ function appendPromptPreviewSync(stateDir: string, promptText: string): void {
 // into the Jesus directive as specific remediation items AND fed to the self-
 // improvement system as capability gaps.
 
-function collectSourceFiles(dirPath: string): string[] {
-  const entries = readdirSync(dirPath, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...collectSourceFiles(fullPath));
-      continue;
-    }
-    if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
-      files.push(fullPath);
-    }
-  }
-  return files;
-}
 
-function loadSourceEvidenceIndex(repoRoot: string): string {
+/**
+ * Load capability-gap source evidence using an incremental per-file hash cache.
+ * Only re-reads files whose content has changed since the last call, reducing
+ * decision latency from O(N×fileSize) full concatenation to O(changed×fileSize).
+ *
+ * Returns a Set<string> of all lowercase signature strings found across the
+ * source tree — same semantics as the old string index but without allocating
+ * a giant concatenated string on every cycle.
+ */
+async function loadSourceEvidenceIndex(repoRoot: string): Promise<Set<string>> {
   const srcDir = path.join(repoRoot, "src");
+  const allSignatures = Object.values(CAPABILITY_SOURCE_SIGNATURES).flat();
   try {
-    const files = collectSourceFiles(srcDir);
-    return files
-      .map((filePath) => readFileSync(filePath, "utf8"))
-      .join("\n")
-      .toLowerCase();
+    return await buildIncrementalSignatureIndex(srcDir, allSignatures);
   } catch {
-    return "";
+    return new Set<string>();
   }
 }
 
@@ -172,18 +163,18 @@ const CAPABILITY_SOURCE_SIGNATURES: Readonly<Record<string, string[]>> = Object.
 
 /**
  * Return true only when ALL required source signatures for a known capability
- * are found in the lowercased source index.  Unknown capabilities (not in the
+ * are found in the signature index Set.  Unknown capabilities (not in the
  * registry) always return false so their findings remain actionable.
  */
 function isCapabilityGapVerifiedPresentInSource(
-  sourceIndex: string,
+  sourceIndex: Set<string>,
   gap: { capability?: unknown },
 ): boolean {
-  if (!sourceIndex) return false;
+  if (!sourceIndex || sourceIndex.size === 0) return false;
   const capability = String(gap?.capability || "").trim().toLowerCase();
   const signatures = CAPABILITY_SOURCE_SIGNATURES[capability];
   if (!signatures || signatures.length === 0) return false;
-  return signatures.every((sig) => sourceIndex.includes(sig));
+  return signatures.every((sig) => sourceIndex.has(sig));
 }
 
 export async function runSystemHealthAudit(config, githubState, AthenaCoordination, sessions) {
@@ -306,7 +297,7 @@ export async function runSystemHealthAudit(config, githubState, AthenaCoordinati
     const km = await readJson(path.join(stateDir, "knowledge_memory.json"), {});
     const criticalLessons = (km.lessons || []).filter(l => l.severity === "critical").slice(-3);
     const capGaps = Array.isArray(km.capabilityGaps) ? km.capabilityGaps.slice(-5) : [];
-    const sourceIndex = loadSourceEvidenceIndex(process.cwd());
+    const sourceIndex = await loadSourceEvidenceIndex(process.cwd());
 
     if (criticalLessons.length > 0) {
       findings.push({

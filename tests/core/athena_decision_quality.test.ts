@@ -32,6 +32,7 @@ import {
   deriveDeterministicRecommendation,
   ATHENA_FAST_PATH_REASON,
   AUTO_APPROVE_DELTA_REVIEW_THRESHOLD,
+  AUTO_APPROVE_HIGH_QUALITY_THRESHOLD,
   runAthenaPlanReview,
 } from "../../src/core/athena_reviewer.js";
 
@@ -893,6 +894,79 @@ describe("runAthenaPlanReview — delta-review fast path", () => {
       );
     } finally {
       await fs.rm(subDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Recalibrated threshold validation ────────────────────────────────────────
+
+describe("AUTO_APPROVE threshold calibration", () => {
+  it("HIGH_QUALITY threshold is below previous 80 cap to let more batches through", () => {
+    assert.ok(
+      AUTO_APPROVE_HIGH_QUALITY_THRESHOLD < 80,
+      `HIGH_QUALITY threshold (${AUTO_APPROVE_HIGH_QUALITY_THRESHOLD}) must be < 80 — recalibrated to allow more low-risk batches through`,
+    );
+    assert.ok(
+      AUTO_APPROVE_HIGH_QUALITY_THRESHOLD >= 40,
+      `HIGH_QUALITY threshold (${AUTO_APPROVE_HIGH_QUALITY_THRESHOLD}) must be >= 40 to stay above PLAN_QUALITY_MIN_SCORE`,
+    );
+  });
+
+  it("DELTA_REVIEW threshold is lower than HIGH_QUALITY to permit incremental improvements", () => {
+    assert.ok(
+      AUTO_APPROVE_DELTA_REVIEW_THRESHOLD <= AUTO_APPROVE_HIGH_QUALITY_THRESHOLD,
+      `DELTA_REVIEW threshold (${AUTO_APPROVE_DELTA_REVIEW_THRESHOLD}) must be ≤ HIGH_QUALITY threshold (${AUTO_APPROVE_HIGH_QUALITY_THRESHOLD}) — cached-review path should have a lower bar`,
+    );
+    assert.ok(
+      AUTO_APPROVE_DELTA_REVIEW_THRESHOLD >= 40,
+      `DELTA_REVIEW threshold (${AUTO_APPROVE_DELTA_REVIEW_THRESHOLD}) must remain ≥ 40 to enforce minimum quality`,
+    );
+  });
+
+  it("HIGH_QUALITY fast path fires for a plan that meets the recalibrated threshold", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-hq-calib-"));
+    try {
+      // A well-specified plan that scores at or above the recalibrated HIGH_QUALITY threshold (65).
+      // scorePlanQuality deducts for: missing/vague task(-30), missing role(-20),
+      // missing verification(-20), missing wave(-10), vague language(-15),
+      // missing capacityDelta(-15), missing requestROI(-15).
+      // This plan provides all required fields → score = 100.
+      const plans = [{
+        role: "evolution-worker",
+        task: "Add request deduplication middleware with an in-memory LRU cache for identical API calls",
+        scope: "src/middleware/dedup.ts",
+        target_files: ["src/middleware/dedup.ts", "tests/middleware/dedup.test.ts"],
+        acceptance_criteria: ["Cache hit rate >= 80% on identical requests in load test"],
+        verification: "npm test -- tests/middleware/dedup.test.ts",
+        verification_commands: ["npm test -- tests/middleware/dedup.test.ts"],
+        riskLevel: "low",
+        wave: 1,
+        capacityDelta: 0.1,
+        requestROI: 2.0,
+      }];
+      const config: any = {
+        paths: {
+          stateDir: tmpDir,
+          progressFile: path.join(tmpDir, "progress.log"),
+        },
+        env: { copilotCliCommand: "__missing__", targetRepo: "test/repo" },
+        copilot: { leadershipAutopilot: false },
+        runtime: {
+          disablePlanReviewCache: false,
+          // No threshold override → uses module default (65 after recalibration)
+        },
+      };
+      const result = await runAthenaPlanReview(config, { plans });
+      assert.ok(
+        result.autoApproved === true,
+        "well-specified low-risk plan should auto-approve via HIGH_QUALITY path after threshold recalibration",
+      );
+      assert.equal(
+        result.autoApproveReason?.code,
+        ATHENA_FAST_PATH_REASON.HIGH_QUALITY_LOW_RISK,
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 });
