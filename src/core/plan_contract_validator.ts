@@ -707,6 +707,34 @@ export function isPacketQuarantined(packet: any): boolean {
   return false;
 }
 
+/**
+ * Filter a plans array into dispatchable and quarantined sets using
+ * `isPacketQuarantined` as the predicate.
+ *
+ * Complements `quarantineLowConfidencePackets` (which attaches provenance and
+ * partitions by confidence) by filtering plans that were already tagged
+ * `_quarantined: true` by any upstream mechanism (e.g. stale-diagnostics gate,
+ * explicit provenance attachment).
+ *
+ * @param plans — plan objects to partition
+ * @returns { dispatchable: any[], quarantined: any[] }
+ */
+export function filterQuarantinedPlans(
+  plans: any[],
+): { dispatchable: any[]; quarantined: any[] } {
+  if (!Array.isArray(plans)) return { dispatchable: [], quarantined: [] };
+  const dispatchable: any[] = [];
+  const quarantined: any[] = [];
+  for (const plan of plans) {
+    if (isPacketQuarantined(plan)) {
+      quarantined.push(plan);
+    } else {
+      dispatchable.push(plan);
+    }
+  }
+  return { dispatchable, quarantined };
+}
+
 // ── Output fidelity gate ──────────────────────────────────────────────────────
 
 /**
@@ -895,4 +923,47 @@ export function applyTokenFloorToEstimate(
     return Math.max(estimate, policy.minTokensPerPlan);
   }
   return estimate;
+}
+
+/**
+ * Hard admission check: validate that per-role plan groups do not exceed the
+ * actionable-steps cap before dispatch.
+ *
+ * Plans are grouped by role. If any role group contains more plans than the
+ * configured cap, dispatch must be blocked with a deterministic reason — the
+ * caller must decompose the work rather than relying on silent auto-splitting.
+ *
+ * @param plans            — all plans queued for dispatch
+ * @param maxStepsPerGroup — per-role cap (default: MAX_ACTIONABLE_STEPS_PER_PACKET)
+ * @returns { blocked, reason, oversizedRoles }
+ */
+export function validatePacketBatchAdmission(
+  plans: any[],
+  maxStepsPerGroup: number = MAX_ACTIONABLE_STEPS_PER_PACKET,
+): { blocked: boolean; reason: string | null; oversizedRoles: string[] } {
+  if (!Array.isArray(plans) || plans.length === 0) {
+    return { blocked: false, reason: null, oversizedRoles: [] };
+  }
+
+  const cap = Math.max(1, Math.floor(maxStepsPerGroup));
+
+  const roleGroups = new Map<string, number>();
+  for (const plan of plans) {
+    const role = String(plan?.role || "unknown").trim().toLowerCase();
+    roleGroups.set(role, (roleGroups.get(role) ?? 0) + 1);
+  }
+
+  const oversizedRoles: string[] = [];
+  for (const [role, count] of roleGroups) {
+    if (count > cap) {
+      oversizedRoles.push(`${role}(${count}>${cap})`);
+    }
+  }
+
+  if (oversizedRoles.length === 0) {
+    return { blocked: false, reason: null, oversizedRoles: [] };
+  }
+
+  const reason = `${PACKET_OVERSIZE_REASON}: role group(s) [${oversizedRoles.join(", ")}] exceed per-role cap of ${cap} — decompose before dispatch`;
+  return { blocked: true, reason, oversizedRoles };
 }

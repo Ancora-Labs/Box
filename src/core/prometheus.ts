@@ -5249,6 +5249,43 @@ Mandatory requirements:
     }
   }
 
+  // ── Low-confidence quarantine ────────────────────────────────────────────
+  // Attach aggregate parser confidence as provenance to plans that do not yet
+  // carry per-packet provenance, then run quarantineLowConfidencePackets so
+  // low-quality fallback plans are excluded from the dispatchable set.
+  // This executes the quarantine function in the normalization pipeline rather
+  // than leaving it as an untriggered utility — low-confidence packets must
+  // never reach dispatch.
+  if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+    const parserConfidenceScore = typeof parsed.parserConfidence === "number"
+      ? parsed.parserConfidence
+      : 1.0;
+    const plansWithProvenance = parsed.plans.map((plan: any) =>
+      plan._provenance
+        ? plan
+        : attachFallbackProvenance(plan, {
+            source: "prometheus-normalization",
+            reason: "aggregate-parser-confidence",
+            confidence: parserConfidenceScore,
+            tag: parserConfidenceScore < QUARANTINE_CONFIDENCE_THRESHOLD
+              ? FALLBACK_PROVENANCE_TAG.PARSER_FALLBACK
+              : FALLBACK_PROVENANCE_TAG.DIRECT,
+          })
+    );
+    const quarantineResult = quarantineLowConfidencePackets(plansWithProvenance);
+    if (quarantineResult.quarantined.length > 0) {
+      parsed.plans = quarantineResult.allowed;
+      parsed._quarantinedPacketCount = quarantineResult.quarantined.length;
+      parsed._quarantinedPackets = quarantineResult.quarantined;
+      await appendProgress(config,
+        `[PROMETHEUS][QUARANTINE] ${quarantineResult.quarantined.length} low-confidence packet(s) excluded from dispatch ` +
+        `(parserConfidence=${parserConfidenceScore} < threshold=${QUARANTINE_CONFIDENCE_THRESHOLD})`
+      );
+    } else {
+      parsed.plans = plansWithProvenance;
+    }
+  }
+
   // ── Carry-forward admission gate (Task 2) ────────────────────────────────
   // Blocks plan dispatch when the same unresolved lesson has recurred past the
   // threshold without being addressed in the current plan set. This converts
