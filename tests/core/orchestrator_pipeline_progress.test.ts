@@ -1960,3 +1960,262 @@ describe("reroute_history.jsonl — schema and optimizer penalty E2E", () => {
     assert.ok(!item._reroutePenaltyApplied, "_reroutePenaltyApplied must be absent/falsy for unpenalised intervention");
   });
 });
+
+// ── Task 1: buildIncrementalSignatureIndex — incremental cache behavior ────────
+
+import { buildIncrementalSignatureIndex } from "../../src/core/fs_utils.js";
+
+describe("buildIncrementalSignatureIndex — incremental file-hash cache", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-sig-idx-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("finds signatures present in a .ts file", async () => {
+    await fs.writeFile(path.join(tmpDir, "a.ts"), "export function validateAllPlans() {}", "utf8");
+    const found = await buildIncrementalSignatureIndex(tmpDir, ["validateallplans", "plan_contract_validator"]);
+    assert.ok(found.has("validateallplans"), "should find the signature that appears in the file");
+    assert.ok(!found.has("plan_contract_validator"), "should not find a signature absent from the file");
+  });
+
+  it("returns empty Set when srcDir does not exist", async () => {
+    const noDir = path.join(tmpDir, "no_such_dir");
+    const found = await buildIncrementalSignatureIndex(noDir, ["something"]);
+    assert.equal(found.size, 0, "missing srcDir must yield empty Set, not throw");
+  });
+
+  it("returns empty Set when allSignatures is empty", async () => {
+    await fs.writeFile(path.join(tmpDir, "b.ts"), "export const x = 1;", "utf8");
+    const found = await buildIncrementalSignatureIndex(tmpDir, []);
+    assert.equal(found.size, 0, "empty signature list must yield empty Set");
+  });
+
+  it("cache hit: unchanged file is not re-read on second call (no stale results)", async () => {
+    const filePath = path.join(tmpDir, "c.ts");
+    await fs.writeFile(filePath, "export function hydratedispatchcontextwithcievidence() {}", "utf8");
+    const sig = "hydratedispatchcontextwithcievidence";
+
+    const first = await buildIncrementalSignatureIndex(tmpDir, [sig]);
+    assert.ok(first.has(sig), "first call must find the signature");
+
+    // Overwrite with content that no longer contains the signature — but cache
+    // should detect the hash change and pick up the new content.
+    await fs.writeFile(filePath, "export function something_else() {}", "utf8");
+    const second = await buildIncrementalSignatureIndex(tmpDir, [sig]);
+    assert.ok(!second.has(sig), "after content change the signature must no longer be found");
+  });
+
+  it("negative path: signature search is case-insensitive", async () => {
+    await fs.writeFile(path.join(tmpDir, "d.ts"), "export const DispatchBlockReason = {};", "utf8");
+    // Signature is lowercase; source has mixed case — must still match
+    const found = await buildIncrementalSignatureIndex(tmpDir, ["dispatchblockreason"]);
+    assert.ok(found.has("dispatchblockreason"), "signature matching must be case-insensitive");
+  });
+});
+
+// ── Task 2: AUTO_APPROVE_DISPATCH_SIGNAL includes DELTA_REVIEW_APPROVED ───────
+
+import { AUTO_APPROVE_DISPATCH_SIGNAL } from "../../src/core/orchestrator.js";
+
+describe("AUTO_APPROVE_DISPATCH_SIGNAL — delta-review signal", () => {
+  it("exports DELTA_REVIEW_APPROVED constant", () => {
+    assert.equal(
+      AUTO_APPROVE_DISPATCH_SIGNAL.DELTA_REVIEW_APPROVED,
+      "DELTA_REVIEW_APPROVED",
+      "DELTA_REVIEW_APPROVED must be present in AUTO_APPROVE_DISPATCH_SIGNAL",
+    );
+  });
+
+  it("all three canonical signals are present and frozen", () => {
+    assert.ok(Object.isFrozen(AUTO_APPROVE_DISPATCH_SIGNAL), "must be frozen");
+    assert.ok("LOW_RISK_UNCHANGED"    in AUTO_APPROVE_DISPATCH_SIGNAL);
+    assert.ok("HIGH_QUALITY_LOW_RISK" in AUTO_APPROVE_DISPATCH_SIGNAL);
+    assert.ok("DELTA_REVIEW_APPROVED" in AUTO_APPROVE_DISPATCH_SIGNAL);
+  });
+});
+
+// ── Task 3: Athena-preassigned batch specialist telemetry ─────────────────────
+
+import { assignWorkersToPlans } from "../../src/core/capability_pool.js";
+import { buildTokenFirstBatches } from "../../src/core/worker_batch_planner.js";
+
+describe("Athena-preassigned batch — specialist utilization telemetry derived", () => {
+  it("capabilityPoolResult.specializationUtilization fields are populated by assignWorkersToPlans", () => {
+    // Verify the pool result shape so orchestrator can safely inject it
+    const plans = [
+      { id: "p1", role: "evolution-worker", task: "Implement feature", wave: 1, riskLevel: "low" },
+      { id: "p2", role: "quality-worker",   task: "Add tests",         wave: 1, riskLevel: "low" },
+    ];
+    const config: any = {};
+    const result = assignWorkersToPlans(plans, config);
+    const util = result.specializationUtilization;
+    assert.ok(util, "specializationUtilization must be present in pool result");
+    assert.ok(typeof util.specializedShare === "number",  "specializedShare must be a number");
+    assert.ok(typeof util.minSpecializedShare === "number", "minSpecializedShare must be a number");
+    assert.ok(typeof util.adaptiveMinSpecializedShare === "number", "adaptiveMinSpecializedShare must be a number");
+    assert.ok(typeof util.specializationTargetsMet === "boolean", "specializationTargetsMet must be boolean");
+  });
+
+  it("buildTokenFirstBatches stamps specialistUtilizationTarget on first batch for non-Athena path", () => {
+    // Confirm the standard token-first path does set the fields that the Athena-preassigned
+    // injection must replicate — ensures parity.
+    const plans = [
+      { id: "t1", role: "evolution-worker", task: "Implement X", wave: 1, riskLevel: "low",
+        target_files: ["src/x.ts"], acceptance_criteria: ["X works"], estimatedExecutionTokens: 5000 },
+    ];
+    const config: any = { planner: { specialistFillThreshold: 1.0 } };
+    const batches = buildTokenFirstBatches(plans, config);
+    assert.ok(Array.isArray(batches) && batches.length > 0, "must produce at least one batch");
+    const first = batches[0] as any;
+    // specialistUtilizationTarget is always set on the first batch
+    assert.ok(first.specialistUtilizationTarget !== undefined, "specialistUtilizationTarget must be present on first batch");
+    // For an evo-worker-only batch, reroute arrays are only present when there are actual reroutes
+    if ("specialistReroutes" in first) {
+      assert.ok(Array.isArray(first.specialistReroutes), "specialistReroutes must be an array when present");
+    }
+    if ("specialistRerouteReasons" in first) {
+      assert.ok(Array.isArray(first.specialistRerouteReasons), "specialistRerouteReasons must be an array when present");
+    }
+  });
+
+  it("negative path: empty plans list produces empty batch array without throwing", () => {
+    const config: any = {};
+    const batches = buildTokenFirstBatches([], config);
+    assert.ok(Array.isArray(batches) && batches.length === 0, "empty plans must produce empty batches");
+  });
+});
+
+// ── Task 2: modelRoutingTelemetry producer pipeline ────────────────────────────
+import { computeCycleAnalytics, buildModelRoutingTelemetry } from "../../src/core/cycle_analytics.js";
+import { rankModelsByTaskKindExpectedValue } from "../../src/core/model_policy.js";
+
+describe("buildModelRoutingTelemetry — producer pipeline", () => {
+  const sampleLog = [
+    { model: "claude-sonnet-4", taskKind: "ci-fix",       outcome: "done",    durationMs: 12000 },
+    { model: "claude-sonnet-4", taskKind: "ci-fix",       outcome: "done",    durationMs: 11000 },
+    { model: "claude-sonnet-4", taskKind: "ci-fix",       outcome: "partial", durationMs: 14000 },
+    { model: "gpt-4o",          taskKind: "ci-fix",       outcome: "error",   durationMs:  8000 },
+    { model: "gpt-4o",          taskKind: "feature",      outcome: "done",    durationMs: 30000 },
+    { model: "gpt-4o",          taskKind: "feature",      outcome: "done",    durationMs: 28000 },
+  ];
+
+  it("returns null for empty log", () => {
+    assert.strictEqual(buildModelRoutingTelemetry([]), null);
+  });
+
+  it("returns null for log with invalid entries only", () => {
+    const bad = [{ bad: "entry" }, null, "string", 42];
+    assert.strictEqual(buildModelRoutingTelemetry(bad as unknown[]), null);
+  });
+
+  it("produces byTaskKind with default and per-model economics", () => {
+    const result = buildModelRoutingTelemetry(sampleLog);
+    assert.ok(result !== null);
+    assert.ok("byTaskKind" in result!);
+    assert.ok("ci-fix" in result!.byTaskKind);
+    assert.ok("feature" in result!.byTaskKind);
+  });
+
+  it("computes correct successProbability for ci-fix/claude-sonnet-4 (2/3 done)", () => {
+    const result = buildModelRoutingTelemetry(sampleLog)!;
+    const sonnet = result.byTaskKind["ci-fix"].models["claude-sonnet-4"];
+    // 2 done out of 3 total
+    assert.strictEqual(Math.round(sonnet.successProbability * 100), 67);
+  });
+
+  it("computes correct successProbability for ci-fix default (2 done out of 4 total across models)", () => {
+    const result = buildModelRoutingTelemetry(sampleLog)!;
+    const def = result.byTaskKind["ci-fix"].default;
+    // claude: 2 done/3, gpt: 0 done/1 → total 2/4 = 0.5
+    assert.strictEqual(def.successProbability, 0.5);
+  });
+
+  it("sampleCount equals number of usable entries", () => {
+    const result = buildModelRoutingTelemetry(sampleLog)!;
+    assert.strictEqual(result.sampleCount, sampleLog.length);
+  });
+
+  it("requestCost is always 1.0", () => {
+    const result = buildModelRoutingTelemetry(sampleLog)!;
+    for (const [, kindData] of Object.entries(result.byTaskKind)) {
+      assert.strictEqual(kindData.default.requestCost, 1.0);
+      for (const [, modelData] of Object.entries(kindData.models)) {
+        assert.strictEqual(modelData.requestCost, 1.0);
+      }
+    }
+  });
+
+  it("negative: missing taskKind or model fields are skipped without throwing", () => {
+    const mixed = [
+      ...sampleLog,
+      { model: "x", outcome: "done" }, // no taskKind
+      { taskKind: "ci-fix", outcome: "done" }, // no model
+    ];
+    // Should not throw and still produce a result from the valid entries
+    const result = buildModelRoutingTelemetry(mixed as unknown[]);
+    assert.ok(result !== null);
+    assert.strictEqual(result!.sampleCount, sampleLog.length); // malformed entries excluded
+  });
+});
+
+describe("computeCycleAnalytics — modelRoutingTelemetry integration", () => {
+  const sampleLog = [
+    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 12000 },
+    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "blocked", durationMs: 11000 },
+    { model: "gpt-4o",          taskKind: "feature", outcome: "done",   durationMs: 30000 },
+  ];
+
+  it("includes modelRoutingTelemetry in analytics record when premiumUsageLog provided", () => {
+    const config = {};
+    const record: any = computeCycleAnalytics(config, { premiumUsageLog: sampleLog });
+    assert.ok(record.modelRoutingTelemetry !== null, "modelRoutingTelemetry must be present");
+    assert.ok("byTaskKind" in record.modelRoutingTelemetry);
+  });
+
+  it("modelRoutingTelemetry is null when premiumUsageLog is empty", () => {
+    const config = {};
+    const record: any = computeCycleAnalytics(config, { premiumUsageLog: [] });
+    assert.strictEqual(record.modelRoutingTelemetry, null);
+  });
+
+  it("modelRoutingTelemetry is null when premiumUsageLog is omitted", () => {
+    const config = {};
+    const record: any = computeCycleAnalytics(config, {});
+    assert.strictEqual(record.modelRoutingTelemetry, null);
+  });
+});
+
+describe("rankModelsByTaskKindExpectedValue — usedTelemetry flag from real telemetry", () => {
+  const sampleLog = [
+    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 12000 },
+    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 11000 },
+    { model: "gpt-4o",          taskKind: "ci-fix", outcome: "error",   durationMs:  8000 },
+  ];
+
+  it("returns usedTelemetry=true when real byTaskKind data is provided", () => {
+    const telemetry = buildModelRoutingTelemetry(sampleLog)!;
+    const cycleAnalytics = { modelRoutingTelemetry: telemetry };
+    const result = rankModelsByTaskKindExpectedValue(
+      "ci-fix",
+      ["claude-sonnet-4", "gpt-4o"],
+      cycleAnalytics,
+    );
+    assert.strictEqual(result.usedTelemetry, true);
+    assert.strictEqual(result.reason, "expected-value(taskKind)");
+  });
+
+  it("negative: returns usedTelemetry=false when cycleAnalytics is null", () => {
+    const result = rankModelsByTaskKindExpectedValue(
+      "ci-fix",
+      ["claude-sonnet-4", "gpt-4o"],
+      null,
+    );
+    assert.strictEqual(result.usedTelemetry, false);
+    assert.strictEqual(result.reason, "telemetry-missing");
+  });
+});

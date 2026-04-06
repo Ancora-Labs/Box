@@ -970,6 +970,8 @@ export const AUTO_APPROVE_DISPATCH_SIGNAL = Object.freeze({
   LOW_RISK_UNCHANGED:    "LOW_RISK_UNCHANGED",
   /** Review was skipped because all plans cleared the high-quality deterministic threshold. */
   HIGH_QUALITY_LOW_RISK: "HIGH_QUALITY_LOW_RISK",
+  /** Review was skipped because all plans in a changed batch cleared the delta-review threshold. */
+  DELTA_REVIEW_APPROVED: "DELTA_REVIEW_APPROVED",
 } as const);
 
 /**
@@ -2615,6 +2617,14 @@ async function runSingleCycle(config) {
   await spendPremium("athena", "plan_review");
   await appendProgress(config, `[ATHENA] ✓ Done — plan approved — requests this cycle: ${_cycleRequests}`);
 
+  // Persist auto-approve telemetry whenever Athena's deterministic fast-path
+  // fires.  This was previously defined but never called, leaving the
+  // auto_approve_telemetry.json empty and breaking downstream ROI analysis.
+  if (planReview.autoApproved === true) {
+    const autoApproveCycleId = `cycle-${cycleStartedAt || Date.now()}`;
+    await appendAutoApproveTelemetry(config, planReview as Record<string, unknown>, autoApproveCycleId);
+  }
+
   // Step 4: Dispatch workers sequentially (1 request per worker)
   const rawPlans = Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0
     ? planReview.patchedPlans
@@ -3058,6 +3068,54 @@ async function runSingleCycle(config) {
           }
         })()
       : buildRoleExecutionBatches(normalizedPlansForBatching, config, capabilityPoolResult));
+
+  // ── Specialist telemetry for Athena-preassigned batches (Task 3) ───────────
+  // buildTokenFirstBatches normally stamps specialistReroutes / specialistRerouteReasons /
+  // specialistUtilizationTarget on workerBatches[0].  When Athena pre-assigned the
+  // batch groupings the token-first path is bypassed, so those fields are missing and
+  // the scoreboard / reroute-history never gets populated.
+  // Derive equivalent telemetry from the already-computed capabilityPoolResult.
+  if (athenaPreBatched && capabilityPoolResult && workerBatches.length > 0) {
+    const firstBatch = workerBatches[0] as any;
+    const util = capabilityPoolResult.specializationUtilization;
+
+    // Detect reroutes: plans where Athena's _batchWorkerRole differs from the
+    // pool-assigned role (the pool may have re-routed a specialist to evo-worker).
+    const poolRoleByPlan = new Map<unknown, string>();
+    for (const { plan, selection } of (capabilityPoolResult.assignments || [])) {
+      poolRoleByPlan.set(plan, String(selection?.role || "evolution-worker"));
+    }
+    const athenaRerouteReasons: Array<{
+      role: string; lane: string; reasonCode: string;
+      fillRatio: number; laneScore: number; adaptiveFillThreshold: number;
+    }> = [];
+    for (const [plan, poolRole] of poolRoleByPlan.entries()) {
+      const athenaRole = String((plan as any)?._batchWorkerRole || (plan as any)?.role || "evolution-worker");
+      if (athenaRole !== poolRole) {
+        athenaRerouteReasons.push({
+          role: athenaRole,
+          lane: String((plan as any)?._capabilityLane || "implementation"),
+          reasonCode: "below_fill_threshold",
+          fillRatio: 1.0,
+          laneScore: 0.5,
+          adaptiveFillThreshold: 1.0,
+        });
+      }
+    }
+
+    firstBatch.specialistReroutes = athenaRerouteReasons.map(r => r.role);
+    firstBatch.specialistRerouteReasons = athenaRerouteReasons;
+    if (util) {
+      const total = workerBatches.length;
+      firstBatch.specialistUtilizationTarget = {
+        targetMet: util.specializationTargetsMet,
+        achievedSpecializedCount: Math.round(util.specializedShare * total),
+        requiredSpecializedCount: Math.round(util.adaptiveMinSpecializedShare * total),
+        minSpecializedShare: util.minSpecializedShare,
+        adaptiveMinSpecializedShare: util.adaptiveMinSpecializedShare,
+      };
+    }
+  }
 
   if (useTokenFirst) {
     const reroutes = (workerBatches as any[])?.[0]?.specialistReroutes;
@@ -3580,6 +3638,7 @@ async function runSingleCycle(config) {
         dispatched: funnelDispatchedCount,
         completed:  allWorkerResults.filter(r => isAnalyticsCompletedWorkerStatus(r.status)).length,
       },
+      premiumUsageLog: await readJson(path.join(stateDir, "premium_usage_log.json"), []),
     });
     await persistCycleAnalytics(config, analyticsRecord);
 

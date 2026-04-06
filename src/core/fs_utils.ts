@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 export async function ensureParent(filePath) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -366,4 +367,90 @@ export function spawnAsync(command, args, options) {
       resolve({ status: 1, stdout: "", stderr: String(err.message) });
     });
   });
+}
+
+// ── Incremental source signature index ───────────────────────────────────────
+// Module-level in-memory cache: filePath → { hash, found: Set<string> }.
+// Persists for the lifetime of the process so repeated calls within the same
+// cycle only re-scan files whose content hash has changed.
+const _sourceSignatureCache = new Map<string, { hash: string; found: Set<string> }>();
+
+/**
+ * Collect all .ts/.js files recursively from a directory (async, no sync I/O).
+ */
+async function collectSignatureSrcFiles(dir: string): Promise<string[]> {
+  const files: string[] = [];
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, String(entry.name));
+      if (entry.isDirectory()) {
+        const sub = await collectSignatureSrcFiles(fullPath);
+        files.push(...sub);
+      } else if (entry.isFile() && (String(entry.name).endsWith(".ts") || String(entry.name).endsWith(".js"))) {
+        files.push(fullPath);
+      }
+    }
+  } catch {
+    // Non-fatal: return whatever we collected before the error
+  }
+  return files;
+}
+
+/**
+ * Build an incremental per-file signature presence index.
+ *
+ * Algorithm:
+ *   1. Collect all .ts/.js files under srcDir recursively.
+ *   2. For each file, read content and compute SHA-256 hash.
+ *   3. Cache hit (same path + hash): reuse stored Set<string> of found signatures.
+ *   4. Cache miss: scan lowercased content for each allSignatures entry and cache.
+ *   5. Return the union Set<string> of all found signatures across all files.
+ *
+ * This reduces audit latency from O(N×fileSize) full concatenation on every call
+ * to O(changedFiles×fileSize) after the first warm call in a process lifetime.
+ *
+ * @param srcDir        — directory to scan (e.g. path.join(repoRoot, "src"))
+ * @param allSignatures — lowercase signature strings to detect presence of
+ * @returns             — Set<string> of all signatures found across any source file
+ */
+export async function buildIncrementalSignatureIndex(
+  srcDir: string,
+  allSignatures: readonly string[],
+): Promise<Set<string>> {
+  const result = new Set<string>();
+  if (!Array.isArray(allSignatures) || allSignatures.length === 0) return result;
+
+  let files: string[];
+  try {
+    files = await collectSignatureSrcFiles(srcDir);
+  } catch {
+    return result;
+  }
+
+  for (const filePath of files) {
+    try {
+      const content = await fs.readFile(filePath, "utf8");
+      const hash = createHash("sha256").update(content).digest("hex");
+
+      const cached = _sourceSignatureCache.get(filePath);
+      if (cached && cached.hash === hash) {
+        for (const sig of cached.found) result.add(sig);
+        continue;
+      }
+
+      // Cache miss: scan file for all target signatures
+      const lower = content.toLowerCase();
+      const found = new Set<string>();
+      for (const sig of allSignatures) {
+        if (lower.includes(sig)) found.add(sig);
+      }
+      _sourceSignatureCache.set(filePath, { hash, found });
+      for (const sig of found) result.add(sig);
+    } catch {
+      // Skip unreadable files — non-fatal
+    }
+  }
+
+  return result;
 }

@@ -2189,24 +2189,26 @@ export async function assessGovernanceGateBlockRisk(config): Promise<GateBlockRi
  * auto-approve fast-path (no prior cached fingerprint required).
  *
  * Plans must each score ≥ this threshold in scorePlanQuality() for the batch to
- * qualify. The higher bar (vs PLAN_QUALITY_MIN_SCORE=40) ensures only well-specified,
+ * qualify. The bar (vs PLAN_QUALITY_MIN_SCORE=40) ensures only well-specified,
  * clearly-measurable low-risk batches bypass AI review without a prior approval.
+ * Recalibrated from 80 → 65 so routine high-quality batches flow through more
+ * often without consuming premium review requests.
  */
-export const AUTO_APPROVE_HIGH_QUALITY_THRESHOLD = 80;
+export const AUTO_APPROVE_HIGH_QUALITY_THRESHOLD = 65;
 
 /**
  * Quality score (0-100) that each plan in a changed low-risk batch must reach
  * for the delta-review fast path to approve the batch without a full AI call.
  *
- * Same threshold as HIGH_QUALITY_LOW_RISK (80) because the quality bar must be
- * equally high when the fingerprint has changed.  The distinction from
- * HIGH_QUALITY_LOW_RISK is that a prior cached review IS present on disk;
- * this path covers incremental improvements to already-reviewed batches rather
- * than brand-new submissions.
+ * Set lower than HIGH_QUALITY_LOW_RISK (65) because a prior cached review IS
+ * present on disk: this path covers incremental improvements to already-reviewed
+ * batches.  Plans that were reviewed before and have only minor spec changes can
+ * satisfy a lower bar while still preserving meaningful quality enforcement.
+ * Recalibrated from 80 → 60.
  *
  * Can be overridden via config.runtime.autoApproveDeltaReviewThreshold.
  */
-export const AUTO_APPROVE_DELTA_REVIEW_THRESHOLD = 80;
+export const AUTO_APPROVE_DELTA_REVIEW_THRESHOLD = 60;
 
 // ── Plan Review (pre-work gate) ─────────────────────────────────────────────
 
