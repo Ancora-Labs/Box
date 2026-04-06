@@ -96,7 +96,7 @@ import { evaluateInterventionsForCycle } from "./intervention_judge.js";
 import { evaluateAutonomyBand, type CycleSample } from "./autonomy_band_monitor.js";
 import { validatePlanEvidenceCoupling } from "./evidence_envelope.js";
 import { runResearchScout } from "./research_scout.js";
-import { runResearchSynthesizer } from "./research_synthesizer.js";
+import { runResearchSynthesizer, persistBenchmarkEntry } from "./research_synthesizer.js";
 import { buildReplayClosureEvidence, CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS, hasVerificationReportEvidence } from "./verification_gate.js";
 import {
   classifyFailure,
@@ -2244,7 +2244,11 @@ async function runSingleCycle(config) {
         const scoutResult = await runResearchScout(config);
         if (scoutResult.success && scoutResult.sourceCount > 0) {
           await appendProgress(config, `[RESEARCH_SCOUT] Collected ${scoutResult.sourceCount} sources — running synthesizer`);
-          await runResearchSynthesizer(config, scoutResult);
+          const synthesisResult = await runResearchSynthesizer(config, scoutResult);
+          if (synthesisResult?.success === true && Array.isArray(synthesisResult.topics) && synthesisResult.topics.length > 0) {
+            await persistBenchmarkEntry(config, String(cycleStartedAt || new Date().toISOString()), synthesisResult.topics);
+            await appendProgress(config, `[RESEARCH_SCOUT] Benchmark ground-truth entry persisted - topics=${synthesisResult.topics.length}`);
+          }
           await appendProgress(config, "[RESEARCH_SCOUT] Synthesis complete — Prometheus will receive updated research context");
           await spendPremium("research-scout", "consumption_triggered_refresh");
           await appendProgress(config, `[RESEARCH_SCOUT] ✓ Done — requests this cycle: ${_cycleRequests}`);
@@ -2438,7 +2442,11 @@ async function runSingleCycle(config) {
         const scoutRefresh = await runResearchScout(config);
         if (scoutRefresh.success && scoutRefresh.sourceCount > 0) {
           await appendProgress(config, `[RESEARCH_SCOUT] Refresh collected ${scoutRefresh.sourceCount} source(s) — running synthesizer`);
-          await runResearchSynthesizer(config, scoutRefresh);
+          const refreshSynthesisResult = await runResearchSynthesizer(config, scoutRefresh);
+          if (refreshSynthesisResult?.success === true && Array.isArray(refreshSynthesisResult.topics) && refreshSynthesisResult.topics.length > 0) {
+            await persistBenchmarkEntry(config, String(cycleStartedAt || new Date().toISOString()), refreshSynthesisResult.topics);
+            await appendProgress(config, `[RESEARCH_SCOUT] Benchmark ground-truth entry persisted - topics=${refreshSynthesisResult.topics.length}`);
+          }
           await spendPremium("research-scout", "novelty_gate_refresh");
           await appendProgress(config, `[RESEARCH_SCOUT] ✓ Refresh complete — requests this cycle: ${_cycleRequests}`);
         } else {
@@ -2851,6 +2859,7 @@ async function runSingleCycle(config) {
     benchmarkBoostsApplied: number;
     benchmarkTelemetryCount: number;
     failureClassificationsApplied: number;
+    rerouteCostPenaltiesApplied: number;
   } | null = null;
 
   if (config?.runtime?.disableOptimizerAdmission !== true) {
@@ -2943,6 +2952,7 @@ async function runSingleCycle(config) {
         benchmarkBoostsApplied: Number(optimizerResultAny.benchmarkBoostsApplied ?? 0),
         benchmarkTelemetryCount: Number(optimizerResultAny.benchmarkTelemetryCount ?? 0),
         failureClassificationsApplied: Number(optimizerResultAny.failureClassificationsApplied ?? 0),
+        rerouteCostPenaltiesApplied: Number(optimizerResultAny.rerouteCostPenaltiesApplied ?? 0),
       };
 
       // Persist for observability regardless of outcome
@@ -3699,7 +3709,17 @@ async function runSingleCycle(config) {
       const crashCount = allWorkerResults?.filter((w: any) => w.status === "crashed" || w.status === "error").length ?? 0;
       const crashRate = totalWorkers > 0 ? crashCount / totalWorkers : null;
 
-      const benchmarkEntries = Array.isArray(benchmarkGroundTruth?.entries) ? benchmarkGroundTruth.entries : [];
+      let benchmarkEntries = Array.isArray(benchmarkGroundTruth?.entries) ? benchmarkGroundTruth.entries : [];
+      if (benchmarkEntries.length === 0) {
+        const synthesisSnapshot = await readJson(path.join(stateDir, "research_synthesis.json"), null);
+        const synthesisTopics = Array.isArray(synthesisSnapshot?.topics) ? synthesisSnapshot.topics : [];
+        if (synthesisTopics.length > 0) {
+          await persistBenchmarkEntry(config, String(cycleStartedAt || new Date().toISOString()), synthesisTopics);
+          const refreshedBenchmarkGroundTruth = await readJson(path.join(stateDir, "benchmark_ground_truth.json"), null);
+          benchmarkEntries = Array.isArray(refreshedBenchmarkGroundTruth?.entries) ? refreshedBenchmarkGroundTruth.entries : [];
+          await appendProgress(config, `[AUTONOMY_BAND] benchmark entries seeded from synthesis - entries=${benchmarkEntries.length}`);
+        }
+      }
       const cycleOutcomeStatus = totalWorkers === 0
         ? "no_plans"
         : (completedWorkers >= totalWorkers && crashCount === 0 ? "success" : (completedWorkers > 0 ? "partial" : "failed"));

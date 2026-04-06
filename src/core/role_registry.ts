@@ -53,6 +53,35 @@ export function getLaneForWorkerName(name: unknown, fallback = "implementation")
   return fallback;
 }
 
+/**
+ * Normalize a plan role string to a registered executable worker name.
+ *
+ * Maps raw plan role strings (from Prometheus output) to the canonical worker
+ * names in LANE_WORKER_NAMES. Unrecognized role strings fall back to
+ * "evolution-worker" (the base implementation worker) so budget accounting
+ * always resolves to a real worker identity.
+ *
+ * Examples:
+ *   "Evolution Worker"  → "evolution-worker"  (via normalizeWorkerName + LANE match)
+ *   "quality-worker"    → "quality-worker"
+ *   "King David"        → "evolution-worker"   (unregistered → fallback)
+ *   "governance"        → "governance-worker"  (lane key → worker name)
+ *
+ * @param role - raw role string from a Prometheus plan item
+ * @returns registered worker name from LANE_WORKER_NAMES or "evolution-worker"
+ */
+export function normalizePlanRoleToWorkerName(role: unknown): string {
+  const normalized = normalizeWorkerName(role);
+  // Check if it directly matches a registered worker name
+  const registeredWorkers = Object.values(LANE_WORKER_NAMES).map(w => normalizeWorkerName(w));
+  if (registeredWorkers.includes(normalized)) return normalized;
+  // Check if it matches a lane key (e.g., "governance" → "governance-worker")
+  const laneKey = String(role || "").trim().toLowerCase();
+  if (laneKey in LANE_WORKER_NAMES) return normalizeWorkerName(LANE_WORKER_NAMES[laneKey]);
+  // Unregistered role: fall back to evolution-worker
+  return "evolution-worker";
+}
+
 export function getSpecialistLaneNames(): string[] {
   return Object.keys(LANE_WORKER_NAMES).filter((lane) => lane !== "implementation");
 }

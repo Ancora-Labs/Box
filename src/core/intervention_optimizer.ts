@@ -68,6 +68,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { applyClassificationToSuccessProbability, normalizeRoleKey } from "./failure_classifier.js";
 import { readJson, writeJson } from "./fs_utils.js";
+import { normalizePlanRoleToWorkerName } from "./role_registry.js";
 
 // ── Budget unit ───────────────────────────────────────────────────────────────
 
@@ -910,7 +911,7 @@ export function runInterventionOptimizer(interventions, budget, options: any = {
   const rerouteReasons: Array<{ role: string; reasonCode: string }> = Array.isArray(options?.rerouteReasons)
     ? options.rerouteReasons
     : [];
-  let reroutteCostPenaltiesApplied = 0;
+  let rerouteCostPenaltiesApplied = 0;
   if (rerouteReasons.length > 0) {
     adjustedInterventions = adjustedInterventions.map((intervention) => {
       const adjustedEV = applyRerouteCostPenalty(
@@ -926,7 +927,7 @@ export function runInterventionOptimizer(interventions, budget, options: any = {
       const adjustedSP = Math.max(0, Math.min(1,
         Math.round((intervention.successProbability * evRatio) * 1000) / 1000,
       ));
-      reroutteCostPenaltiesApplied += 1;
+      rerouteCostPenaltiesApplied += 1;
       return { ...intervention, successProbability: adjustedSP, _reroutePenaltyApplied: true };
     });
   }
@@ -945,7 +946,7 @@ export function runInterventionOptimizer(interventions, budget, options: any = {
     policyImpactPenaltiesApplied,
     benchmarkTelemetryCount: benchmarkTelemetry.length,
     benchmarkBoostsApplied,
-    rerouteCostPenaltiesApplied: reroutteCostPenaltiesApplied,
+    rerouteCostPenaltiesApplied,
     ...reconciled,
   };
 }
@@ -1099,7 +1100,7 @@ export function buildInterventionsFromPlan(plans, config) {
       id:                  String(plan?.id ?? `plan-${index + 1}`),
       type:                INTERVENTION_TYPE.TASK,
       wave,
-      role:                String(plan?.role ?? "unknown").trim() || "unknown",
+      role:                normalizePlanRoleToWorkerName(plan?.role),
       title:               String(plan?.task ?? plan?.title ?? `task-${index + 1}`).trim() || `task-${index + 1}`,
       successProbability:  defaultSuccessP,
       impact,

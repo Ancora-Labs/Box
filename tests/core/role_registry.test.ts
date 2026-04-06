@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getRoleRegistry, LANE_WORKER_NAMES, WORKER_CAPABILITIES } from "../../src/core/role_registry.js";
+import {
+  getRoleRegistry,
+  LANE_WORKER_NAMES,
+  WORKER_CAPABILITIES,
+  normalizePlanRoleToWorkerName,
+} from "../../src/core/role_registry.js";
 
 describe("role_registry", () => {
   it("returns fallback registry when config is missing", () => {
@@ -77,5 +82,59 @@ describe("WORKER_CAPABILITIES", () => {
   it("negative path: unknown worker name returns undefined (no throw)", () => {
     const caps = (WORKER_CAPABILITIES as any)["nonexistent-worker"];
     assert.equal(caps, undefined);
+  });
+});
+
+// ── normalizePlanRoleToWorkerName ─────────────────────────────────────────────
+
+describe("normalizePlanRoleToWorkerName", () => {
+  it("normalizes 'Evolution Worker' to 'evolution-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("Evolution Worker"), "evolution-worker");
+  });
+
+  it("normalizes 'evolution-worker' to 'evolution-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("evolution-worker"), "evolution-worker");
+  });
+
+  it("normalizes 'quality-worker' to 'quality-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("quality-worker"), "quality-worker");
+  });
+
+  it("normalizes lane key 'governance' to 'governance-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("governance"), "governance-worker");
+  });
+
+  it("normalizes lane key 'infrastructure' to 'infrastructure-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("infrastructure"), "infrastructure-worker");
+  });
+
+  it("normalizes lane key 'integration' to 'integration-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("integration"), "integration-worker");
+  });
+
+  it("normalizes lane key 'observation' to 'observation-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("observation"), "observation-worker");
+  });
+
+  it("normalizes lane key 'quality' to 'quality-worker'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("quality"), "quality-worker");
+  });
+
+  it("falls back to 'evolution-worker' for unregistered name 'King David'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("King David"), "evolution-worker");
+  });
+
+  it("falls back to 'evolution-worker' for unregistered name 'Esther'", () => {
+    assert.equal(normalizePlanRoleToWorkerName("Esther"), "evolution-worker");
+  });
+
+  it("falls back to 'evolution-worker' for null/undefined", () => {
+    assert.equal(normalizePlanRoleToWorkerName(null), "evolution-worker");
+    assert.equal(normalizePlanRoleToWorkerName(undefined), "evolution-worker");
+  });
+
+  it("negative: 'unknown' falls back to 'evolution-worker' (not kept as 'unknown')", () => {
+    assert.equal(normalizePlanRoleToWorkerName("unknown"), "evolution-worker",
+      "'unknown' must be remapped to evolution-worker, not left as an unresolvable role identity");
   });
 });
