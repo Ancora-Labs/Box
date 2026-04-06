@@ -5,6 +5,9 @@ import {
   sanitizeResearchSynthesisForPersistence,
   computeSynthesisActionableDensity,
   quarantineLowDensityTopics,
+  topicHasActionableArtifact,
+  buildQualityGateRecoverySignal,
+  SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH,
 } from "../../src/core/research_synthesizer.js";
 
 // ── Task 1 invariant: partial quarantine must not trigger degraded mode ────────
@@ -277,5 +280,170 @@ describe("quarantineLowDensityTopics", () => {
     assert.ok(qg, "qualityGate must be persisted");
     assert.deepEqual(qg.quarantinedTopics, ["Bad Topic"]);
     assert.equal(qg.degradedPlanningMode, true);
+  });
+});
+
+// ── Task 3: Actionable-signal invariants + SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH ────
+
+describe("SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH invariant", () => {
+  it("rejects strings shorter than the minimum as non-actionable", () => {
+    const topics = [{
+      topic: "Short Signals Only",
+      netFindings: ["f1", "f2", "ok"],
+      applicableIdeas: ["x"],
+      sources: [],
+    }];
+    const densities = computeSynthesisActionableDensity(topics);
+    assert.equal(densities[0].actionableCount, 0, "sub-threshold signals must not count toward density");
+    assert.equal(densities[0].passed, false, "topic must fail density with only noise signals");
+  });
+
+  it("accepts strings meeting the minimum length threshold", () => {
+    const topics = [{
+      topic: "Real Signals",
+      netFindings: ["Deploy fix"],   // 10 chars ≥ 5
+      applicableIdeas: ["Add test"],  // 8 chars ≥ 5
+      sources: [],
+    }];
+    const densities = computeSynthesisActionableDensity(topics);
+    assert.equal(densities[0].actionableCount, 2, "both signals must count toward density");
+    assert.equal(densities[0].passed, true);
+  });
+
+  it("mixed short and long signals: only long ones contribute to count", () => {
+    const topics = [{
+      topic: "Mixed",
+      netFindings: ["ok", "Fix the failing test suite now"],  // "ok" noise, long one actionable
+      applicableIdeas: [],
+      sources: [],
+    }];
+    const densities = computeSynthesisActionableDensity(topics);
+    assert.equal(densities[0].actionableCount, 1, "only the long finding must count");
+  });
+
+  it("whitespace padding does not artificially inflate length", () => {
+    const topics = [{
+      topic: "Padded",
+      netFindings: ["   ok   "],  // after trim = 2 chars
+      applicableIdeas: [],
+      sources: [],
+    }];
+    const densities = computeSynthesisActionableDensity(topics);
+    assert.equal(densities[0].actionableCount, 0, "trimmed short string must not count");
+  });
+
+  it("SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH is exported and its value is positive", () => {
+    assert.ok(typeof SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH === "number", "must be a number");
+    assert.ok(SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH > 1, "floor must be > 1 to reject single-char noise");
+  });
+});
+
+// ── topicHasActionableArtifact — persistence-time invariant ───────────────────
+
+describe("topicHasActionableArtifact", () => {
+  it("returns true for topic with a netFinding of sufficient length", () => {
+    const topic = { topic: "CI Coverage", netFindings: ["Fix the integration test suite"] };
+    assert.equal(topicHasActionableArtifact(topic), true);
+  });
+
+  it("returns true for topic with a prometheusReadySummary in sources", () => {
+    const topic = {
+      topic: "Auth Security",
+      sources: [{ prometheusReadySummary: "Add JWT validation to all endpoints" }],
+    };
+    assert.equal(topicHasActionableArtifact(topic), true);
+  });
+
+  it("returns true for topic with scoutFindings in sources", () => {
+    const topic = {
+      topic: "Test Coverage",
+      sources: [{ scoutFindings: "Coverage is below 60% in core modules" }],
+    };
+    assert.equal(topicHasActionableArtifact(topic), true);
+  });
+
+  it("returns true for topic with an applicableIdea", () => {
+    const topic = {
+      topic: "Observability",
+      netFindings: [],
+      applicableIdeas: ["Add structured logging with correlation IDs"],
+    };
+    assert.equal(topicHasActionableArtifact(topic), true);
+  });
+
+  it("returns false for topic with only empty arrays", () => {
+    const topic = {
+      topic: "Empty Topic",
+      netFindings: [],
+      applicableIdeas: [],
+      sources: [],
+    };
+    assert.equal(topicHasActionableArtifact(topic), false);
+  });
+
+  it("returns false for topic with only sub-threshold strings", () => {
+    const topic = {
+      topic: "Noise Topic",
+      netFindings: ["ok", "x"],
+      applicableIdeas: ["y"],
+      sources: [{ scoutFindings: "abc" }],
+    };
+    assert.equal(topicHasActionableArtifact(topic), false);
+  });
+
+  it("negative path: returns false for null/undefined input", () => {
+    assert.equal(topicHasActionableArtifact(null as any), false);
+    assert.equal(topicHasActionableArtifact(undefined as any), false);
+  });
+
+  it("sanitizeResearchSynthesisForPersistence drops topics without actionable artifact", () => {
+    const output = sanitizeResearchSynthesisForPersistence({
+      success: true,
+      topicCount: 2,
+      topics: [
+        { topic: "Has Signal", netFindings: ["Fix the failing test suite"] },
+        { topic: "No Signal",  netFindings: [], applicableIdeas: [], sources: [] },
+      ] as any,
+      crossTopicConnections: [],
+      researchGaps: "",
+      synthesizedAt: "2026-01-01T00:00:00.000Z",
+      scoutSourceCount: 0,
+      model: "gpt-5.3-codex",
+    });
+    assert.equal(output.topicCount, 1, "only the topic with signal should be retained");
+    assert.equal((output.topics as any[])[0].topic, "Has Signal");
+  });
+});
+
+// ── buildQualityGateRecoverySignal ────────────────────────────────────────────
+
+describe("buildQualityGateRecoverySignal", () => {
+  it("returns a non-empty string when quarantined topic names are provided", () => {
+    const signal = buildQualityGateRecoverySignal(["CI/CD Pipeline", "Auth Security"]);
+    assert.ok(signal.length > 0, "recovery signal must be non-empty");
+    assert.ok(signal.includes("CI/CD Pipeline"), "topic name must appear in recovery signal");
+    assert.ok(signal.includes("Auth Security"), "both topic names must appear");
+  });
+
+  it("includes all topic names and a density-failure explanation", () => {
+    const signal = buildQualityGateRecoverySignal(["Topic A", "Topic B"]);
+    assert.ok(signal.includes("density check"), "must mention density check failure");
+    assert.ok(signal.includes("minimal planning signal"), "must suggest using topics as minimal signal");
+  });
+
+  it("returns empty string when no quarantined topic names are provided", () => {
+    assert.equal(buildQualityGateRecoverySignal([]), "");
+  });
+
+  it("returns empty string when all names are blank", () => {
+    assert.equal(buildQualityGateRecoverySignal(["", "   ", ""]), "");
+  });
+
+  it("negative path: degraded mode WITHOUT recovery signal would leave Prometheus with empty context", () => {
+    // Verify that the recovery signal IS non-empty for a typical failure case
+    // (i.e. the feature actually provides the recovery path)
+    const signal = buildQualityGateRecoverySignal(["Test Coverage Gap"]);
+    assert.notEqual(signal, "",
+      "recovery signal must never be empty when topic names exist — Prometheus needs minimal context");
   });
 });

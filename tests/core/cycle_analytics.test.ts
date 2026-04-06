@@ -499,7 +499,7 @@ describe("computeCycleAnalytics — outcomes (AC1)", () => {
 describe("computeRuntimeContractProbe — dispatch contract evidence", () => {
   it("passes done-worker verification criterion via dispatchContract without stringifying object evidence", () => {
     const probe = computeRuntimeContractProbe({
-      prometheusAnalysis: { generatedAt: makeTs(0), keyFindings: ["ok"] },
+      prometheusAnalysis: { generatedAt: makeTs(0), keyFindings: "CI green; checks pass; dispatch contract verified and satisfied." },
       athenaPlanReview: { overallScore: 8 },
       workerResults: [{
         roleName: "evolution-worker",
@@ -518,7 +518,7 @@ describe("computeRuntimeContractProbe — dispatch contract evidence", () => {
 
   it("fails when blocked worker outcomes omit dispatchBlockReason", () => {
     const probe = computeRuntimeContractProbe({
-      prometheusAnalysis: { generatedAt: makeTs(0), keyFindings: ["ok"] },
+      prometheusAnalysis: { generatedAt: makeTs(0), keyFindings: "CI green; checks pass; dispatch contract verified and satisfied." },
       athenaPlanReview: { overallScore: 8 },
       workerResults: [
         {

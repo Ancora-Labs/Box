@@ -66,6 +66,7 @@ import { isGovernanceCanaryBreachActive } from "./governance_canary.js";
 import { executeRollback, ROLLBACK_LEVEL, ROLLBACK_TRIGGER } from "./rollback_engine.js";
 import { initializeAggregateLiveLog, appendAggregateLiveLogSync } from "./live_log.js";
 import { buildRoleExecutionBatches, buildTokenFirstBatches, measureWaveBoundaryIdleGap, shouldPackAcrossWaveBoundary } from "./worker_batch_planner.js";
+import { computeFrontier } from "./dag_scheduler.js";
 import { agentFileExists, nameToSlug } from "./agent_loader.js";
 import { getRoleRegistry, assertRoleCapabilityForTask, isAthenaReviewOrPostmortemTask } from "./role_registry.js";
 import {
@@ -2080,17 +2081,137 @@ async function countCompletedPlans(config, plans) {
   return { completed, pending };
 }
 
+function hasExplicitPlanDependencies(plan: any): boolean {
+  const dependsOn = Array.isArray(plan?.dependsOn) ? plan.dependsOn : [];
+  const dependencies = Array.isArray(plan?.dependencies) ? plan.dependencies : [];
+  const waveDepends = Array.isArray(plan?.waveDepends) ? plan.waveDepends : [];
+  return dependsOn.length > 0 || dependencies.length > 0 || waveDepends.length > 0;
+}
+
+function tightenRoleWaveBatches(workerBatches: any[], config: any): { batches: any[]; mergedCount: number } {
+  if (!Array.isArray(workerBatches) || workerBatches.length <= 1) {
+    return { batches: Array.isArray(workerBatches) ? workerBatches : [], mergedCount: 0 };
+  }
+  const enabled = config?.runtime?.tightRoleWavePacking !== false;
+  if (!enabled) return { batches: workerBatches, mergedCount: 0 };
+
+  const maxMergedPlansRaw = Number(config?.runtime?.tightRoleWavePackingMaxMergedPlans ?? 3);
+  const maxMergedPlans = Number.isFinite(maxMergedPlansRaw) && maxMergedPlansRaw > 0
+    ? Math.floor(maxMergedPlansRaw)
+    : 3;
+
+  const compacted: any[] = [];
+  let mergedCount = 0;
+
+  for (const batch of workerBatches) {
+    const currentPlans = Array.isArray(batch?.plans) ? batch.plans : [];
+    if (compacted.length === 0) {
+      compacted.push(batch);
+      continue;
+    }
+
+    const prev = compacted[compacted.length - 1];
+    const prevPlans = Array.isArray(prev?.plans) ? prev.plans : [];
+    const sameRole = String(prev?.role || "") === String(batch?.role || "");
+    const sameWave = Number(prev?.wave || 1) === Number(batch?.wave || 1);
+    const withinPlanCap = prevPlans.length + currentPlans.length <= maxMergedPlans;
+    const dependencySafe = [...prevPlans, ...currentPlans].every((p) => !hasExplicitPlanDependencies(p));
+    const tokenCap = Number(prev?.usableContextTokens || 0) || Number(batch?.usableContextTokens || 0) || 0;
+    const combinedTokens = Number(prev?.estimatedTokens || 0) + Number(batch?.estimatedTokens || 0);
+    const withinTokenCap = tokenCap <= 0 || combinedTokens <= tokenCap;
+
+    if (sameRole && sameWave && withinPlanCap && dependencySafe && withinTokenCap) {
+      prev.plans = [...prevPlans, ...currentPlans];
+      prev.estimatedTokens = combinedTokens;
+      prev.contextUtilizationPercent = tokenCap > 0 ? Math.round((combinedTokens / tokenCap) * 100) : Number(prev?.contextUtilizationPercent || 0);
+      mergedCount += 1;
+      continue;
+    }
+
+    compacted.push(batch);
+  }
+
+  const roleTotals = new Map<string, number>();
+  for (const batch of compacted) {
+    const role = String(batch?.role || "evolution-worker");
+    roleTotals.set(role, (roleTotals.get(role) || 0) + 1);
+  }
+  const roleIndices = new Map<string, number>();
+  const reindexed = compacted.map((batch, index) => {
+    const role = String(batch?.role || "evolution-worker");
+    const roleIndex = (roleIndices.get(role) || 0) + 1;
+    roleIndices.set(role, roleIndex);
+    return {
+      ...batch,
+      bundleIndex: index + 1,
+      totalBundles: compacted.length,
+      roleBatchIndex: roleIndex,
+      roleBatchTotal: roleTotals.get(role) || 1,
+      githubFinalizer: roleIndex === (roleTotals.get(role) || 1),
+    };
+  });
+
+  return { batches: reindexed, mergedCount };
+}
+
+async function resolveAdaptivePlanCap(config: any, stateDir: string): Promise<{ cap: number; reason: string }> {
+  const enabled = config?.runtime?.adaptivePlanCap?.enabled !== false;
+  if (!enabled) return { cap: Number(config?.runtime?.adaptivePlanCap?.highCap ?? 6), reason: "disabled" };
+
+  const lowCapRaw = Number(config?.runtime?.adaptivePlanCap?.lowCap ?? 4);
+  const mediumCapRaw = Number(config?.runtime?.adaptivePlanCap?.mediumCap ?? 5);
+  const highCapRaw = Number(config?.runtime?.adaptivePlanCap?.highCap ?? 6);
+  const lowCap = Math.max(3, Math.min(6, Number.isFinite(lowCapRaw) ? Math.floor(lowCapRaw) : 4));
+  const mediumCap = Math.max(lowCap, Math.min(6, Number.isFinite(mediumCapRaw) ? Math.floor(mediumCapRaw) : 5));
+  const highCap = Math.max(mediumCap, Math.min(6, Number.isFinite(highCapRaw) ? Math.floor(highCapRaw) : 6));
+
+  try {
+    const autonomy = await readJson(path.join(stateDir, "autonomy_band_status.json"), null);
+    const history = Array.isArray(autonomy?.history) ? autonomy.history.slice(-3) : [];
+    if (history.length === 0) return { cap: lowCap, reason: "no_history" };
+
+    const completionVals = history
+      .map((h: any) => Number(h?.completionRate))
+      .filter((v: number) => Number.isFinite(v));
+    const premiumVals = history
+      .map((h: any) => Number(h?.premiumEfficiency))
+      .filter((v: number) => Number.isFinite(v));
+
+    const completionAvg = completionVals.length > 0
+      ? completionVals.reduce((sum: number, v: number) => sum + v, 0) / completionVals.length
+      : 0;
+    const premiumAvg = premiumVals.length > 0
+      ? premiumVals.reduce((sum: number, v: number) => sum + v, 0) / premiumVals.length
+      : 0;
+
+    if (completionAvg >= 0.85 && premiumAvg >= 0.55) {
+      return { cap: highCap, reason: `high_perf completionAvg=${completionAvg.toFixed(2)} premiumAvg=${premiumAvg.toFixed(2)}` };
+    }
+    if (completionAvg >= 0.75 && premiumAvg >= 0.40) {
+      return { cap: mediumCap, reason: `mid_perf completionAvg=${completionAvg.toFixed(2)} premiumAvg=${premiumAvg.toFixed(2)}` };
+    }
+    return { cap: lowCap, reason: `low_perf completionAvg=${completionAvg.toFixed(2)} premiumAvg=${premiumAvg.toFixed(2)}` };
+  } catch {
+    return { cap: lowCap, reason: "fallback_on_read_error" };
+  }
+}
+
 // ── Single full cycle: Jesus → Prometheus → Athena → Workers → Athena ──────
 
 async function runSingleCycle(config) {
   const stateDir = config.paths?.stateDir || "state";
   const cycleStartedAt = new Date().toISOString();
   let _cycleRequests = 0;
+  const leadershipBudgetRaw = Number(config?.runtime?.maxLeadershipRequestsPerCycle ?? 5);
+  const leadershipBudget = Number.isFinite(leadershipBudgetRaw) && leadershipBudgetRaw >= 3
+    ? Math.floor(leadershipBudgetRaw)
+    : 5;
   const spendPremium = async (agentLabel: string, reason: string) => {
     _cycleRequests += 1;
     await appendProgress(config, `[PREMIUM_USAGE] spent=${_cycleRequests} agent=${agentLabel} reason=${reason}`);
     return _cycleRequests;
   };
+  const canSpendLeadership = (cost = 1) => (_cycleRequests + Math.max(1, Math.floor(cost))) <= leadershipBudget;
   await appendProgress(config, `[CYCLE] ════════════════════════════════════════`);
   await appendProgress(config, `[CYCLE START] ${cycleStartedAt}`);
 
@@ -2265,7 +2386,8 @@ async function runSingleCycle(config) {
         const existingKeys = Object.keys(topicMem.topics);
         const unconsumed = synthTopics.filter(t => {
           const key = findCanonicalTopicKey(prometheusTopicKey(String(t.topic || "")), existingKeys);
-          return !topicMem.topics[key] || topicMem.topics[key].status !== "completed";
+          const status = topicMem.topics[key]?.status;
+          return !status || (status !== "completed" && status !== "archived");
         });
         if (unconsumed.length === 0) {
           allSynthesisTopicsConsumed = true;
@@ -2276,7 +2398,8 @@ async function runSingleCycle(config) {
 
     const shouldRunScout = synthesisConsumedSinceLastScout || allSynthesisTopicsConsumed;
 
-    if (shouldRunScout) {
+    const scoutBlockedByBudget = shouldRunScout && !canSpendLeadership(1);
+    if (shouldRunScout && !scoutBlockedByBudget) {
       const scoutReason = synthJson === null
         ? "first-run (no synthesis exists)"
         : allSynthesisTopicsConsumed && !synthesisConsumedSinceLastScout
@@ -2303,6 +2426,10 @@ async function runSingleCycle(config) {
         warn(`[orchestrator] Research Scout failed (non-fatal): ${String((scoutErr as any)?.message || scoutErr)}`);
         await appendProgress(config, `[RESEARCH_SCOUT] Failed (non-fatal): ${String((scoutErr as any)?.message || scoutErr)}`);
       }
+    } else if (scoutBlockedByBudget) {
+      await appendProgress(config,
+        `[CYCLE] Research Scout skipped — leadership budget reached (${_cycleRequests}/${leadershipBudget})`
+      );
     } else {
       const skipReason = `synthesis not yet fully consumed (lastConsumedAt=${synthesisConsumedAt?.toISOString() ?? "none"}, synthesizedAt=${synthJson?.synthesizedAt ?? "none"}, gap must exceed ${MIN_CONSUMED_GAP_MS / 60000}m OR all synthesis topics consumed in topic memory)`;
       await appendProgress(config, `[CYCLE] Research Scout skipped — ${skipReason}`);
@@ -2482,25 +2609,35 @@ async function runSingleCycle(config) {
       // Refresh research context first so Prometheus re-plans from fresh Scout output,
       // not only from existing stale synthesis.
       try {
-        await appendProgress(config, "[CYCLE] Novelty gate triggering Research Scout refresh");
-        const scoutRefresh = await runResearchScout(config);
-        if (scoutRefresh.success && scoutRefresh.sourceCount > 0) {
-          await appendProgress(config, `[RESEARCH_SCOUT] Refresh collected ${scoutRefresh.sourceCount} source(s) — running synthesizer`);
-          const refreshSynthesisResult = await runResearchSynthesizer(config, scoutRefresh);
-          if (refreshSynthesisResult?.success === true && Array.isArray(refreshSynthesisResult.topics) && refreshSynthesisResult.topics.length > 0) {
-            await persistBenchmarkEntry(config, String(cycleStartedAt || new Date().toISOString()), refreshSynthesisResult.topics);
-            await appendProgress(config, `[RESEARCH_SCOUT] Benchmark ground-truth entry persisted - topics=${refreshSynthesisResult.topics.length}`);
+        if (canSpendLeadership(1)) {
+          await appendProgress(config, "[CYCLE] Novelty gate triggering Research Scout refresh");
+          const scoutRefresh = await runResearchScout(config);
+          if (scoutRefresh.success && scoutRefresh.sourceCount > 0) {
+            await appendProgress(config, `[RESEARCH_SCOUT] Refresh collected ${scoutRefresh.sourceCount} source(s) — running synthesizer`);
+            const refreshSynthesisResult = await runResearchSynthesizer(config, scoutRefresh);
+            if (refreshSynthesisResult?.success === true && Array.isArray(refreshSynthesisResult.topics) && refreshSynthesisResult.topics.length > 0) {
+              await persistBenchmarkEntry(config, String(cycleStartedAt || new Date().toISOString()), refreshSynthesisResult.topics);
+              await appendProgress(config, `[RESEARCH_SCOUT] Benchmark ground-truth entry persisted - topics=${refreshSynthesisResult.topics.length}`);
+            }
+            await spendPremium("research-scout", "novelty_gate_refresh");
+            await appendProgress(config, `[RESEARCH_SCOUT] ✓ Refresh complete — requests this cycle: ${_cycleRequests}`);
+          } else {
+            await appendProgress(config, `[RESEARCH_SCOUT] Refresh produced no sources (success=${scoutRefresh.success}) — continuing with novelty re-plan`);
           }
-          await spendPremium("research-scout", "novelty_gate_refresh");
-          await appendProgress(config, `[RESEARCH_SCOUT] ✓ Refresh complete — requests this cycle: ${_cycleRequests}`);
         } else {
-          await appendProgress(config, `[RESEARCH_SCOUT] Refresh produced no sources (success=${scoutRefresh.success}) — continuing with novelty re-plan`);
+          await appendProgress(config, `[CYCLE] Novelty-gate Scout refresh skipped — leadership budget reached (${_cycleRequests}/${leadershipBudget})`);
         }
       } catch (refreshErr) {
         warn(`[orchestrator] Novelty gate Scout/Synth refresh failed (non-fatal): ${String((refreshErr as any)?.message || refreshErr)}`);
         await appendProgress(config,
           `[CYCLE] Scout/Synth refresh failed (non-fatal) — continuing with novelty re-plan: ${String((refreshErr as any)?.message || refreshErr)}`
         );
+      }
+
+      if (!canSpendLeadership(1)) {
+        await appendProgress(config, `[CYCLE] Novelty re-plan skipped — leadership budget reached (${_cycleRequests}/${leadershipBudget})`);
+        await safeUpdatePipelineProgress(config, "cycle_complete", "Novelty re-plan skipped due to leadership budget");
+        return;
       }
 
       const replanned = await runPrometheusAnalysis(config, {
@@ -2668,9 +2805,23 @@ async function runSingleCycle(config) {
   }
 
   // Step 4: Dispatch workers sequentially (1 request per worker)
-  const rawPlans = Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0
+  let rawPlans = Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0
     ? planReview.patchedPlans
     : prometheusAnalysis.plans;
+
+  const adaptiveCap = await resolveAdaptivePlanCap(config, stateDir);
+  if (Array.isArray(rawPlans) && rawPlans.length > adaptiveCap.cap) {
+    rawPlans = [...rawPlans]
+      .sort((a: any, b: any) => Number(a?.priority ?? 99) - Number(b?.priority ?? 99))
+      .slice(0, adaptiveCap.cap);
+    await appendProgress(config,
+      `[CYCLE] Adaptive plan cap applied: selected ${rawPlans.length}/${prometheusAnalysis.plans.length} plan(s) — ${adaptiveCap.reason}`
+    );
+  } else {
+    await appendProgress(config,
+      `[CYCLE] Adaptive plan cap: no trim (${Array.isArray(rawPlans) ? rawPlans.length : 0} plan(s)) — ${adaptiveCap.reason}`
+    );
+  }
 
   // ── Ensure synthesizable defaults on all plans ─────────────────────────────
   // Athena's patchedPlans come from AI output and may lack fields that
@@ -3120,7 +3271,37 @@ async function runSingleCycle(config) {
   // (Athena-prebatched, token-first, standard role-split) so no batch descriptor
   // delivered to a worker ever exceeds MAX_ACTIONABLE_STEPS_PER_PACKET tasks,
   // regardless of config state or which path produced the batches.
-  const workerBatches = applyDispatchBoundaryHardCap(_rawWorkerBatches as any[]) as typeof _rawWorkerBatches;
+  let workerBatches = applyDispatchBoundaryHardCap(_rawWorkerBatches as any[]) as typeof _rawWorkerBatches;
+  const packed = tightenRoleWaveBatches(workerBatches as any[], config);
+  workerBatches = packed.batches as typeof _rawWorkerBatches;
+  if (packed.mergedCount > 0) {
+    await appendProgress(config,
+      `[BATCH_PLANNER] Tight role-wave packing merged ${packed.mergedCount} adjacent small batch(es); now ${workerBatches.length} batch(es)`
+    );
+  }
+
+  // ── DAG frontier + parallelism logging ────────────────────────────────────
+  // Use computeFrontier to identify which plans are immediately dispatchable
+  // (no unresolved dependencies) and log the DAG-derived parallelism bound.
+  // This is advisory telemetry — never blocks dispatch.
+  try {
+    const frontierResult = computeFrontier(
+      plans as any[],
+      new Set<string>(), // no tasks completed yet at dispatch time
+      new Set<string>(), // no tasks failed yet
+      new Set<string>(), // no tasks in progress yet
+    );
+    const dagBound = (_rawWorkerBatches[0] as any)?.dagParallelismBound;
+    if (frontierResult.frontier.length > 0 || dagBound !== undefined) {
+      await appendProgress(
+        config,
+        `[DAG_DISPATCH] frontier=${frontierResult.frontier.length} ready task(s) of ${plans.length} total` +
+        (dagBound !== undefined ? `; dagParallelismBound=${dagBound}` : "")
+      );
+    }
+  } catch {
+    // advisory — never block dispatch on frontier computation error
+  }
 
   // ── Specialist telemetry for Athena-preassigned batches (Task 3) ───────────
   // buildTokenFirstBatches normally stamps specialistReroutes / specialistRerouteReasons /

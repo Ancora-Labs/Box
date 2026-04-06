@@ -1422,3 +1422,142 @@ describe("sanitizeAthenaReviewFieldForPersistence", () => {
     assert.equal(sanitizeAthenaReviewFieldForPersistence(clean), clean);
   });
 });
+
+// ── gateBlockRisk field in auto-approve results ───────────────────────────────
+
+describe("runAthenaPlanReview — gateBlockRisk included in auto-approve result", () => {
+  it("HIGH_QUALITY auto-approve result includes gateBlockRisk=low when gate is clear", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-gbr-hq-"));
+    try {
+      const plans = [{
+        role: "evolution-worker",
+        task: "Add request deduplication middleware with an in-memory LRU cache for identical API calls",
+        scope: "src/middleware/dedup.ts",
+        target_files: ["src/middleware/dedup.ts", "tests/middleware/dedup.test.ts"],
+        acceptance_criteria: ["Cache hit rate >= 80% on identical requests in load test"],
+        verification: "npm test -- tests/middleware/dedup.test.ts",
+        verification_commands: ["npm test -- tests/middleware/dedup.test.ts"],
+        riskLevel: "low",
+        wave: 1,
+        capacityDelta: 0.1,
+        requestROI: 2.0,
+      }];
+      const config: any = {
+        paths: {
+          stateDir: tmpDir,
+          progressFile: path.join(tmpDir, "progress.log"),
+        },
+        env: { copilotCliCommand: "__missing__", targetRepo: "test/repo" },
+        copilot: { leadershipAutopilot: false },
+        runtime: { disablePlanReviewCache: false },
+      };
+      const result = await runAthenaPlanReview(config, { plans });
+      assert.ok(result.autoApproved === true, "plan should auto-approve via HIGH_QUALITY path");
+      assert.equal(
+        (result as any).gateBlockRisk,
+        GATE_BLOCK_RISK.LOW,
+        "gateBlockRisk must be included in auto-approve result and set to 'low' when gate is clear",
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("DELTA_REVIEW auto-approve result includes gateBlockRisk=low when gate is clear", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-gbr-delta-"));
+    try {
+      const priorReview = {
+        approved: true,
+        planBatchFingerprint: "deadbeef00000000",
+        overallScore: 90,
+        reviewedAt: new Date(Date.now() - 3600000).toISOString(),
+      };
+      await fs.writeFile(
+        path.join(tmpDir, "athena_plan_review.json"),
+        JSON.stringify(priorReview),
+        "utf8",
+      );
+      const plans = [{
+        task: "Refactor utility module to remove duplication and improve coverage",
+        role: "evolution-worker",
+        wave: 1,
+        riskLevel: "low",
+        acceptance_criteria: ["All unit tests pass", "No lint errors"],
+        verification: "Run npm test and npm run lint; confirm exit code 0",
+        context: "utility.ts currently has two near-identical helpers that can be merged",
+      }];
+      const config: any = {
+        paths: {
+          stateDir: tmpDir,
+          progressFile: path.join(tmpDir, "progress.log"),
+        },
+        env: { targetRepo: "test/repo" },
+        runtime: {
+          disablePlanReviewCache: false,
+          autoApproveDeltaReviewThreshold: 0,
+        },
+      };
+      const result = await runAthenaPlanReview(config, { plans });
+      assert.ok(result.autoApproved === true, "plan should auto-approve via DELTA_REVIEW path");
+      assert.equal(
+        (result as any).gateBlockRisk,
+        GATE_BLOCK_RISK.LOW,
+        "gateBlockRisk must be present in delta-review auto-approve result",
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── fastPathCounts.gateBlockRiskAtApproval — cycle analytics tracking ─────────
+
+describe("fastPathCounts.gateBlockRiskAtApproval — cycle analytics", () => {
+  const makeAnalyticsConfig = () => ({ paths: { stateDir: "state" } });
+
+  it("gateBlockRiskAtApproval=low is tracked when provided", () => {
+    const record = computeCycleAnalytics(makeAnalyticsConfig(), {
+      fastPathCounts: {
+        athenaAutoApproved: 2,
+        athenaFullReview: 0,
+        autoApproveReasonCode: ATHENA_FAST_PATH_REASON.HIGH_QUALITY_LOW_RISK,
+        gateBlockRiskAtApproval: "low",
+      },
+    });
+    assert.equal(
+      (record.fastPathCounts as any).gateBlockRiskAtApproval,
+      "low",
+      "gateBlockRiskAtApproval must be tracked in cycle analytics",
+    );
+  });
+
+  it("gateBlockRiskAtApproval is null when not provided (missing data sentinel)", () => {
+    const record = computeCycleAnalytics(makeAnalyticsConfig(), {
+      fastPathCounts: {
+        athenaAutoApproved: 1,
+        athenaFullReview: 1,
+        autoApproveReasonCode: ATHENA_FAST_PATH_REASON.LOW_RISK_UNCHANGED,
+      },
+    });
+    assert.equal(
+      (record.fastPathCounts as any).gateBlockRiskAtApproval,
+      null,
+      "gateBlockRiskAtApproval must be null when not provided — no silent fallback",
+    );
+  });
+
+  it("negative path: unknown gateBlockRisk value is rejected (null)", () => {
+    const record = computeCycleAnalytics(makeAnalyticsConfig(), {
+      fastPathCounts: {
+        athenaAutoApproved: 1,
+        athenaFullReview: 0,
+        gateBlockRiskAtApproval: "unknown-risk-level",
+      },
+    });
+    assert.equal(
+      (record.fastPathCounts as any).gateBlockRiskAtApproval,
+      null,
+      "unknown risk level values must be rejected as null",
+    );
+  });
+});

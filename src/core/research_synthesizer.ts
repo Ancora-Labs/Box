@@ -281,6 +281,13 @@ const MAX_PLANNER_SIGNALS = 12;
 /** Minimum number of actionable signals required per topic to pass the quality gate. */
 const SYNTHESIS_MIN_ACTIONABLE_DENSITY_PER_TOPIC = 1;
 
+/**
+ * Minimum character length for a string to count as an actionable signal in density
+ * scoring.  A string shorter than this threshold (e.g. "ok", "x") is noise, not signal.
+ * Exported so callers and tests can align on the same floor.
+ */
+export const SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH = 5;
+
 export interface SynthesisTopicDensity {
   topic: string;
   /** Count of non-empty actionable signals: netFindings + applicableIdeas + prometheusReadySummary entries */
@@ -298,6 +305,12 @@ export interface SynthesisQualityGate {
   quarantinedTopics: string[];
   /** True when any topic was quarantined — signals degraded planning mode to Prometheus. */
   degradedPlanningMode: boolean;
+  /**
+   * Minimal recovery signal used when degradedPlanningMode=true and ALL topics
+   * were quarantined.  Prometheus can use topic names as a weak planning signal
+   * instead of failing entirely.  Empty string when not applicable.
+   */
+  recoverySignal?: string;
 }
 
 /**
@@ -311,19 +324,19 @@ export function computeSynthesisActionableDensity(topics: Array<Record<string, u
     let count = 0;
 
     const findings = Array.isArray(t.netFindings) ? t.netFindings : [];
-    count += findings.filter((f) => typeof f === "string" && f.trim().length > 0).length;
+    count += findings.filter((f) => typeof f === "string" && f.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH).length;
 
     const ideas = Array.isArray(t.applicableIdeas) ? t.applicableIdeas : [];
-    count += ideas.filter((i) => typeof i === "string" && i.trim().length > 0).length;
+    count += ideas.filter((i) => typeof i === "string" && i.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH).length;
 
     const sources = Array.isArray(t.sources) ? t.sources as Array<Record<string, unknown>> : [];
     for (const src of sources) {
-      if (typeof src.prometheusReadySummary === "string" && src.prometheusReadySummary.trim().length > 0) {
+      if (typeof src.prometheusReadySummary === "string" && src.prometheusReadySummary.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH) {
         count++;
-      } else if (typeof src.extractedContent === "string" && src.extractedContent.trim().length > 0) {
+      } else if (typeof src.extractedContent === "string" && src.extractedContent.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH) {
         // extractedContent is a direct actionable signal when prometheusReadySummary is absent
         count++;
-      } else if (typeof src.scoutFindings === "string" && src.scoutFindings.trim().length > 0) {
+      } else if (typeof src.scoutFindings === "string" && src.scoutFindings.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH) {
         // scoutFindings is a raw but actionable signal
         count++;
       }
@@ -353,6 +366,57 @@ export function quarantineLowDensityTopics(
     .filter(t => failedSet.has(String(t.topic || "")))
     .map(t => String(t.topic || ""));
   return { passedTopics, quarantinedTopics };
+}
+
+/**
+ * Validate that a single topic carries at least one actionable artifact.
+ *
+ * A topic passes when it has at least one of:
+ *   - A source with prometheusReadySummary, extractedContent, or scoutFindings ≥ min length
+ *   - A non-empty netFindings entry ≥ min length
+ *   - A non-empty applicableIdeas entry ≥ min length
+ *
+ * Used as a persistence-time invariant check before topics are written to state.
+ * Exported for testing.
+ *
+ * @param topic — a parsed/sanitized topic object
+ * @returns true when the topic carries at least one actionable artifact
+ */
+export function topicHasActionableArtifact(topic: Record<string, unknown>): boolean {
+  if (!topic || typeof topic !== "object") return false;
+
+  const findings = Array.isArray(topic.netFindings) ? topic.netFindings : [];
+  if (findings.some(f => typeof f === "string" && f.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH)) return true;
+
+  const ideas = Array.isArray(topic.applicableIdeas) ? topic.applicableIdeas : [];
+  if (ideas.some(i => typeof i === "string" && i.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH)) return true;
+
+  const sources = Array.isArray(topic.sources) ? topic.sources as Array<Record<string, unknown>> : [];
+  for (const src of sources) {
+    if (typeof src.prometheusReadySummary === "string" && src.prometheusReadySummary.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH) return true;
+    if (typeof src.extractedContent === "string" && src.extractedContent.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH) return true;
+    if (typeof src.scoutFindings === "string" && src.scoutFindings.trim().length >= SYNTHESIS_ACTIONABLE_SIGNAL_MIN_LENGTH) return true;
+  }
+  return false;
+}
+
+/**
+ * Build a minimal recovery signal for the qualityGate when all topics are
+ * quarantined (degradedPlanningMode=true).
+ *
+ * Uses topic names as a weak planning signal so Prometheus can still operate
+ * with minimal context rather than failing entirely.  Returns an empty string
+ * when no topic names are available.
+ *
+ * Exported for testing.
+ *
+ * @param quarantinedTopicNames — list of topic names that failed density
+ * @returns a plain-English recovery signal string, or "" when input is empty
+ */
+export function buildQualityGateRecoverySignal(quarantinedTopicNames: string[]): string {
+  const names = quarantinedTopicNames.filter(n => String(n).trim().length > 0);
+  if (names.length === 0) return "";
+  return `Research completed on topics: ${names.join(", ")}. All topics failed density check — use topic names as minimal planning signal.`;
 }
 
 function toSingleLine(value: unknown, maxLen = 240): string {
@@ -501,7 +565,10 @@ export function sanitizeResearchSynthesisForPersistence(payload: {
       prometheusReadySummary: topicPrometheusReadySummary,
       sources,
     };
-  }).filter((topic) => Boolean(topic.topic));
+  // Persistence-time invariant: only retain topics with a name AND at least one actionable artifact.
+  // Topics that have a name but zero signal are silently dropped so they do not pollute
+  // the quality gate or degrade planning mode without cause.
+  }).filter((topic) => Boolean(topic.topic) && topicHasActionableArtifact(topic));
 
   const crossTopicConnections = clampList(payload.crossTopicConnections, MAX_CONNECTIONS, MAX_TOPIC_TEXT);
   const researchGaps = String(payload.researchGaps || "").slice(0, MAX_RESEARCH_GAPS).trim();
@@ -735,6 +802,7 @@ Follow your agent definition's output format exactly.`),
   const qualityGateDensities = computeSynthesisActionableDensity(finalTopics);
   const gatePassed = qualityGateDensities.every(d => d.passed);
   const { passedTopics, quarantinedTopics } = quarantineLowDensityTopics(finalTopics, qualityGateDensities);
+  const degradedPlanningMode = quarantinedTopics.length > 0 && passedTopics.length === 0;
   const qualityGate: SynthesisQualityGate = {
     passed: gatePassed,
     retried,
@@ -743,7 +811,10 @@ Follow your agent definition's output format exactly.`),
     // Degraded mode only fires when every topic was quarantined (passedTopics is empty).
     // Partial quarantine (some passed) does not warrant degraded mode — Prometheus
     // still has valid signal to plan from.
-    degradedPlanningMode: quarantinedTopics.length > 0 && passedTopics.length === 0,
+    degradedPlanningMode,
+    // When fully degraded (all topics quarantined), provide a minimal recovery signal
+    // from topic names so Prometheus is never left with an empty planning context.
+    ...(degradedPlanningMode ? { recoverySignal: buildQualityGateRecoverySignal(quarantinedTopics) } : {}),
   };
 
   const output: ResearchSynthesisResult = {

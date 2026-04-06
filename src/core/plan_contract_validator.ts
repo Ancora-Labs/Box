@@ -12,6 +12,17 @@
 import { checkForbiddenCommands } from "./verification_command_registry.js";
 
 /**
+ * Canonical health-audit severity set that triggers mandatory task obligations.
+ * Findings with these severities emitted by Jesus must either become plan tasks
+ * or carry an explicit cycle-specific exclusion justification.
+ *
+ * Defined here (plan_contract_validator.ts) as the canonical source and re-exported
+ * from prometheus.ts for backward compatibility.  Use this import when you only need
+ * the taxonomy without importing the full prometheus module.
+ */
+export const PLAN_CONTRACT_MANDATORY_SEVERITIES: ReadonlySet<string> = new Set(["critical", "important"]);
+
+/**
  * Canonical deterministic violation code taxonomy.
  *
  * Used by both the pre-normalization generation-boundary gate
@@ -55,6 +66,12 @@ export const PACKET_VIOLATION_CODE = Object.freeze({
   // ── Acceptance criteria ──────────────────────────────────────────────────
   /** acceptance_criteria is absent or empty — no measurable completion signal. */
   MISSING_ACCEPTANCE_CRITERIA:   "missing_acceptance_criteria",
+  /**
+   * One or more acceptance_criteria items are semantically invalid — they are
+   * too short (< MIN_ACCEPTANCE_CRITERION_SEMANTIC_LENGTH chars) or contain
+   * process-thought / tool-trace contamination markers.
+   */
+  INVALID_ACCEPTANCE_CRITERIA_ITEM: "invalid_acceptance_criteria_item",
   /** dependencies field is absent or not an array. */
   MISSING_DEPENDENCIES:          "missing_dependencies",
 
@@ -118,6 +135,13 @@ export const NON_SPECIFIC_VERIFICATION_PATTERNS = [
  * decomposed into smaller, independently-verifiable work items.
  */
 export const MAX_ACCEPTANCE_CRITERIA_PER_TASK = 10;
+
+/**
+ * Minimum character length for an individual acceptance criterion item to be
+ * considered semantically valid. Items shorter than this are likely single-character
+ * noise tokens or empty placeholders that carry no measurable completion signal.
+ */
+export const MIN_ACCEPTANCE_CRITERION_SEMANTIC_LENGTH = 2 as const;
 
 /**
  * Maximum number of files a single plan task may declare in its scope
@@ -521,6 +545,26 @@ export function validatePlanContract(plan): { valid: boolean; violations: PlanVi
       severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
       code: PACKET_VIOLATION_CODE.TASK_TOO_LARGE,
     });
+  } else {
+    // Semantic validation of individual AC items: reject too-short items and items
+    // that contain process-thought / tool-trace contamination markers.
+    const invalidItems: string[] = [];
+    for (let i = 0; i < plan.acceptance_criteria.length; i++) {
+      const item = String(plan.acceptance_criteria[i] ?? "").trim();
+      if (item.length < MIN_ACCEPTANCE_CRITERION_SEMANTIC_LENGTH) {
+        invalidItems.push(`item[${i}] too short (len=${item.length})`);
+      } else if (detectProcessThoughtMarkers(item)) {
+        invalidItems.push(`item[${i}] contains process-thought markers`);
+      }
+    }
+    if (invalidItems.length > 0) {
+      violations.push({
+        field: "acceptance_criteria",
+        message: `${invalidItems.length} acceptance criterion item(s) are semantically invalid: ${invalidItems.slice(0, 3).join("; ")}`,
+        severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+        code: PACKET_VIOLATION_CODE.INVALID_ACCEPTANCE_CRITERIA_ITEM,
+      });
+    }
   }
 
   // Decomposition cap: files-in-scope ceiling.
@@ -761,6 +805,14 @@ export const PROCESS_THOUGHT_MARKER_PATTERNS: ReadonlyArray<RegExp> = Object.fre
   /<internal>/i,
   /<\/internal>/i,
   /<!--\s*thinking/i,
+  // Process narration: first-person agent action narration at sentence start
+  /^(let\s+me|i'?m\s+going\s+to|i\s+am\s+going\s+to|i\s+will\s+now|i'?m\s+now|i\s+am\s+now|now\s+i\s+will|now\s+i'?m|i'?ll\s+now)\s+(read|scan|check|view|analyze|look|open|search|find|examine|browse|explore|fetch|get|inspect)/im,
+  // Semantic tool-trace: direct tool invocation fragments
+  /\b(view_file|read_file|write_file|list_files|search_files|create_file|delete_file)\s*\(/i,
+  // Semantic tool-trace: tool/function output block markers
+  /^(tool\s+output|function\s+output|tool\s+response|function\s+result)\s*:/im,
+  // Semantic tool-trace: present-progressive tool operation at line start
+  /^(reading|scanning|checking|viewing)\s+(the\s+)?(file|directory|repo|codebase|code|source)\b/im,
 ]);
 
 /**

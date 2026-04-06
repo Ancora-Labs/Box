@@ -172,6 +172,88 @@ export function buildPrometheusPlanningPolicy(config, laneTelemetry?: Record<str
 
 export const HEALTH_AUDIT_MANDATORY_SEVERITIES: ReadonlySet<string> = new Set(["critical", "important"]);
 
+/**
+ * Minimum character length for a strategic field value to be considered
+ * semantically valid (not a noise token, placeholder, or trivially short string).
+ * Exported for testing.
+ */
+export const STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH = 10 as const;
+
+/**
+ * Lexical patterns that identify first-person process narration — AI agents
+ * narrating their own tool usage in present tense.  These must NOT appear in
+ * persisted strategic planning fields (keyFindings, strategicNarrative).
+ *
+ * Examples of rejected strings:
+ *   "Let me analyze the codebase for gaps..."
+ *   "I'm reading file src/core/prometheus.ts now"
+ *   "I will now scan the repository to find..."
+ *
+ * Exported for testing and reuse in plan_contract_validator.ts.
+ */
+export const PROCESS_NARRATION_LEXICAL_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  // First-person agent narration of upcoming action at sentence start
+  /^(let\s+me|i'?m\s+going\s+to|i\s+am\s+going\s+to|i\s+will\s+now|i'?m\s+now|i\s+am\s+now|now\s+i\s+will|now\s+i'?m|i'?ll\s+now)\s+(read|scan|check|view|analyze|look|open|search|find|examine|browse|explore|fetch|get|inspect)/im,
+]);
+
+/**
+ * Semantic patterns that identify tool-trace fragments — direct tool invocation
+ * or output text that leaked from the AI's execution context into output fields.
+ *
+ * Examples of rejected strings:
+ *   "reading file src/core/prometheus.ts"
+ *   "tool output: { ... }"
+ *   "view_file(path='src/foo.ts')"
+ *
+ * Exported for testing and reuse in plan_contract_validator.ts.
+ */
+export const SEMANTIC_TOOL_TRACE_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  // Direct tool invocation traces (code-style)
+  /\b(view_file|read_file|write_file|list_files|search_files|create_file|delete_file)\s*\(/i,
+  // Tool/function output blocks
+  /^(tool\s+output|function\s+output|tool\s+response|function\s+result)\s*:/im,
+  // Present-progressive tool operation at line start
+  /^(reading|scanning|checking|viewing)\s+(the\s+)?(file|directory|repo|codebase|code|source)\b/im,
+]);
+
+/**
+ * Returns true when the given string contains tool-trace or process-thought
+ * contamination patterns that must not appear in persisted planning fields.
+ *
+ * Checks three categories in order:
+ *   1. Classic tool-call / role-prefix markers (tool_call:, assistant:, etc.)
+ *   2. Process-thought XML/marker tags (<thinking>, [THINKING], <reasoning>, etc.)
+ *   3. Process narration lexical patterns (first-person action narration)
+ *   4. Semantic tool-trace fragments (tool invocation text, output blocks)
+ *
+ * Matches the same patterns stripped by sanitizePlanningFieldForPersistence
+ * plus the PROCESS_THOUGHT_MARKER_PATTERNS from plan_contract_validator.ts so
+ * validation and sanitisation share a single, consistent surface.
+ *
+ * Exported for testing.
+ */
+export function isStrategicFieldToolTraceContaminated(text: string): boolean {
+  const s = String(text || "");
+  // ── Category 1: classic tool-call / role-prefix markers ──────────────────
+  if (/^(tool_call|tool_result|function_call|assistant:|system:|user:)/im.test(s)) return true;
+  if (/^copilot>/im.test(s)) return true;
+  if (/^\[?(synthesizer_start|synthesizer_end|research_synthesizer_live)\]/im.test(s)) return true;
+  // ── Category 2: process-thought XML/marker tags ───────────────────────────
+  if (/<thinking>[\s\S]*?<\/thinking>/i.test(s)) return true;
+  if (/<think[\s>]/i.test(s)) return true;
+  if (/<\/think>/i.test(s)) return true;
+  if (/<reasoning[\s>]/i.test(s)) return true;
+  if (/<\/reasoning>/i.test(s)) return true;
+  if (/\[THINKING\]/i.test(s)) return true;
+  if (/<internal>/i.test(s)) return true;
+  if (/<!--\s*thinking/i.test(s)) return true;
+  // ── Category 3: process narration lexical patterns ────────────────────────
+  if (PROCESS_NARRATION_LEXICAL_PATTERNS.some(p => p.test(s))) return true;
+  // ── Category 4: semantic tool-trace fragments ─────────────────────────────
+  if (SEMANTIC_TOOL_TRACE_PATTERNS.some(p => p.test(s))) return true;
+  return false;
+}
+
 export interface MandatoryHealthAuditFinding {
   id: string;
   area: string;
@@ -967,12 +1049,13 @@ export const TOPIC_MEMORY_MAX_TOKENS = DEFAULT_PROMETHEUS_TOPIC_MEMORY_MAX_TOKEN
 // at which point a concise summary replaces the fragments.
 
 export interface TopicKnowledge {
-  status: "active" | "completed";
+  status: "active" | "completed" | "archived";
   runCount: number;
   firstSeenAt: string;
   lastUpdatedAt: string;
   knowledgeFragments: string[];
   completedSummary: string | null;
+  archivedSummary?: string | null;
 }
 
 export interface TopicMemoryState {
@@ -1051,7 +1134,7 @@ export function updateTopicKnowledge(
     }
 
     const entry = memory.topics[key];
-    if (entry.status === "completed") continue; // skip already-completed topics
+    if (entry.status === "completed" || entry.status === "archived") continue; // skip terminal topics
 
     entry.runCount++;
     entry.lastUpdatedAt = now;
@@ -1123,9 +1206,11 @@ export function detectAndCompleteTopics(
   memory: TopicMemoryState,
   researchTopics: string[],
   plans: any[],
-  analysisRoot?: unknown
-): { memory: TopicMemoryState; completedThisRun: string[] } {
+  analysisRoot?: unknown,
+  qualityGateQuarantinedTopics: string[] = []
+): { memory: TopicMemoryState; completedThisRun: string[]; archivedThisRun: string[] } {
   const completedThisRun: string[] = [];
+  const archivedThisRun: string[] = [];
   const now = new Date().toISOString();
 
   // Build set of topic keys covered by plan synthesis_sources (forward reference — accurate)
@@ -1149,27 +1234,48 @@ export function detectAndCompleteTopics(
     informationalKeys.add(findCanonicalTopicKey(topicKey(t), Object.keys(memory.topics)));
   }
 
+  // Fallback: if synthesis quality gate quarantined topics and Prometheus did not
+  // emit either synthesis_sources or informational_topics_consumed, archive those
+  // low-density topics so they do not remain active forever.
+  const quarantinedKeys = new Set<string>();
+  for (const t of (qualityGateQuarantinedTopics || [])) {
+    quarantinedKeys.add(topicKey(t));
+    quarantinedKeys.add(findCanonicalTopicKey(topicKey(t), Object.keys(memory.topics)));
+  }
+  const canFallbackArchiveQuarantined = quarantinedKeys.size > 0 && coveredByPlanKeys.size === 0 && informationalKeys.size === 0;
+
   for (const rawTopic of researchTopics) {
-    const key = topicKey(rawTopic);
+    const key = findCanonicalTopicKey(topicKey(rawTopic), Object.keys(memory.topics));
     if (!key || !memory.topics[key]) continue;
     const entry = memory.topics[key];
-    if (entry.status === "completed") continue;
+    if (entry.status === "completed" || entry.status === "archived") continue;
 
     const coveredByPlan = coveredByPlanKeys.has(key);
     const isInformational = informationalKeys.has(key);
+    const isQuarantinedLowDensity = canFallbackArchiveQuarantined && quarantinedKeys.has(key);
 
-    if (entry.runCount >= 1 && (coveredByPlan || isInformational)) {
+    if (entry.runCount >= 1 && (coveredByPlan || isInformational || isQuarantinedLowDensity)) {
       const fragmentSummary = entry.knowledgeFragments.slice(-5).join("; ");
-      const reason = coveredByPlan ? "plan produced" : "informational (no plan needed)";
-      entry.status = "completed";
       entry.lastUpdatedAt = now;
-      entry.completedSummary = `Completed after ${entry.runCount} run(s) — reason: ${reason}. Fragments: ${fragmentSummary.slice(0, 300)}`;
       entry.knowledgeFragments = [];
-      completedThisRun.push(key);
+      if (coveredByPlan) {
+        entry.status = "completed";
+        entry.completedSummary = `Completed after ${entry.runCount} run(s) — reason: plan produced. Fragments: ${fragmentSummary.slice(0, 300)}`;
+        entry.archivedSummary = null;
+        completedThisRun.push(key);
+      } else {
+        entry.status = "archived";
+        const archiveReason = isInformational
+          ? "reviewed as informational (no implementation needed)"
+          : "quarantined by synthesis quality gate (insufficient actionable signal)";
+        entry.archivedSummary = `Archived after ${entry.runCount} run(s) — ${archiveReason}. Fragments: ${fragmentSummary.slice(0, 300)}`;
+        entry.completedSummary = null;
+        archivedThisRun.push(key);
+      }
     }
   }
 
-  return { memory, completedThisRun };
+  return { memory, completedThisRun, archivedThisRun };
 }
 
 /**
@@ -1179,15 +1285,16 @@ export function detectAndCompleteTopics(
 export function buildTopicMemoryPromptSection(memory: TopicMemoryState): string {
   const activeTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "active");
   const completedTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "completed");
+  const archivedTopics = Object.entries(memory.topics).filter(([, v]) => v.status === "archived");
   const activeTopicsWithFragments = activeTopics.filter(([, topic]) => topic.knowledgeFragments.length > 0);
 
-  if (activeTopics.length === 0 && completedTopics.length === 0) return "";
+  if (activeTopics.length === 0 && completedTopics.length === 0 && archivedTopics.length === 0) return "";
 
   const lines: string[] = [];
   lines.push("\n\n## ACCUMULATED TOPIC KNOWLEDGE (cross-run memory)");
   lines.push("This knowledge has been accumulated across multiple Prometheus runs.");
   lines.push("Use it to produce deeper, more informed plans. Do NOT re-research completed topics.");
-  lines.push(`Active topics tracked: ${activeTopics.length}. Completed topics tracked: ${completedTopics.length}.`);
+  lines.push(`Active topics tracked: ${activeTopics.length}. Completed topics tracked: ${completedTopics.length}. Archived topics tracked: ${archivedTopics.length}.`);
 
   if (activeTopicsWithFragments.length > 0) {
     lines.push("\n### ACTIVE TOPICS (still being researched — use accumulated knowledge)");
@@ -1212,6 +1319,16 @@ export function buildTopicMemoryPromptSection(memory: TopicMemoryState): string 
     }
     if (completedTopics.length > 8) {
       lines.push(`- ... ${completedTopics.length - 8} additional completed topic summary/summaries omitted for prompt budget control.`);
+    }
+  }
+
+  if (archivedTopics.length > 0) {
+    lines.push("\n### ARCHIVED TOPICS (reviewed, no action needed)");
+    for (const [key, topic] of archivedTopics.slice(0, 8)) {
+      lines.push(`- **${key}**: ${(topic.archivedSummary || "Archived as informational").slice(0, 250)}`);
+    }
+    if (archivedTopics.length > 8) {
+      lines.push(`- ... ${archivedTopics.length - 8} additional archived topic summary/summaries omitted for prompt budget control.`);
     }
   }
 
@@ -2469,7 +2586,11 @@ export function hasPrometheusRuntimeContractSignals(parsed: unknown): boolean {
   const payload = parsed as Record<string, unknown>;
   const generatedAt = String(payload.generatedAt ?? "").trim();
   const keyFindings = String(payload.keyFindings ?? "").trim();
-  return generatedAt.length > 0 && keyFindings.length > 0;
+  return (
+    generatedAt.length > 0 &&
+    keyFindings.length >= STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH &&
+    !isStrategicFieldToolTraceContaminated(keyFindings)
+  );
 }
 
 export const CYCLE_PROOF_SEAM_KEYS = Object.freeze(["prometheus", "athena", "worker"] as const);
@@ -2589,8 +2710,10 @@ function hasValidParserContractFields(parsed: any): boolean {
   return REQUIRED_PROMETHEUS_HEALTH_VALUES.has(health)
     && Number.isFinite(estimatedTotal)
     && generatedAt.length > 0
-    && keyFindings.length > 0
-    && strategicNarrative.length > 0;
+    && keyFindings.length >= STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH
+    && !isStrategicFieldToolTraceContaminated(keyFindings)
+    && strategicNarrative.length >= STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH
+    && !isStrategicFieldToolTraceContaminated(strategicNarrative);
 }
 
 function buildParserContractRetryDiff(parsed: any): string {
@@ -2616,10 +2739,18 @@ function buildParserContractRetryDiff(parsed: any): string {
   const rawKeyFindings = String(parsed?.keyFindings ?? "").trim();
   if (!rawKeyFindings) {
     missing.push("keyFindings");
+  } else if (rawKeyFindings.length < STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH) {
+    invalid.push(`keyFindings_too_short(len=${rawKeyFindings.length})`);
+  } else if (isStrategicFieldToolTraceContaminated(rawKeyFindings)) {
+    invalid.push("keyFindings_tool_trace_contaminated");
   }
   const rawStrategicNarrative = String(parsed?.strategicNarrative ?? "").trim();
   if (!rawStrategicNarrative) {
     missing.push("strategicNarrative");
+  } else if (rawStrategicNarrative.length < STRATEGIC_FIELD_MIN_SEMANTIC_LENGTH) {
+    invalid.push(`strategicNarrative_too_short(len=${rawStrategicNarrative.length})`);
+  } else if (isStrategicFieldToolTraceContaminated(rawStrategicNarrative)) {
+    invalid.push("strategicNarrative_tool_trace_contaminated");
   }
   const missingText = missing.length > 0 ? missing.join(", ") : "none";
   const invalidText = invalid.length > 0 ? invalid.join(", ") : "none";
@@ -4109,9 +4240,10 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
     topicMemorySection = buildTopicMemoryPromptSection(topicMemory);
     const activeCount = Object.values(topicMemory.topics).filter(t => t.status === "active").length;
     const completedCount = Object.values(topicMemory.topics).filter(t => t.status === "completed").length;
-    if (activeCount > 0 || completedCount > 0) {
+    const archivedCount = Object.values(topicMemory.topics).filter(t => t.status === "archived").length;
+    if (activeCount > 0 || completedCount > 0 || archivedCount > 0) {
       await appendProgress(config,
-        `[PROMETHEUS] Topic memory loaded: ${activeCount} active, ${completedCount} completed topic(s)`
+        `[PROMETHEUS] Topic memory loaded: ${activeCount} active, ${completedCount} completed, ${archivedCount} archived topic(s)`
       );
     }
   } catch {
@@ -5493,7 +5625,16 @@ Mandatory requirements:
   try {
     if (researchTopicsList.length > 0 && Array.isArray(analysis.plans)) {
       topicMemory = updateTopicKnowledge(topicMemory, researchTopicsList, analysis.plans, researchSynthesisData);
-      const completion = detectAndCompleteTopics(topicMemory, researchTopicsList, analysis.plans, analysis);
+      const qualityGateQuarantinedTopics = Array.isArray((researchSynthesisData as any)?.qualityGate?.quarantinedTopics)
+        ? ((researchSynthesisData as any).qualityGate.quarantinedTopics as string[])
+        : [];
+      const completion = detectAndCompleteTopics(
+        topicMemory,
+        researchTopicsList,
+        analysis.plans,
+        analysis,
+        qualityGateQuarantinedTopics,
+      );
       topicMemory = completion.memory;
       await saveTopicMemory(stateDir, topicMemory);
 
@@ -5502,9 +5643,16 @@ Mandatory requirements:
           `[PROMETHEUS][TOPIC_MEMORY] Completed ${completion.completedThisRun.length} topic(s): ${completion.completedThisRun.join(", ")}`
         );
       }
+      if (completion.archivedThisRun.length > 0) {
+        await appendProgress(config,
+          `[PROMETHEUS][TOPIC_MEMORY] Archived ${completion.archivedThisRun.length} informational topic(s): ${completion.archivedThisRun.join(", ")}`
+        );
+      }
       const activeCount = Object.values(topicMemory.topics).filter(t => t.status === "active").length;
+      const completedCount = Object.values(topicMemory.topics).filter(t => t.status === "completed").length;
+      const archivedCount = Object.values(topicMemory.topics).filter(t => t.status === "archived").length;
       await appendProgress(config,
-        `[PROMETHEUS][TOPIC_MEMORY] Updated: ${activeCount} active topic(s), ${Object.keys(topicMemory.topics).length} total`
+        `[PROMETHEUS][TOPIC_MEMORY] Updated: ${activeCount} active, ${completedCount} completed, ${archivedCount} archived topic(s), ${Object.keys(topicMemory.topics).length} total`
       );
     }
   } catch (tmErr) {
