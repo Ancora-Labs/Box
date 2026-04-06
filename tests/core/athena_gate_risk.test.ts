@@ -76,7 +76,9 @@ describe("athena gate risk dry-run integration", () => {
         projectHealth: "good",
         analysis: "analysis",
         keyFindings: "findings",
-        plans: [{ role: "evolution-worker", task: "do deterministic work item", verification: "npm test" }],
+        // Intentionally omit `verification` to keep score at 40 (< AUTO_APPROVE threshold)
+        // so this plan cannot be fast-path approved and must reach the AI call.
+        plans: [{ role: "evolution-worker", task: "do deterministic work item" }],
         requestBudget: { estimatedPremiumRequestsTotal: 1 },
       });
       assert.equal(result.approved, false);
