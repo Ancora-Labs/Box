@@ -555,11 +555,13 @@ function computeOutcomeStatus(phase, workerResults, planCount) {
 function buildInterventionImpactCounters(optimizerUsage: any): Record<string, number> | null {
   if (!optimizerUsage || typeof optimizerUsage !== "object") return null;
   const counters: Record<string, number> = {};
+  // Field names must match the keys in runInterventionOptimizer's return value
+  // and in the optimizerUsage object captured by the orchestrator.
   const fields = [
     "failureClassificationsApplied",
-    "rerouteReasonsApplied",
-    "benchmarkAdjustmentsApplied",
-    "policyOverridesApplied",
+    "rerouteCostPenaltiesApplied",
+    "benchmarkBoostsApplied",
+    "policyImpactPenaltiesApplied",
   ] as const;
   for (const field of fields) {
     const v = (optimizerUsage as any)[field];

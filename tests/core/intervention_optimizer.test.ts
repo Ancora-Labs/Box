@@ -1265,3 +1265,126 @@ describe("runInterventionOptimizer — reroute reason code end-to-end", () => {
     assert.equal(unpenResult.rerouteCostPenaltiesApplied, 0);
   });
 });
+
+// ── buildInterventionsFromPlan: role normalization ────────────────────────────
+
+describe("buildInterventionsFromPlan — role normalization", () => {
+  const config = {};
+
+  it("normalizes 'Evolution Worker' to 'evolution-worker'", () => {
+    const plans = [{ role: "Evolution Worker", task: "Fix bug", priority: 5, wave: "wave-1" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].role, "evolution-worker");
+  });
+
+  it("normalizes 'quality-worker' to 'quality-worker' (no change)", () => {
+    const plans = [{ role: "quality-worker", task: "Write tests", priority: 5, wave: "wave-1" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].role, "quality-worker");
+  });
+
+  it("normalizes unregistered role (e.g. 'King David') to 'evolution-worker' fallback", () => {
+    const plans = [{ role: "King David", task: "Implement feature", priority: 5, wave: "wave-1" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].role, "evolution-worker",
+      "unregistered role name must fall back to evolution-worker");
+  });
+
+  it("normalizes lane key 'governance' to 'governance-worker'", () => {
+    const plans = [{ role: "governance", task: "Review policy", priority: 5, wave: "wave-1" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].role, "governance-worker");
+  });
+
+  it("normalizes 'infrastructure-worker' correctly", () => {
+    const plans = [{ role: "infrastructure-worker", task: "Setup CI", priority: 5, wave: "wave-1" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].role, "infrastructure-worker");
+  });
+
+  it("handles missing role field — falls back to evolution-worker", () => {
+    const plans = [{ task: "Some task", priority: 5, wave: "wave-1" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].role, "evolution-worker",
+      "missing role must default to evolution-worker, not 'unknown'");
+  });
+
+  it("returns correct budget cost and schema shape for normalized roles", () => {
+    const plans = [{ role: "quality-worker", task: "Test coverage", priority: 8, wave: "wave-2" }];
+    const result = buildInterventionsFromPlan(plans, config);
+    assert.equal(result[0].budgetCost, 1);
+    assert.equal(result[0].wave, 2);
+    assert.ok(Number.isFinite(result[0].successProbability));
+  });
+});
+
+// ── runInterventionOptimizer applied-counter accounting ───────────────────────
+
+describe("runInterventionOptimizer — applied-counter field names", () => {
+  function makeSimpleIntervention(id: string, role: string) {
+    return {
+      id,
+      type: INTERVENTION_TYPE.TASK,
+      wave: 1,
+      role,
+      title: `Task ${id}`,
+      successProbability: 0.8,
+      impact: 0.9,
+      riskCost: 0.2,
+      sampleCount: 3,
+      budgetCost: 1,
+    };
+  }
+
+  it("result includes rerouteCostPenaltiesApplied (not reroutteCostPenaltiesApplied typo)", () => {
+    const interventions = [makeSimpleIntervention("t1", "evolution-worker")];
+    const budget = { maxWorkerSpawns: 5 };
+    const result = runInterventionOptimizer(interventions, budget, {
+      rerouteReasons: [{ role: "evolution-worker", reasonCode: "fill_threshold" }],
+    }) as any;
+    assert.ok("rerouteCostPenaltiesApplied" in result,
+      "rerouteCostPenaltiesApplied must be a top-level field in optimizer result");
+    assert.ok(!("reroutteCostPenaltiesApplied" in result),
+      "typo 'reroutteCostPenaltiesApplied' must NOT appear — use rerouteCostPenaltiesApplied");
+  });
+
+  it("rerouteCostPenaltiesApplied is 0 when no reroute reasons provided", () => {
+    const interventions = [makeSimpleIntervention("t1", "evolution-worker")];
+    const budget = { maxWorkerSpawns: 5 };
+    const result = runInterventionOptimizer(interventions, budget) as any;
+    assert.equal(result.rerouteCostPenaltiesApplied, 0);
+  });
+
+  it("rerouteCostPenaltiesApplied is 1 when one role matches reroute history", () => {
+    const interventions = [makeSimpleIntervention("t1", "evolution-worker")];
+    const budget = { maxWorkerSpawns: 5 };
+    const result = runInterventionOptimizer(interventions, budget, {
+      rerouteReasons: [{ role: "evolution-worker", reasonCode: "fill_threshold" }],
+    }) as any;
+    assert.equal(result.rerouteCostPenaltiesApplied, 1);
+  });
+
+  it("policyImpactPenaltiesApplied uses correct key (not policyOverridesApplied)", () => {
+    const interventions = [makeSimpleIntervention("t1", "evolution-worker")];
+    const budget = { maxWorkerSpawns: 5 };
+    const result = runInterventionOptimizer(interventions, budget, {
+      policyImpactByInterventionId: { "t1": { decayedEffectiveness: 0.5, policyId: "p1", inactiveCycles: 0 } },
+    }) as any;
+    assert.ok("policyImpactPenaltiesApplied" in result,
+      "policyImpactPenaltiesApplied must be a top-level field");
+    assert.ok(!("policyOverridesApplied" in result),
+      "policyOverridesApplied must NOT appear — use policyImpactPenaltiesApplied");
+  });
+
+  it("benchmarkBoostsApplied uses correct key (not benchmarkAdjustmentsApplied)", () => {
+    const interventions = [makeSimpleIntervention("t1", "evolution-worker")];
+    const budget = { maxWorkerSpawns: 5 };
+    const result = runInterventionOptimizer(interventions, budget, {
+      benchmarkTelemetry: [{ interventionId: "t1", observedSuccessRate: 0.9, sampleCount: 5 }],
+    }) as any;
+    assert.ok("benchmarkBoostsApplied" in result,
+      "benchmarkBoostsApplied must be a top-level field");
+    assert.ok(!("benchmarkAdjustmentsApplied" in result),
+      "benchmarkAdjustmentsApplied must NOT appear — use benchmarkBoostsApplied");
+  });
+});

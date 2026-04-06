@@ -26,6 +26,12 @@ import {
   LEADERSHIP_SCHEMA_PATH,
   trustBoundaryRetryDelayMs,
   tagProviderDecision,
+  MEMORY_TRUST_LEVEL,
+  MEMORY_TRUST_SOURCE,
+  classifyMemoryTrust,
+  normalizeMemoryTrustMetadata,
+  filterMemoryEntriesByTrust,
+  isPrivilegedMemoryRequester,
 } from "../../src/core/trust_boundary.js";
 
 // ── Schema artifact ───────────────────────────────────────────────────────────
@@ -550,5 +556,183 @@ describe("tagProviderDecision -- explicit fallback tagging at trust boundary", (
     assert.equal(tagged._source, "fallback");
     // Should pass gates check: source is machine-readable
     assert.ok(["provider", "fallback"].includes(tagged._source));
+  });
+});
+
+// ── Memory trust classification ───────────────────────────────────────────────
+
+describe("MEMORY_TRUST_LEVEL and MEMORY_TRUST_SOURCE constants", () => {
+  it("MEMORY_TRUST_LEVEL exports HIGH, MEDIUM, LOW", () => {
+    assert.equal(MEMORY_TRUST_LEVEL.HIGH, "high");
+    assert.equal(MEMORY_TRUST_LEVEL.MEDIUM, "medium");
+    assert.equal(MEMORY_TRUST_LEVEL.LOW, "low");
+  });
+
+  it("MEMORY_TRUST_SOURCE exports SYSTEM, MODEL, USER_MEDIATED", () => {
+    assert.equal(MEMORY_TRUST_SOURCE.SYSTEM, "system");
+    assert.equal(MEMORY_TRUST_SOURCE.MODEL, "model");
+    assert.equal(MEMORY_TRUST_SOURCE.USER_MEDIATED, "user-mediated");
+  });
+});
+
+describe("classifyMemoryTrust", () => {
+  it("classifies system source as HIGH trust", () => {
+    const result = classifyMemoryTrust({ source: "system", sourceType: "system" });
+    assert.equal(result.level, MEMORY_TRUST_LEVEL.HIGH);
+    assert.equal(result.source, MEMORY_TRUST_SOURCE.SYSTEM);
+  });
+
+  it("classifies deterministic source as HIGH trust", () => {
+    const result = classifyMemoryTrust({ source: "deterministic-signal" });
+    assert.equal(result.level, MEMORY_TRUST_LEVEL.HIGH);
+  });
+
+  it("classifies user-mediated source as LOW trust", () => {
+    const result = classifyMemoryTrust({ sourceType: "user-mediated" });
+    assert.equal(result.level, MEMORY_TRUST_LEVEL.LOW);
+    assert.equal(result.source, MEMORY_TRUST_SOURCE.USER_MEDIATED);
+  });
+
+  it("classifies explicit isUserMediated=true as LOW trust", () => {
+    const result = classifyMemoryTrust({ isUserMediated: true });
+    assert.equal(result.level, MEMORY_TRUST_LEVEL.LOW);
+  });
+
+  it("classifies free-text 'comment' source as LOW trust (user-mediated hint)", () => {
+    const result = classifyMemoryTrust({ source: "github_comment" });
+    assert.equal(result.level, MEMORY_TRUST_LEVEL.LOW);
+  });
+
+  it("classifies model source as MEDIUM trust", () => {
+    const result = classifyMemoryTrust({ source: "prometheus-output" });
+    assert.equal(result.level, MEMORY_TRUST_LEVEL.MEDIUM);
+    assert.equal(result.source, MEMORY_TRUST_SOURCE.MODEL);
+  });
+
+  it("always returns taggedAt as ISO string", () => {
+    const result = classifyMemoryTrust({ source: "model" });
+    assert.ok(typeof result.taggedAt === "string" && result.taggedAt.length > 0);
+  });
+});
+
+describe("normalizeMemoryTrustMetadata", () => {
+  it("returns existing trust metadata when valid", () => {
+    const entry = {
+      trust: { level: "high", source: "system", reason: "verified", taggedAt: "2024-01-01T00:00:00Z" },
+    };
+    const result = normalizeMemoryTrustMetadata(entry);
+    assert.equal(result.level, "high");
+    assert.equal(result.source, "system");
+  });
+
+  it("classifies when trust field is absent", () => {
+    const entry = { hint: "use path.join", source: "system" };
+    const result = normalizeMemoryTrustMetadata(entry);
+    assert.ok(["high", "medium", "low"].includes(result.level));
+  });
+
+  it("classifies when trust level is invalid string", () => {
+    const entry = { trust: { level: "ultra-high", source: "system" } };
+    const result = normalizeMemoryTrustMetadata(entry);
+    // Falls back to classifyMemoryTrust → system source → HIGH
+    assert.equal(result.level, "high");
+  });
+
+  it("returns a valid trust object even for empty input", () => {
+    const result = normalizeMemoryTrustMetadata({});
+    assert.ok(result.level);
+    assert.ok(result.source);
+  });
+});
+
+describe("filterMemoryEntriesByTrust", () => {
+  const highEntry = { hint: "high", trust: { level: "high", source: "system", reason: "deterministic", taggedAt: "2024-01-01T00:00:00Z" } };
+  const mediumEntry = { hint: "medium", trust: { level: "medium", source: "model", reason: "model-produced", taggedAt: "2024-01-01T00:00:00Z" } };
+  const lowEntry = { hint: "low", trust: { level: "low", source: "user-mediated", reason: "free text", taggedAt: "2024-01-01T00:00:00Z" } };
+
+  it("returns HIGH and MEDIUM entries by default, drops LOW", () => {
+    const { selected, droppedLowTrustCount } = filterMemoryEntriesByTrust([highEntry, mediumEntry, lowEntry]);
+    assert.equal(selected.length, 2);
+    assert.equal(droppedLowTrustCount, 1);
+    assert.ok(!selected.some(e => e.trust.level === "low"));
+  });
+
+  it("sorts results HIGH first, then MEDIUM", () => {
+    const { selected } = filterMemoryEntriesByTrust([mediumEntry, highEntry]);
+    assert.equal(selected[0].trust.level, "high");
+    assert.equal(selected[1].trust.level, "medium");
+  });
+
+  it("includes LOW trust when privilegedCaller=true and includeLowTrust=true", () => {
+    const { selected, droppedLowTrustCount } = filterMemoryEntriesByTrust(
+      [highEntry, mediumEntry, lowEntry],
+      { includeLowTrust: true, privilegedCaller: true },
+    );
+    assert.equal(selected.length, 3);
+    assert.equal(droppedLowTrustCount, 0);
+  });
+
+  it("does NOT include LOW trust when privilegedCaller=false (even if includeLowTrust=true)", () => {
+    // includeLowTrust requires both flags to be true
+    const { selected, droppedLowTrustCount } = filterMemoryEntriesByTrust(
+      [lowEntry],
+      { includeLowTrust: true, privilegedCaller: false },
+    );
+    assert.equal(selected.length, 0);
+    assert.equal(droppedLowTrustCount, 1);
+  });
+
+  it("handles empty array input safely", () => {
+    const { selected, droppedLowTrustCount } = filterMemoryEntriesByTrust([]);
+    assert.equal(selected.length, 0);
+    assert.equal(droppedLowTrustCount, 0);
+  });
+
+  it("annotates entries without trust field via normalizeMemoryTrustMetadata", () => {
+    const rawEntry = { hint: "do not hardcode paths", source: "system" };
+    const { selected } = filterMemoryEntriesByTrust([rawEntry]);
+    assert.equal(selected.length, 1);
+    assert.ok(selected[0].trust, "entry must have trust metadata after filtering");
+  });
+
+  it("negative: non-array input returns empty selection without throwing", () => {
+    const { selected, droppedLowTrustCount } = filterMemoryEntriesByTrust(null as any);
+    assert.equal(selected.length, 0);
+    assert.equal(droppedLowTrustCount, 0);
+  });
+});
+
+describe("isPrivilegedMemoryRequester", () => {
+  it("returns true for 'jesus'", () => {
+    assert.equal(isPrivilegedMemoryRequester("jesus"), true);
+  });
+
+  it("returns true for 'governance' (lane key)", () => {
+    assert.equal(isPrivilegedMemoryRequester("governance"), true);
+  });
+
+  it("returns true for 'system'", () => {
+    assert.equal(isPrivilegedMemoryRequester("system"), true);
+  });
+
+  it("returns true for 'orchestratornoveltygate'", () => {
+    assert.equal(isPrivilegedMemoryRequester("orchestratornoveltygate"), true);
+  });
+
+  it("returns false for 'evolution' (non-privileged worker kind)", () => {
+    assert.equal(isPrivilegedMemoryRequester("evolution"), false);
+  });
+
+  it("returns false for 'quality' (non-privileged worker kind)", () => {
+    assert.equal(isPrivilegedMemoryRequester("quality"), false);
+  });
+
+  it("returns false for null/undefined", () => {
+    assert.equal(isPrivilegedMemoryRequester(null), false);
+    assert.equal(isPrivilegedMemoryRequester(undefined), false);
+  });
+
+  it("is case-insensitive (uppercase 'JESUS')", () => {
+    assert.equal(isPrivilegedMemoryRequester("JESUS"), true);
   });
 });

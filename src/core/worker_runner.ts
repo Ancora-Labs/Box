@@ -43,6 +43,7 @@ import { buildTaskFingerprint, buildLineageId, LINEAGE_ENTRY_STATUS } from "./li
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 import { classifyFailure, classifyExitCode } from "./failure_classifier.js";
 import { resolveRetryAction, persistRetryMetric } from "./retry_strategy.js";
+import { filterMemoryEntriesByTrust, isPrivilegedMemoryRequester } from "./trust_boundary.js";
 
 type WorkerRunnerConfig = {
   env?: Record<string, string | undefined>;
@@ -449,6 +450,35 @@ export function evaluateWorkerRoleCapability(config, roleName: unknown, taskKind
   return assertRoleCapabilityForTask(config, roleName, taskKind, taskText);
 }
 
+/**
+ * Apply trust classification and ranked filtering to knowledge-memory hints for prompt injection.
+ *
+ * Returns hints sorted high→medium, dropping LOW trust unless privilegedCaller=true.
+ * Each returned entry is annotated with a `trust` metadata field.
+ *
+ * This is the canonical trust gate between knowledge_memory.json entries and the
+ * worker prompt. Callers must not bypass this function to inject raw hints.
+ *
+ * @param hints           - raw hint/lesson entries from knowledge_memory.json
+ * @param workerKind      - the worker's registered kind (e.g. "governance", "evolution")
+ * @returns { selected, droppedLowTrustCount, isPrivileged }
+ */
+export function applyMemoryTrustFilter(
+  hints: unknown[],
+  workerKind: unknown,
+): {
+  selected: Array<Record<string, unknown> & { trust: { level: string; source: string; reason: string; taggedAt: string } }>;
+  droppedLowTrustCount: number;
+  isPrivileged: boolean;
+} {
+  const privilegedCaller = isPrivilegedMemoryRequester(workerKind);
+  const { selected, droppedLowTrustCount } = filterMemoryEntriesByTrust(
+    Array.isArray(hints) ? hints : [],
+    { includeLowTrust: privilegedCaller, privilegedCaller },
+  );
+  return { selected, droppedLowTrustCount, isPrivileged: privilegedCaller };
+}
+
 // ── Repo contamination detection and recovery ────────────────────────────────
 
 /** Patterns in worker output that indicate repo contamination (out-of-scope file modifications). */
@@ -680,28 +710,56 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
     parts.push("");
   }
 
-  // Inject knowledge memory lessons relevant to this worker
+  // Inject knowledge memory lessons relevant to this worker.
+  // Trust classification + ranked filtering is applied before injection:
+  //   HIGH trust (system/deterministic): always included, shown first.
+  //   MEDIUM trust (model-produced): always included.
+  //   LOW trust (user-mediated free text): dropped unless caller is privileged.
+  // Privileged callers (governance, system, jesus) receive all trust levels with an
+  // explicit [LOW-TRUST] label so they can assess and re-classify if needed.
   try {
     const kmPath = path.join(config.paths?.stateDir || "state", "knowledge_memory.json");
     if (existsSync(kmPath)) {
       const km = JSON.parse(readFileSync(kmPath, "utf8"));
-      const promptHints = Array.isArray(km.promptHints)
+      const privilegedCaller = isPrivilegedMemoryRequester(workerKind);
+
+      const targetFiltered = Array.isArray(km.promptHints)
         ? km.promptHints.filter(h => {
             const target = String(h.targetAgent || "").toLowerCase();
             return target === "all" || target === "workers" || target === String(workerKind || "").toLowerCase();
           })
         : [];
-      const recentLessons = Array.isArray(km.lessons) ? km.lessons.slice(-5) : [];
 
-      if (promptHints.length > 0 || recentLessons.length > 0) {
+      // Apply trust classification + ranked filtering (high→medium, drop low unless privileged)
+      const { selected: trustedHints, droppedLowTrustCount: droppedHints } = filterMemoryEntriesByTrust(
+        targetFiltered,
+        { includeLowTrust: privilegedCaller, privilegedCaller },
+      );
+
+      const rawLessons = Array.isArray(km.lessons) ? km.lessons.slice(-5) : [];
+      const { selected: trustedLessons, droppedLowTrustCount: droppedLessons } = filterMemoryEntriesByTrust(
+        rawLessons,
+        { includeLowTrust: privilegedCaller, privilegedCaller },
+      );
+      const filteredLessons = trustedLessons.filter(
+        l => (l as any).severity === "critical" || (l as any).severity === "warning",
+      );
+
+      if (trustedHints.length > 0 || filteredLessons.length > 0) {
         parts.push("## SYSTEM LEARNINGS (from previous cycles)");
-        for (const hint of promptHints) {
-          parts.push(`- [HINT] ${hint.hint} (reason: ${hint.reason})`);
+        for (const hint of trustedHints) {
+          const h = hint as any;
+          const trustLabel = hint.trust.level.toUpperCase();
+          const lowNotice = hint.trust.level === "low" ? " [LOW-TRUST — verify before applying]" : "";
+          parts.push(`- [${trustLabel}] ${h.hint} (reason: ${h.reason})${lowNotice}`);
         }
-        for (const lesson of recentLessons) {
-          if (lesson.severity === "critical" || lesson.severity === "warning") {
-            parts.push(`- [${lesson.severity.toUpperCase()}] ${lesson.lesson}`);
-          }
+        for (const lesson of filteredLessons) {
+          const l = lesson as any;
+          const trustLabel = lesson.trust.level.toUpperCase();
+          parts.push(`- [${trustLabel}] [${String(l.severity).toUpperCase()}] ${l.lesson}`);
+        }
+        if ((droppedHints + droppedLessons) > 0) {
+          parts.push(`- [INFO] ${droppedHints + droppedLessons} low-trust hint(s) omitted (set privileged caller to include them).`);
         }
         parts.push("");
       }

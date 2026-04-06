@@ -10,6 +10,7 @@ import {
   shouldEnableFullToolAccess,
   evaluateWorkerRoleCapability,
   injectCiFailureContextIfMissing,
+  applyMemoryTrustFilter,
 } from "../../src/core/worker_runner.js";
 import { isProcessAlive } from "../../src/core/daemon_control.js";
 
@@ -376,5 +377,75 @@ describe("injectCiFailureContextIfMissing", () => {
     const instruction = { task: "fix ci", context: "" };
     const result = await injectCiFailureContextIfMissing(instruction, { paths: { stateDir: "" } });
     assert.ok(String(result.context).includes("no_evidence_available"), "must still inject no-data marker");
+  });
+});
+
+// ── applyMemoryTrustFilter ────────────────────────────────────────────────────
+
+describe("applyMemoryTrustFilter", () => {
+  const highHint = {
+    hint: "use path.join for all file paths",
+    reason: "prevents separator issues",
+    trust: { level: "high", source: "system", reason: "deterministic", taggedAt: "2024-01-01T00:00:00Z" },
+  };
+  const mediumHint = {
+    hint: "prefer small functions",
+    reason: "model-derived best practice",
+    trust: { level: "medium", source: "model", reason: "model-produced", taggedAt: "2024-01-01T00:00:00Z" },
+  };
+  const lowHint = {
+    hint: "try manual review first",
+    reason: "user feedback",
+    trust: { level: "low", source: "user-mediated", reason: "free text", taggedAt: "2024-01-01T00:00:00Z" },
+  };
+
+  it("returns only HIGH and MEDIUM hints for non-privileged worker kind", () => {
+    const { selected, droppedLowTrustCount, isPrivileged } = applyMemoryTrustFilter(
+      [highHint, mediumHint, lowHint],
+      "evolution",
+    );
+    assert.equal(selected.length, 2);
+    assert.equal(droppedLowTrustCount, 1);
+    assert.equal(isPrivileged, false);
+    assert.ok(!selected.some(h => h.trust.level === "low"));
+  });
+
+  it("returns HIGH hints first (ranked by trust level descending)", () => {
+    const { selected } = applyMemoryTrustFilter([mediumHint, highHint], "quality");
+    assert.equal(selected[0].trust.level, "high");
+    assert.equal(selected[1].trust.level, "medium");
+  });
+
+  it("includes LOW trust hints for privileged caller (governance)", () => {
+    const { selected, droppedLowTrustCount, isPrivileged } = applyMemoryTrustFilter(
+      [highHint, mediumHint, lowHint],
+      "governance",
+    );
+    assert.equal(selected.length, 3);
+    assert.equal(droppedLowTrustCount, 0);
+    assert.equal(isPrivileged, true);
+  });
+
+  it("includes LOW trust hints for 'system' worker kind", () => {
+    const { isPrivileged } = applyMemoryTrustFilter([lowHint], "system");
+    assert.equal(isPrivileged, true);
+  });
+
+  it("handles empty hints array without throwing", () => {
+    const { selected, droppedLowTrustCount } = applyMemoryTrustFilter([], "evolution");
+    assert.equal(selected.length, 0);
+    assert.equal(droppedLowTrustCount, 0);
+  });
+
+  it("annotates raw hints without trust field via classification", () => {
+    const rawHint = { hint: "use npm test", reason: "standard", source: "system" };
+    const { selected } = applyMemoryTrustFilter([rawHint], "evolution");
+    assert.ok(selected.length > 0, "system-sourced hint must pass trust filter");
+    assert.ok(selected[0].trust, "trust metadata must be attached");
+  });
+
+  it("negative: non-privileged caller cannot force LOW trust inclusion", () => {
+    const { selected } = applyMemoryTrustFilter([lowHint], "infrastructure");
+    assert.equal(selected.length, 0, "non-privileged caller must not receive LOW trust hints");
   });
 });
