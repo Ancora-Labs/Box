@@ -23,6 +23,7 @@ import {
   computeQueueViability,
   QUEUE_VIABILITY_MIN_COMPLETION_RATE,
 } from "../../src/core/pipeline_progress.js";
+import { recordCapabilityExecution } from "../../src/core/state_tracker.js";
 
 // ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -240,6 +241,13 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
         "utf8",
       );
 
+      // Record a runtime execution trace so the dual-gate check passes.
+      await recordCapabilityExecution(
+        { paths: { stateDir } },
+        "jesus-findings-to-plan-requirements",
+        "test: observed in prometheus planning loop",
+      );
+
       writeFileSync(
         path.join(stateDir, "knowledge_memory.json"),
         JSON.stringify({
@@ -266,7 +274,7 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
       const capGap = findings.find((f: any) => f.area === "capability-gap");
       assert.ok(capGap, "capability-gap finding should exist");
       assert.equal(capGap.severity, "info");
-      assert.equal(capGap.note, "verified_present_in_source");
+      assert.equal(capGap.note, "verified_present_in_source_and_executed");
     });
   });
 
@@ -283,6 +291,13 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
         path.join(repoDir, "src", "core", "worker_runner.ts"),
         "export async function injectCiFailureContextIfMissing(plan: any, config: any) {}",
         "utf8",
+      );
+
+      // Record a runtime execution trace so the dual-gate check passes.
+      await recordCapabilityExecution(
+        { paths: { stateDir } },
+        "ci-failure-log-injection",
+        "test: observed in orchestrator dispatch context hydration",
       );
 
       writeFileSync(
@@ -311,7 +326,7 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
       const capGap = findings.find((f: any) => f.area === "capability-gap");
       assert.ok(capGap, "capability-gap finding should exist");
       assert.equal(capGap.severity, "info");
-      assert.equal(capGap.note, "verified_present_in_source");
+      assert.equal(capGap.note, "verified_present_in_source_and_executed");
     });
   });
 
@@ -353,10 +368,55 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
       assert.notEqual(capGap.severity, "info",
         "gap should remain at original severity when worker_runner signature is absent"
       );
-      assert.notEqual(capGap.note, "verified_present_in_source");
+      assert.notEqual(capGap.note, "verified_present_in_source_and_executed");
     });
   });
 
+
+  it("does NOT downgrade gap when source signatures present but no execution trace exists", async () => {
+    // Validates the execution-trace gate: source-presence alone is insufficient.
+    await withTempRepo(async ({ stateDir, repoDir }) => {
+      // Write all required source signatures for jesus-findings-to-plan-requirements.
+      writeFileSync(
+        path.join(repoDir, "src", "core", "prometheus.ts"),
+        "const a='MANDATORY_TASKS'; function buildMandatoryTasksPromptSection(){} function extractMandatoryHealthAuditFindings(){}",
+        "utf8",
+      );
+      // No execution trace written — capability never observed in runtime path.
+      writeFileSync(
+        path.join(stateDir, "knowledge_memory.json"),
+        JSON.stringify({
+          lessons: [],
+          capabilityGaps: [
+            {
+              gap: "Missing capability: Jesus findings were not fed as mandatory plan tasks",
+              severity: "critical",
+              capability: "jesus-findings-to-plan-requirements",
+              proposedFix: "Inject findings as mandatory tasks",
+            },
+          ],
+        }),
+        "utf8",
+      );
+
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        { latestMainCi: null, failedCiRuns: [], pullRequests: [] },
+        {},
+        {},
+      );
+
+      const capGap = findings.find((f: any) => f.area === "capability-gap");
+      assert.ok(capGap, "capability-gap finding should exist");
+      // Source is present but no execution trace → must NOT downgrade.
+      assert.notEqual(capGap.severity, "info",
+        "gap must remain at original severity when execution trace is absent, even if source signatures exist"
+      );
+      assert.equal(capGap.note, undefined,
+        "verification note must not be set without execution trace evidence"
+      );
+    });
+  });
 
   it("keeps unverified capability gaps at original severity", async () => {
     await withTempRepo(async ({ stateDir, repoDir }) => {

@@ -887,6 +887,94 @@ export async function loadPolicyClosureHistory(config): Promise<any[]> {
   }
 }
 
+// ── Capability execution trace ────────────────────────────────────────────────
+
+/**
+ * How long a capability execution trace remains "recent" for downgrade purposes.
+ * Traces older than this window are treated as stale and do not satisfy the
+ * execution-path gate in Jesus capability-gap downgrade logic.
+ */
+export const CAPABILITY_TRACE_FRESHNESS_MS = 86_400_000; // 24 hours
+
+/**
+ * A single capability execution trace record.
+ * Written by any module that actually invokes a capability at runtime.
+ */
+export interface CapabilityExecutionTrace {
+  /** Canonical capability identifier (lowercase, trimmed). */
+  capability: string;
+  /** ISO 8601 timestamp when the capability was observed executing. */
+  observedAt: string;
+  /** Free-form context string (truncated to 500 chars on write). */
+  context: string;
+}
+
+/**
+ * Record that a capability was observed executing in the active runtime path.
+ *
+ * Persists to: state/capability_execution_traces.json
+ * Capped at 200 entries (oldest trimmed). Fail-open: write errors are logged
+ * but never thrown.
+ *
+ * @param config     — BOX config object with paths.stateDir
+ * @param capability — canonical capability identifier (e.g. "ci-failure-log-injection")
+ * @param context    — human-readable context for observability
+ */
+export async function recordCapabilityExecution(
+  config: { paths: { stateDir: string } },
+  capability: string,
+  context: string,
+): Promise<void> {
+  const stateDir = config?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, "capability_execution_traces.json");
+  try {
+    let existing: CapabilityExecutionTrace[] = [];
+    try {
+      const raw = await readJson(filePath, { traces: [] });
+      existing = Array.isArray(raw?.traces) ? raw.traces : [];
+    } catch { /* first write */ }
+    const record: CapabilityExecutionTrace = {
+      capability: String(capability || "").trim().toLowerCase(),
+      observedAt: new Date().toISOString(),
+      context: String(context || "").slice(0, 500),
+    };
+    const updated = [...existing, record].slice(-200);
+    await writeJson(filePath, { traces: updated });
+  } catch (err) {
+    console.error(`[state_tracker] recordCapabilityExecution failed: ${String((err as any)?.message || err)}`);
+  }
+}
+
+/**
+ * Load the set of capability IDs that have recent execution traces.
+ *
+ * Reads state/capability_execution_traces.json and returns a Set of capability
+ * IDs that were observed executing within `freshnessMs` milliseconds.
+ * Returns an empty Set when the file does not exist or is malformed.
+ *
+ * @param config      — BOX config object with paths.stateDir
+ * @param freshnessMs — max trace age in milliseconds (default: CAPABILITY_TRACE_FRESHNESS_MS)
+ */
+export async function loadCapabilityExecutionTraces(
+  config: { paths?: { stateDir?: string } },
+  freshnessMs: number = CAPABILITY_TRACE_FRESHNESS_MS,
+): Promise<Set<string>> {
+  const stateDir = config?.paths?.stateDir || "state";
+  const filePath = path.join(stateDir, "capability_execution_traces.json");
+  try {
+    const raw = await readJson(filePath, { traces: [] });
+    const traces: CapabilityExecutionTrace[] = Array.isArray(raw?.traces) ? raw.traces : [];
+    const cutoff = Date.now() - freshnessMs;
+    const recent = traces.filter((t) => {
+      const ts = Date.parse(String(t?.observedAt || ""));
+      return Number.isFinite(ts) && ts > cutoff;
+    });
+    return new Set(recent.map((t) => String(t.capability || "").trim().toLowerCase()));
+  } catch {
+    return new Set<string>();
+  }
+}
+
 /**
  * Append a structured governance block event to governance_blocks.jsonl.
  *
