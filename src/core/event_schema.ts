@@ -115,6 +115,13 @@ export const EVENTS = Object.freeze({
   // Payload fields: source ("provider"|"fallback"), fallbackReason (string|null), inputSnapshot (object)
   POLICY_PROVIDER_FALLBACK_DECISION: "box.v1.policy.providerFallbackDecision",
 
+  // Policy domain — Jesus latency fallback activation contract.
+  // Payload fields: source (string), baseModel (string), fallbackModel (string),
+  //                 fromTier (string), toTier (string), softTimeoutMs (number),
+  //                 elapsedMsAtActivation (number), softTimeoutReached (boolean),
+  //                 hardTimeoutMs (number), routingReason (string)
+  POLICY_JESUS_FALLBACK_ACTIVATED:   "box.v1.policy.jesusFallbackActivated",
+
   // Planning domain — per-packet stage transition (span contract)
   // Payload fields: taskId, stageFrom, stageTo, durationMs (SPAN_CONTRACT.stageTransition)
   //                 spanId, parentSpanId, traceId, agentId   (SPAN_CONTRACT.fields)

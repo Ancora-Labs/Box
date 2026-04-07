@@ -52,6 +52,12 @@ export function shouldWarnJesusDecisionLatency(elapsedMs: number, warningThresho
   return safeElapsedMs >= Math.max(1, safeThresholdMs);
 }
 
+export function hasReachedJesusSoftTimeout(elapsedMs: number, softTimeoutMs: number): boolean {
+  const safeElapsedMs = Number.isFinite(elapsedMs) ? Number(elapsedMs) : 0;
+  const safeSoftTimeoutMs = Number.isFinite(softTimeoutMs) ? Number(softTimeoutMs) : 600_000;
+  return safeElapsedMs >= Math.max(1, safeSoftTimeoutMs);
+}
+
 /**
  * Build a PLANNING_STAGE_TRANSITION span event for Jesus.
  * Conforms to SPAN_CONTRACT: stamps spanId, parentSpanId, traceId, agentId.
@@ -900,6 +906,10 @@ ${workersList}`;
   // maxRetries=1 means 2 attempts (T1+T2), maxRetries=2 means all 3 tiers.
   const tier1Ms = Math.max(30_000, Math.min(Number(config?.runtime?.jesusLatencyTier1Ms ?? 60_000), jesusTimeoutMs));
   const tier2Ms = Math.max(tier1Ms + 1, Math.min(Number(config?.runtime?.jesusLatencyTier2Ms ?? 600_000), jesusTimeoutMs));
+  const jesusSoftTimeoutMs = Math.max(
+    tier1Ms,
+    Math.min(Number(config?.runtime?.jesusSoftTimeoutMs ?? tier2Ms), jesusTimeoutMs),
+  );
   const maxRetries = Math.max(0, Math.min(Number(config?.runtime?.jesusMaxRetries ?? 1), 2));
   const fallbackModel = resolveJesusFallbackModel(config);
 
@@ -910,7 +920,13 @@ ${workersList}`;
     { timeoutMs: tier2Ms, model: jesusModel, label: "T2" },
     { timeoutMs: jesusTimeoutMs, model: fallbackModel, label: "T3" },
   ];
-  const tiers = ALL_TIERS.slice(0, Math.min(maxRetries + 1, ALL_TIERS.length));
+  const tiers = ALL_TIERS.slice(0, Math.min(maxRetries + 1, ALL_TIERS.length))
+    .map((tier) => ({ ...tier, softTimeoutGated: false }));
+  if (!tiers.some((tier) => tier.model !== jesusModel) && fallbackModel !== jesusModel) {
+    // Keep the existing T1/T2 retry profile, but guarantee a deterministic
+    // fallback path once the soft-timeout threshold has been crossed.
+    tiers.push({ timeoutMs: jesusTimeoutMs, model: fallbackModel, label: "T3", softTimeoutGated: true });
+  }
 
   let rawResult: any;
   let finalTierLabel = tiers[0]?.label || "T1";
@@ -933,6 +949,8 @@ ${workersList}`;
 
       if (isEscalation) {
         const prevTier = tiers[ti - 1];
+        const elapsedMsAtEscalation = Date.now() - aiCallStartedAt;
+        const softTimeoutReached = hasReachedJesusSoftTimeout(elapsedMsAtEscalation, jesusSoftTimeoutMs);
         const routingReason = tier.model !== jesusModel ? ROUTING_REASON.JESUS_LATENCY_FALLBACK : "JESUS_LATENCY_ESCALATION";
         await appendProgress(config,
           `[JESUS] ${prevTier.label} timed out after ${Math.floor(prevTier.timeoutMs / 1000)}s — escalating to ${tier.label} (timeout=${Math.floor(tier.timeoutMs / 1000)}s model=${tier.model} reason=${routingReason})`
@@ -948,14 +966,39 @@ ${workersList}`;
           toTier: tier.label,
           fromTimeoutMs: prevTier.timeoutMs,
           toTimeoutMs: tier.timeoutMs,
+          softTimeoutMs: jesusSoftTimeoutMs,
+          elapsedMsAtEscalation,
+          softTimeoutReached,
           baseModel: jesusModel,
           selectedModel: tier.model,
           routingReason,
         });
         if (tier.model !== jesusModel) {
+          emitEvent(EVENTS.POLICY_JESUS_FALLBACK_ACTIVATED, EVENT_DOMAIN.POLICY, latencyWarningCorrelationId, {
+            source: "jesus_supervisor",
+            baseModel: jesusModel,
+            fallbackModel: tier.model,
+            fromTier: prevTier.label,
+            toTier: tier.label,
+            softTimeoutMs: jesusSoftTimeoutMs,
+            elapsedMsAtActivation: elapsedMsAtEscalation,
+            softTimeoutReached,
+            hardTimeoutMs: jesusTimeoutMs,
+            routingReason,
+          });
           warn(
-            `[jesus_supervisor] fallback model activated after latency escalation: baseModel=${jesusModel} fallbackModel=${tier.model} tier=${tier.label}`
+            `[jesus_supervisor] fallback model activated after latency escalation: baseModel=${jesusModel} fallbackModel=${tier.model} tier=${tier.label} softTimeoutReached=${softTimeoutReached}`
           );
+        }
+      }
+
+      if (tier.softTimeoutGated) {
+        const elapsedMsBeforeFallback = Date.now() - aiCallStartedAt;
+        if (!hasReachedJesusSoftTimeout(elapsedMsBeforeFallback, jesusSoftTimeoutMs)) {
+          rawResult = { status: -1, stdout: "", stderr: "soft-timeout cutoff not reached", timedOut: false };
+          finalTierLabel = tier.label;
+          finalTierModel = tier.model;
+          break;
         }
       }
 

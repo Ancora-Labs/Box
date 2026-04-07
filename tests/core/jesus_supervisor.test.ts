@@ -19,12 +19,14 @@ import {
   validateExpectedOutcomeMeasurable,
   sanitizeDirectiveFieldForPersistence,
   shouldWarnJesusDecisionLatency,
+  hasReachedJesusSoftTimeout,
 } from "../../src/core/jesus_supervisor.js";
 import {
   computeQueueViability,
   QUEUE_VIABILITY_MIN_COMPLETION_RATE,
 } from "../../src/core/pipeline_progress.js";
 import { recordCapabilityExecution } from "../../src/core/state_tracker.js";
+import { buildEvent, EVENT_DOMAIN, EVENTS, VALID_EVENT_NAMES } from "../../src/core/event_schema.js";
 
 // ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -853,5 +855,62 @@ describe("jesus_supervisor — shouldWarnJesusDecisionLatency", () => {
   it("falls back to default threshold when threshold is invalid", () => {
     assert.equal(shouldWarnJesusDecisionLatency(900000, Number.NaN), true);
     assert.equal(shouldWarnJesusDecisionLatency(899999, Number.NaN), false);
+  });
+});
+
+describe("jesus_supervisor — hasReachedJesusSoftTimeout", () => {
+  it("returns true when elapsed latency is equal to soft-timeout threshold", () => {
+    assert.equal(hasReachedJesusSoftTimeout(600000, 600000), true);
+  });
+
+  it("returns true when elapsed latency exceeds soft-timeout threshold", () => {
+    assert.equal(hasReachedJesusSoftTimeout(600001, 600000), true);
+  });
+
+  it("returns false when elapsed latency is below soft-timeout threshold", () => {
+    assert.equal(hasReachedJesusSoftTimeout(599999, 600000), false);
+  });
+
+  it("falls back to default soft-timeout threshold when threshold is invalid", () => {
+    assert.equal(hasReachedJesusSoftTimeout(600000, Number.NaN), true);
+    assert.equal(hasReachedJesusSoftTimeout(599999, Number.NaN), false);
+  });
+});
+
+describe("jesus_supervisor — fallback activation event contract", () => {
+  it("registers POLICY_JESUS_FALLBACK_ACTIVATED in canonical event registry", () => {
+    assert.ok(EVENTS.POLICY_JESUS_FALLBACK_ACTIVATED);
+    assert.equal(VALID_EVENT_NAMES.has(EVENTS.POLICY_JESUS_FALLBACK_ACTIVATED), true);
+  });
+
+  it("builds a valid fallback activation event with soft-timeout semantics fields", () => {
+    const event = buildEvent(
+      EVENTS.POLICY_JESUS_FALLBACK_ACTIVATED,
+      EVENT_DOMAIN.POLICY,
+      "jesus-fallback-evt-001",
+      {
+        source: "jesus_supervisor",
+        baseModel: "Claude Sonnet 4.6",
+        fallbackModel: "GPT-5.3-Codex",
+        fromTier: "T2",
+        toTier: "T3",
+        softTimeoutMs: 600000,
+        elapsedMsAtActivation: 602000,
+        softTimeoutReached: true,
+        hardTimeoutMs: 1800000,
+        routingReason: "JESUS_LATENCY_FALLBACK",
+      }
+    );
+
+    assert.equal(event.event, EVENTS.POLICY_JESUS_FALLBACK_ACTIVATED);
+    assert.equal(event.domain, EVENT_DOMAIN.POLICY);
+    assert.equal(event.payload.softTimeoutReached, true);
+  });
+
+  it("negative path: throws when fallback activation event uses an invalid domain", () => {
+    assert.throws(
+      () => buildEvent(EVENTS.POLICY_JESUS_FALLBACK_ACTIVATED, "not-a-domain", "jesus-fallback-evt-002", {}),
+      /not-a-domain/,
+    );
   });
 });
