@@ -100,6 +100,13 @@ export const EVENTS = Object.freeze({
   GOVERNANCE_EVOLUTION_TASK_STARTED: "box.v1.governance.evolutionTaskStarted",
   GOVERNANCE_EVOLUTION_TASK_DONE:    "box.v1.governance.evolutionTaskDone",
 
+  // Governance domain — capability execution trace (runtime path observation).
+  // Payload fields: capability (string), context (string), observedAt (ISO string)
+  // Emitted by any module that confirms a capability was actually exercised at
+  // runtime (not just present in source). Jesus uses these traces as the second
+  // gate in capability-gap downgrade logic.
+  GOVERNANCE_CAPABILITY_EXECUTED:    "box.v1.governance.capabilityExecuted",
+
   // Governance domain — pre-dispatch gate decision (Task 8)
   // Payload fields: blocked (boolean), reason (string|null), inputSnapshot (object)
   GOVERNANCE_GATE_EVALUATED:         "box.v1.governance.gateEvaluated",

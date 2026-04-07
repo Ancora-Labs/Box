@@ -17,7 +17,7 @@
 import path from "node:path";
 import { appendFileSync } from "node:fs";
 import { readJson, readJsonSafe, writeJson, spawnAsync, buildIncrementalSignatureIndex } from "./fs_utils.js";
-import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
+import { appendProgress, appendAlert, ALERT_SEVERITY, loadCapabilityExecutionTraces } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog, warn } from "./logger.js";
@@ -163,18 +163,29 @@ const CAPABILITY_SOURCE_SIGNATURES: Readonly<Record<string, string[]>> = Object.
 
 /**
  * Return true only when ALL required source signatures for a known capability
- * are found in the signature index Set.  Unknown capabilities (not in the
- * registry) always return false so their findings remain actionable.
+ * are found in the signature index Set AND the capability has a recent execution
+ * trace proving it was invoked in the active runtime path.
+ *
+ * Both gates must pass for a finding to be downgraded:
+ *   1. Source-presence gate  — all declared signatures exist in source files.
+ *   2. Execution-trace gate  — capability ID appears in the recent trace log,
+ *      meaning it was actually called during a previous cycle (not just compiled).
+ *
+ * Unknown capabilities (not in the registry) always return false so their
+ * findings remain actionable.
  */
-function isCapabilityGapVerifiedPresentInSource(
+function isCapabilityGapVerifiedPresentAndExecuted(
   sourceIndex: Set<string>,
+  executionTraces: Set<string>,
   gap: { capability?: unknown },
 ): boolean {
   if (!sourceIndex || sourceIndex.size === 0) return false;
   const capability = String(gap?.capability || "").trim().toLowerCase();
   const signatures = CAPABILITY_SOURCE_SIGNATURES[capability];
   if (!signatures || signatures.length === 0) return false;
-  return signatures.every((sig) => sourceIndex.has(sig));
+  const sourcePresent = signatures.every((sig) => sourceIndex.has(sig));
+  const executionPresent = executionTraces.has(capability);
+  return sourcePresent && executionPresent;
 }
 
 export async function runSystemHealthAudit(config, githubState, AthenaCoordination, sessions) {
@@ -298,6 +309,7 @@ export async function runSystemHealthAudit(config, githubState, AthenaCoordinati
     const criticalLessons = (km.lessons || []).filter(l => l.severity === "critical").slice(-3);
     const capGaps = Array.isArray(km.capabilityGaps) ? km.capabilityGaps.slice(-5) : [];
     const sourceIndex = await loadSourceEvidenceIndex(process.cwd());
+    const executionTraces = await loadCapabilityExecutionTraces(config);
 
     if (criticalLessons.length > 0) {
       findings.push({
@@ -312,7 +324,7 @@ export async function runSystemHealthAudit(config, githubState, AthenaCoordinati
     if (capGaps.length > 0) {
       for (const gap of capGaps.slice(0, 3)) {
         const originalSeverity = String(gap?.severity || "warning").toLowerCase();
-        const verifiedPresent = isCapabilityGapVerifiedPresentInSource(sourceIndex, gap);
+        const verifiedPresent = isCapabilityGapVerifiedPresentAndExecuted(sourceIndex, executionTraces, gap);
         const shouldDowngrade =
           verifiedPresent && (originalSeverity === "critical" || originalSeverity === "warning");
         findings.push({
@@ -321,7 +333,7 @@ export async function runSystemHealthAudit(config, githubState, AthenaCoordinati
           finding: `Missing capability: ${gap.gap}`,
           remediation: gap.proposedFix || "Add missing capability to system",
           capabilityNeeded: gap.capability || "unknown",
-          ...(shouldDowngrade ? { note: "verified_present_in_source" } : {})
+          ...(shouldDowngrade ? { note: "verified_present_in_source_and_executed" } : {})
         });
       }
     }
