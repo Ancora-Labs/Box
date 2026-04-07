@@ -555,7 +555,7 @@ export async function evaluateSelfDevExit(
     bandStatus.regressionChecks?.anyBreach === false &&
     (analyticsRegressionClean !== false);
   const capacity = readCapacityDeltaFromBandHistory(
-    Array.isArray(bandStatus.history) ? bandStatus.history as Array<Record<string, unknown>> : [],
+    Array.isArray(bandStatus.history) ? (bandStatus.history as unknown as Array<Record<string, unknown>>) : [],
     thresholds.measurementWindow,
   );
 
