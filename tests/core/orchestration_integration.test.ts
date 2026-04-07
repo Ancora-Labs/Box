@@ -1058,3 +1058,54 @@ describe("Integration: runtime contract cycle-proof probe", () => {
     assert.equal(probe.criteria.doneWorkerWithVerificationReportEvidence.pass, false);
   });
 });
+
+// ── 11. Premium efficiency split: raw vs execution-adjusted ──────────────────
+// Tests that cycle_analytics kpis expose both variants, and that the values
+// flow correctly from computeCycleAnalytics.  Autonomy band gate selection
+// is tested separately in autonomy_band_monitor.test.ts.
+
+describe("Integration: premium efficiency variants in cycle analytics kpis", () => {
+  it("kpis expose premiumEfficiencyRaw and premiumEfficiencyAdjusted when provided", () => {
+    const record = computeCycleAnalytics({}, {
+      sloRecord: null,
+      premiumEfficiencyRaw: 0.90,
+      premiumEfficiencyAdjusted: 0.60,
+    });
+    assert.equal(record.kpis.premiumEfficiencyRaw, 0.90, "raw variant must be preserved in kpis");
+    assert.equal(record.kpis.premiumEfficiencyAdjusted, 0.60, "adjusted variant must be preserved in kpis");
+  });
+
+  it("kpis.premiumEfficiencyRaw and premiumEfficiencyAdjusted are null when omitted", () => {
+    const record = computeCycleAnalytics({}, {});
+    assert.equal(record.kpis.premiumEfficiencyRaw, null);
+    assert.equal(record.kpis.premiumEfficiencyAdjusted, null);
+  });
+
+  it("raw=1.0 adjusted=0.25 reflects unexecuted worker slots (historical comparability preserved)", () => {
+    // Scenario: 4 premium events (3 leadership OK + 1 worker API-OK but 0 verified done)
+    // raw  = 4/4 = 1.0
+    // adj  = (3 + 0) / 4 = 0.75 (leadership successes only)
+    const record = computeCycleAnalytics({}, {
+      premiumEfficiencyRaw: 1.0,
+      premiumEfficiencyAdjusted: 0.75,
+    });
+    assert.equal(record.kpis.premiumEfficiencyRaw, 1.0);
+    assert.equal(record.kpis.premiumEfficiencyAdjusted, 0.75);
+    assert.ok(
+      record.kpis.premiumEfficiencyRaw! > record.kpis.premiumEfficiencyAdjusted!,
+      "raw must exceed adjusted when worker slots produced no verified output",
+    );
+  });
+
+  it("negative path: adjusted below raw surfaces the execution penalty signal", () => {
+    // raw=0.80 (good API success rate), adjusted=0.30 (low verified output)
+    const record = computeCycleAnalytics({}, {
+      premiumEfficiencyRaw: 0.80,
+      premiumEfficiencyAdjusted: 0.30,
+    });
+    assert.ok(
+      (record.kpis.premiumEfficiencyRaw ?? 0) > (record.kpis.premiumEfficiencyAdjusted ?? 0),
+      "execution penalty must be visible: raw should exceed adjusted",
+    );
+  });
+});
