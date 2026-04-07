@@ -1896,6 +1896,26 @@ function resolveWorkerRole(logicalRole, taskKind, taskText = "") {
   return IMPLEMENTATION_WORKER;
 }
 
+async function resolveRoleWithAccessFallback(config, roleName) {
+  const normalizedRole = String(roleName || "").toLowerCase().trim();
+  const canonicalRole = nameToSlug(normalizedRole) || normalizedRole;
+  if (!canonicalRole || canonicalRole === IMPLEMENTATION_WORKER) return roleName;
+
+  const stateDir = config?.paths?.stateDir || "state";
+  const queueState = await readJson(path.join(stateDir, "escalation_queue.json"), { entries: [] });
+  const entries = Array.isArray(queueState?.entries) ? queueState.entries : [];
+  const hasUnresolvedAccessBlocked = entries.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    if (entry.resolved === true) return false;
+    const roleRaw = String(entry.role || "").toLowerCase().trim();
+    const role = nameToSlug(roleRaw) || roleRaw;
+    const cls = String(entry.blockingReasonClass || "").toUpperCase().trim();
+    return role === canonicalRole && cls === "ACCESS_BLOCKED";
+  });
+
+  return hasUnresolvedAccessBlocked ? IMPLEMENTATION_WORKER : roleName;
+}
+
 // ── Dispatch a single worker from a Prometheus plan item ───────────────────
 
 async function dispatchWorker(config, plan) {
@@ -1925,7 +1945,14 @@ async function dispatchWorker(config, plan) {
   const task = batchPlans
     ? `Execute this bundled work package in a single worker session.\nYou MUST execute tasks in exact numeric order (1 -> N).\nDo not parallelize steps inside this batch.\nDo not skip a step; if a step is blocked, stop and report blocked with the exact blocker.\n\nOrdered steps:\n${orderedBatchLines}`
     : plan.task;
-  const roleName = resolveWorkerRole(logicalRole, taskKind, task);
+  const resolvedRoleName = resolveWorkerRole(logicalRole, taskKind, task);
+  const roleName = await resolveRoleWithAccessFallback(config, resolvedRoleName);
+  if (roleName !== resolvedRoleName) {
+    await appendProgress(
+      config,
+      `[DISPATCH] Access fallback reroute: ${resolvedRoleName} -> ${roleName} (unresolved ACCESS_BLOCKED escalation)`
+    );
+  }
   const contextBlocks: string[] = [];
   if (batchPlans) {
     for (let i = 0; i < batchPlans.length; i += 1) {
