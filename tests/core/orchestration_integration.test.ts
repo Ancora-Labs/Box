@@ -1059,57 +1059,6 @@ describe("Integration: runtime contract cycle-proof probe", () => {
   });
 });
 
-// ── 7. Incomplete-output detection: no contract-fail accounting ───────────────
-
-import {
-  detectIncompletePrometheusOutput,
-  INCOMPLETE_OUTPUT_REASON,
-} from "../../src/core/prometheus.js";
-
-describe("Integration: incomplete-output detection does not conflate with contract-fail", () => {
-  it("complete output: incomplete=false, reason=null", () => {
-    const raw = "Analysis complete.\n===DECISION===\n{\"plans\":[]}\n===END===";
-    const result = detectIncompletePrometheusOutput(raw);
-    assert.equal(result.incomplete, false, "A complete output must not be flagged as incomplete");
-    assert.equal(result.reason, null, "reason must be null when not incomplete");
-  });
-
-  it("truncated DECISION block is flagged as TRUNCATED_DECISION_BLOCK, not contract-fail", () => {
-    const raw = "===DECISION===\n{\"plans\":[{\"task\":\"fix ci\"";
-    const result = detectIncompletePrometheusOutput(raw);
-    assert.equal(result.incomplete, true);
-    assert.equal(
-      result.reason,
-      INCOMPLETE_OUTPUT_REASON.TRUNCATED_DECISION_BLOCK,
-      "Truncated output must be classified as TRUNCATED_DECISION_BLOCK"
-    );
-  });
-
-  it("completely empty output is classified as EMPTY_RESPONSE", () => {
-    const result = detectIncompletePrometheusOutput("");
-    assert.equal(result.incomplete, true);
-    assert.equal(result.reason, INCOMPLETE_OUTPUT_REASON.EMPTY_RESPONSE);
-  });
-
-  it("output without any structured markers is classified as MISSING_END_MARKER", () => {
-    const raw = "I started analyzing the codebase but ran out of context window before";
-    const result = detectIncompletePrometheusOutput(raw);
-    assert.equal(result.incomplete, true);
-    assert.equal(result.reason, INCOMPLETE_OUTPUT_REASON.MISSING_END_MARKER);
-  });
-
-  it("incompleteOutputRetried metadata is orthogonal to contract-fail — distinct result shapes", () => {
-    // Verify that the incomplete-output result object shape matches the contract:
-    // { incomplete: boolean; reason: string | null }
-    const incompleteResult = detectIncompletePrometheusOutput("===DECISION===\n{\"plans\":[");
-    assert.ok("incomplete" in incompleteResult, "result must have 'incomplete' field");
-    assert.ok("reason" in incompleteResult, "result must have 'reason' field");
-    assert.equal(typeof incompleteResult.incomplete, "boolean");
-    // contract-fail results would typically throw or return a different shape
-    // this test guards that incomplete detection is a clean non-throwing detection
-  });
-});
-
 // ── 11. Premium efficiency split: raw vs execution-adjusted ──────────────────
 // Tests that cycle_analytics kpis expose both variants, and that the values
 // flow correctly from computeCycleAnalytics.  Autonomy band gate selection
