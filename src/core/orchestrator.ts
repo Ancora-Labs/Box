@@ -147,6 +147,7 @@ export const ORCHESTRATOR_STATUS = Object.freeze({
  *   1. BUDGET_ELIGIBILITY    — hard short-circuit; prevents expensive downstream reads
  *   2. GUARDRAIL_PAUSE       — system-level safety valve; checked before governance logic
  *   3. GOVERNANCE_FREEZE     — policy freeze overrides all planning gates
+ *   3.25 CLOUD_AGENT_GOVERNANCE — repository-level cloud-agent governance profile validation
  *   4. LINEAGE_CYCLE         — structural integrity before scheduling canary/debt checks
  *   5. GOVERNANCE_CANARY     — canary breach triggers rollback; evaluated before ledger ops
  *   6. CARRY_FORWARD_DEBT    — outstanding critical debt blocks new dispatch
@@ -163,6 +164,7 @@ export const GATE_PRECEDENCE = Object.freeze({
   GUARDRAIL_PAUSE:             2,
   FORCE_CHECKPOINT:            3.5,
   GOVERNANCE_FREEZE:           3,
+  CLOUD_AGENT_GOVERNANCE:      3.25,
   LINEAGE_CYCLE:               4,
   GOVERNANCE_CANARY:           5,
   CARRY_FORWARD_DEBT:          6,
@@ -198,6 +200,7 @@ export const BLOCK_REASON = Object.freeze({
   GOVERNANCE_FREEZE_ACTIVE:       "governance_freeze_active",
   LINEAGE_CYCLE_DETECTED:         "lineage_cycle_detected",
   GOVERNANCE_CANARY_BREACH:       "governance_canary_breach",
+  CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION: "cloud_agent_governance_policy_violation",
   CRITICAL_DEBT_OVERDUE:          "critical_debt_overdue",
   MANDATORY_DRIFT_DEBT_UNRESOLVED:"mandatory_drift_debt_unresolved",
   PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",
@@ -230,11 +233,140 @@ const ATHENA_GOVERNANCE_CORRECTION_TOKEN_MAP = Object.freeze({
     blockReason: BLOCK_REASON.GOVERNANCE_CANARY_BREACH,
     gateKey: "GOVERNANCE_CANARY",
   },
+  [BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION]: {
+    blockReason: BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION,
+    gateKey: "CLOUD_AGENT_GOVERNANCE",
+  },
   [BLOCK_REASON.CRITICAL_DEBT_OVERDUE]: {
     blockReason: BLOCK_REASON.CRITICAL_DEBT_OVERDUE,
     gateKey: "CARRY_FORWARD_DEBT",
   },
 } as const);
+
+const CLOUD_AGENT_ALLOWED_SETUP_JOB_KEYS = new Set([
+  "steps",
+  "permissions",
+  "runs-on",
+  "services",
+  "snapshot",
+  "timeout-minutes",
+]);
+
+export interface CloudAgentGovernanceProfileContract {
+  profilePath: string;
+  loaded: boolean;
+  workflowDispatchEnabled: boolean;
+  pullRequestEnabled: boolean;
+  setupJobPresent: boolean;
+  setupJobKeys: string[];
+  validationTools: string[];
+  violations: string[];
+}
+
+export async function readCloudAgentGovernanceProfileContract(config): Promise<CloudAgentGovernanceProfileContract> {
+  const profilePath = String(
+    config?.paths?.copilotSetupWorkflowFile
+    || path.join(String(config?.rootDir || process.cwd()), ".github", "workflows", "copilot-setup-steps.yml")
+  );
+  const result: CloudAgentGovernanceProfileContract = {
+    profilePath,
+    loaded: false,
+    workflowDispatchEnabled: false,
+    pullRequestEnabled: false,
+    setupJobPresent: false,
+    setupJobKeys: [],
+    validationTools: [],
+    violations: [],
+  };
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(profilePath, "utf8");
+    result.loaded = true;
+  } catch {
+    result.violations.push("profile_missing");
+    return result;
+  }
+
+  const lines = raw.split(/\r?\n/);
+  const trimComment = (line: string): string => String(line || "").replace(/\s+#.*$/, "");
+  const keyMatch = (line: string): { indent: number; key: string } | null => {
+    const m = /^(\s*)([A-Za-z0-9_-]+)\s*:/.exec(trimComment(line));
+    if (!m) return null;
+    return { indent: m[1].length, key: m[2] };
+  };
+
+  const onLineIndex = lines.findIndex((line) => /^\s*on\s*:/i.test(trimComment(line)));
+  if (onLineIndex >= 0) {
+    const onMatch = keyMatch(lines[onLineIndex]);
+    const onIndent = onMatch ? onMatch.indent : 0;
+    for (let i = onLineIndex + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!String(line || "").trim() || /^\s*#/.test(line)) continue;
+      const km = keyMatch(line);
+      if (!km) continue;
+      if (km.indent <= onIndent) break;
+      if (km.key === "workflow_dispatch") result.workflowDispatchEnabled = true;
+      if (km.key === "pull_request") result.pullRequestEnabled = true;
+    }
+  }
+  if (!result.workflowDispatchEnabled) result.violations.push("workflow_approval_missing_workflow_dispatch");
+  if (!result.pullRequestEnabled) result.violations.push("workflow_approval_missing_pull_request");
+
+  const setupJobIndex = lines.findIndex((line) => /^\s*copilot-setup-steps\s*:/i.test(trimComment(line)));
+  if (setupJobIndex < 0) {
+    result.violations.push("setup_job_missing");
+    return result;
+  }
+  result.setupJobPresent = true;
+  const setupJobMatch = keyMatch(lines[setupJobIndex]);
+  const setupJobIndent = setupJobMatch ? setupJobMatch.indent : 0;
+
+  let immediateChildIndent = -1;
+  for (let i = setupJobIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!String(line || "").trim() || /^\s*#/.test(line)) continue;
+    const km = keyMatch(line);
+    if (!km) continue;
+    if (km.indent <= setupJobIndent) break;
+    if (immediateChildIndent === -1) immediateChildIndent = km.indent;
+    if (km.indent === immediateChildIndent) {
+      result.setupJobKeys.push(km.key);
+      if (!CLOUD_AGENT_ALLOWED_SETUP_JOB_KEYS.has(km.key)) {
+        result.violations.push(`setup_job_unsupported_key:${km.key}`);
+      }
+    }
+  }
+
+  for (let i = setupJobIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    const km = keyMatch(line);
+    if (km && km.indent <= setupJobIndent) break;
+    const runInline = /^(\s*)run\s*:\s*(.+)\s*$/i.exec(trimComment(line));
+    if (!runInline) continue;
+    const runIndent = runInline[1].length;
+    const runValue = String(runInline[2] || "").trim();
+    if (runValue === "|" || runValue === ">") {
+      for (let j = i + 1; j < lines.length; j++) {
+        const nestedLine = lines[j];
+        const nestedKey = keyMatch(nestedLine);
+        if (nestedKey && nestedKey.indent <= runIndent) break;
+        if (/^\s*-\s+/.test(nestedLine)) break;
+        const cmd = String(nestedLine || "").trim();
+        if (!cmd || cmd.startsWith("#")) continue;
+        result.validationTools.push(cmd);
+      }
+    } else if (runValue) {
+      result.validationTools.push(runValue);
+    }
+  }
+
+  if (result.validationTools.length === 0) {
+    result.violations.push("validation_tools_missing");
+  }
+
+  return result;
+}
 
 /**
  * Parse Athena correction text and map governance correction tokens to a
@@ -901,6 +1033,29 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       gateKey: "GOVERNANCE_FREEZE",
       gateIndex: GATE_PRECEDENCE.GOVERNANCE_FREEZE,
     };
+  }
+
+  if (config?.runtime?.cloudAgentGovernanceGateEnabled !== false) {
+    try {
+      const cloudAgentProfile = await readCloudAgentGovernanceProfileContract(config);
+      if (cloudAgentProfile.violations.length > 0) {
+        const firstViolation = cloudAgentProfile.violations[0];
+        const detail = `${firstViolation};non_retryable=true`;
+        return {
+          blocked: true,
+          reason: `${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}:${detail}`,
+          action: undefined,
+          dispatchBlockReason: `${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}:${detail}`,
+          graphResult: null,
+          cycleId,
+          budgetEligibility,
+          gateKey: "CLOUD_AGENT_GOVERNANCE",
+          gateIndex: GATE_PRECEDENCE.CLOUD_AGENT_GOVERNANCE,
+        };
+      }
+    } catch (cloudAgentErr) {
+      warn(`[orchestrator] cloud-agent governance profile gate failed (non-fatal): ${String(cloudAgentErr?.message || cloudAgentErr)}`);
+    }
   }
 
   const graphInput = Array.isArray(normalizedPlans)

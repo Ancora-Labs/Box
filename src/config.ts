@@ -388,6 +388,10 @@ export async function loadConfig(): Promise<Config> {
     paths: {
       progressFile: path.join(rootDir, fileConfig.progressFile || "state/progress.txt"),
       policyFile: path.join(rootDir, fileConfig.policyFile || "policy.json"),
+      copilotSetupWorkflowFile: path.join(
+        rootDir,
+        fileConfig.paths?.copilotSetupWorkflowFile || ".github/workflows/copilot-setup-steps.yml"
+      ),
       workspaceDir: path.join(rootDir, fileConfig.workspaceDir || ".box-work"),
       stateDir: path.join(rootDir, "state"),
       roadmapFile: path.join(rootDir, "state", "roadmap.json"),
