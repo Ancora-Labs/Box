@@ -1863,6 +1863,7 @@ describe("pipeline progress — terminology drift prevention (stage IDs)", () =>
       GOVERNANCE_FREEZE_ACTIVE:       "governance_freeze_active",
       LINEAGE_CYCLE_DETECTED:         "lineage_cycle_detected",
       GOVERNANCE_CANARY_BREACH:       "governance_canary_breach",
+      CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION: "cloud_agent_governance_policy_violation",
       CRITICAL_DEBT_OVERDUE:          "critical_debt_overdue",
       MANDATORY_DRIFT_DEBT_UNRESOLVED:"mandatory_drift_debt_unresolved",
       PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",

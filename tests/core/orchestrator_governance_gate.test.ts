@@ -202,6 +202,55 @@ describe("orchestrator governance correction token mapping", () => {
     ]);
     assert.equal(reason, null);
   });
+
+  it("maps cloud-agent governance policy token to canonical dispatchBlockReason", () => {
+    const reason = resolveAthenaCorrectionDispatchBlockReason([
+      "Pre-dispatch governance state infeasible (cloud_agent_governance_policy_violation) — resolve setup profile before dispatch",
+    ]);
+    assert.equal(
+      reason,
+      `${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}:athena_correction_token=${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}`,
+    );
+  });
+});
+
+describe("orchestrator governance gate — cloud-agent profile", () => {
+  it("blocks dispatch when copilot setup workflow violates approval policy", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-gate-cloud-agent-"));
+    const workflowDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-cloud-agent-profile-"));
+    const workflowPath = path.join(workflowDir, "copilot-setup-steps.yml");
+    try {
+      await fs.writeFile(
+        workflowPath,
+        [
+          "name: Copilot Setup Steps",
+          "on:",
+          "  workflow_dispatch:",
+          "jobs:",
+          "  copilot-setup-steps:",
+          "    runs-on: ubuntu-latest",
+          "    steps:",
+          "      - name: Install dependencies",
+          "        run: npm ci",
+        ].join("\n"),
+        "utf8",
+      );
+      const config = {
+        paths: { stateDir, copilotSetupWorkflowFile: workflowPath },
+        env: { targetRepo: "CanerDoqdu/Box" },
+        canary: { enabled: false },
+        systemGuardian: { enabled: false },
+        governanceFreeze: { enabled: false, manualOverrideActive: false },
+      };
+      const result = await evaluatePreDispatchGovernanceGate(config, [], "cloud-agent-approval-policy-block");
+      assert.equal(result.blocked, true);
+      assert.ok(String(result.reason || "").startsWith(`${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}:`));
+      assert.equal(result.gateIndex, GATE_PRECEDENCE.CLOUD_AGENT_GOVERNANCE);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+      await fs.rm(workflowDir, { recursive: true, force: true });
+    }
+  });
 });
 
 

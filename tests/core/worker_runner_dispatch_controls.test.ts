@@ -434,3 +434,21 @@ describe("worker_runner — realized ROI dispatch controls", () => {
     assert.ok(result.model, "still returns a model");
   });
 });
+
+describe("worker_runner — non-retryable policy block classification", () => {
+  it("classifies cloud-agent governance policy violation as non-retryable", async () => {
+    const { isNonRetryablePolicyBlockReason } = await import("../../src/core/worker_runner.js");
+    assert.equal(
+      isNonRetryablePolicyBlockReason("cloud_agent_governance_policy_violation:workflow_approval_missing_pull_request;non_retryable=true"),
+      true
+    );
+  });
+
+  it("negative path: does not classify unrelated block reason as non-retryable", async () => {
+    const { isNonRetryablePolicyBlockReason } = await import("../../src/core/worker_runner.js");
+    assert.equal(
+      isNonRetryablePolicyBlockReason("verification_gate_missing_artifact"),
+      false
+    );
+  });
+});

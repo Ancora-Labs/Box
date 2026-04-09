@@ -44,7 +44,7 @@ import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION, resolveEscalation
 import { buildTaskFingerprint, buildLineageId, LINEAGE_ENTRY_STATUS } from "./lineage_graph.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 import { classifyFailure, classifyExitCode } from "./failure_classifier.js";
-import { resolveRetryAction, persistRetryMetric } from "./retry_strategy.js";
+import { resolveRetryAction, persistRetryMetric, RETRY_ACTION, RETRY_STRATEGY_SCHEMA_VERSION } from "./retry_strategy.js";
 import { filterMemoryEntriesByTrust, isPrivilegedMemoryRequester, buildMemoryHitRecord } from "./trust_boundary.js";
 import type { MemoryHitRecord } from "./trust_boundary.js";
 import { emitEvent } from "./logger.js";
@@ -1389,6 +1389,15 @@ export function parseWorkerResponse(stdout, stderr) {
   };
 }
 
+export function isNonRetryablePolicyBlockReason(reason: unknown): boolean {
+  const text = String(reason || "").trim().toLowerCase();
+  if (!text) return false;
+  if (text.startsWith("cloud_agent_governance_policy_violation:")) return true;
+  if (text.includes("non_retryable=true")) return true;
+  if (text.startsWith("tool_policy_denied:hook_deny_")) return true;
+  return false;
+}
+
 // ── Main Worker Conversation ─────────────────────────────────────────────────
 
 export async function runWorkerConversation(config, roleName, instruction, history = [], sessionState: WorkerSessionState = {}, _token?: CancellationToken | null) {
@@ -2222,6 +2231,9 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   let failureClassification = null;
   let retryDecision = null;
   if (parsed.status === "error" || parsed.status === "blocked" || parsed.status === "partial") {
+    const nonRetryablePolicyBlock = parsed.status === "blocked"
+      && isNonRetryablePolicyBlockReason(parsed.dispatchBlockReason);
+
     // Derive blockingReasonClass from the escalation that was persisted (best-effort)
     let derivedRc = null;
     if (parsed.status === "blocked") {
@@ -2234,6 +2246,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
         derivedRc = BLOCKING_REASON_CLASS.MAX_REWORK_EXHAUSTED;
       } else if (/verification gate/i.test(parsed.summary)) {
         derivedRc = BLOCKING_REASON_CLASS.VERIFICATION_GATE;
+      } else if (nonRetryablePolicyBlock) {
+        derivedRc = BLOCKING_REASON_CLASS.POLICY_VIOLATION;
       } else if (/role_capability_check_failed|role capability/i.test(parsed.dispatchBlockReason || "")) {
         derivedRc = BLOCKING_REASON_CLASS.POLICY_VIOLATION;
       }
@@ -2251,15 +2265,34 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
       // Resolve adaptive retry decision based on failure class (non-critical)
       try {
-        const rd = resolveRetryAction(
-          cfResult.classification.primaryClass,
-          Number(instruction.reworkAttempt || 0),
-          config,
-          instruction.taskId || null
-        );
-        if (rd.ok) {
-          retryDecision = rd.decision;
-          persistRetryMetric(config, rd.decision);
+        if (nonRetryablePolicyBlock) {
+          retryDecision = {
+            schemaVersion: RETRY_STRATEGY_SCHEMA_VERSION,
+            taskId: instruction.taskId != null ? String(instruction.taskId) : null,
+            failureClass: cfResult.classification.primaryClass,
+            attempts: Number(instruction.reworkAttempt || 0),
+            retryAction: RETRY_ACTION.ESCALATE,
+            cooldownUntilMs: null,
+            cooldownMs: null,
+            escalationTarget: "daemon_queue",
+            reworkQueue: null,
+            verificationStep: null,
+            strategyUsed: "adaptive",
+            reason: `non-retryable policy block: ${String(parsed.dispatchBlockReason || "unknown")}`,
+            decidedAt: new Date().toISOString(),
+          };
+          persistRetryMetric(config, retryDecision);
+        } else {
+          const rd = resolveRetryAction(
+            cfResult.classification.primaryClass,
+            Number(instruction.reworkAttempt || 0),
+            config,
+            instruction.taskId || null
+          );
+          if (rd.ok) {
+            retryDecision = rd.decision;
+            persistRetryMetric(config, rd.decision);
+          }
         }
       } catch { /* non-fatal — retry resolution must never block worker results */ }
     }
