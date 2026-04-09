@@ -18,7 +18,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { readJson, readJsonSafe, READ_JSON_REASON, writeJson, spawnAsync } from "./fs_utils.js";
-import { appendProgress } from "./state_tracker.js";
+import { appendProgress, loadCapabilityExecutionSummary } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { chatLog, warn } from "./logger.js";
 import { normalizeDecisionQualityLabel, DECISION_QUALITY_LABEL, PREMORTEM_RISK_LEVEL, computeReviewerPrecisionRecall } from "./athena_reviewer.js";
@@ -454,8 +454,8 @@ export async function reconcileLearnedPoliciesWithImpact(stateDir: string, outco
  *
  * Return contract:
  *   { totalPlans, completedCount, projectHealth, workerOutcomes, waves, dispatches,
- *     requestBudget, decisionQuality, athenaPlanReview, timestamp, metricsSource,
- *     degraded, degradedReason }
+ *     requestBudget, decisionQuality, athenaPlanReview, capabilityExecutionSummary,
+ *     timestamp, metricsSource, degraded, degradedReason }
  *
  *   degraded:      true when a critical source file is absent or invalid.
  *   degradedReason: OUTCOME_DEGRADED_REASON code or null.
@@ -771,6 +771,15 @@ export async function collectCycleOutcomes(config) {
     }
   }
 
+  // ── Capability execution summary from capability traces ──────────────────────
+  // Loaded from state/capability_execution_traces.json and included in the return
+  // value so postmortem analysis can audit which capabilities actually executed
+  // during the cycle (not just present in source).
+  let capabilityExecutionSummary = null;
+  try {
+    capabilityExecutionSummary = await loadCapabilityExecutionSummary(config);
+  } catch { /* no trace data — degrade gracefully */ }
+
   return {
     totalPlans:      plans.length,
     completedCount:  completedTasks.length,
@@ -794,6 +803,7 @@ export async function collectCycleOutcomes(config) {
     requestBudget,
     decisionQuality,
     athenaPlanReview,
+    capabilityExecutionSummary,
     dispatchBlockReason,
     timestamp: new Date().toISOString(),
     // Athena-gated metadata fields

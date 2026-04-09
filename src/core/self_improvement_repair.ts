@@ -13,6 +13,7 @@ import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { warn } from "./logger.js";
 import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
+import { recordCapabilityExecution } from "./state_tracker.js";
 
 // ── Gate decisions ──────────────────────────────────────────────────────────
 
@@ -264,6 +265,15 @@ export async function persistSelfImprovementDecision(config, phase, analysis, co
 
   // Also write latest decision for quick access
   await writeJson(path.join(stateDir, "self_improvement_latest.json"), record);
+
+  // Trace: governance gate evaluation for self-improvement — proves this gate was evaluated.
+  try {
+    await recordCapabilityExecution(
+      config,
+      "self-improvement-gate-evaluation",
+      `phase=${phase} gateDecision=${String(analysis?.gateDecision || "unknown").slice(0, 80)}`,
+    );
+  } catch { /* trace write is non-critical */ }
 
   return record;
 }

@@ -20,7 +20,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { appendProgress, appendAlert, ALERT_SEVERITY, appendGovernanceBlockEvent, recordCapabilityExecution } from "./state_tracker.js";
-import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest, createCancellationToken } from "./daemon_control.js";
+import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest, createCancellationToken, readDaemonPid } from "./daemon_control.js";
 import type { CancellationToken } from "./daemon_control.js";
 import { loadConfig } from "../config.js";
 import { runJesusCycle, appendJesusOutcomeLedger, buildJesusDecisionOutcome } from "./jesus_supervisor.js";
@@ -108,7 +108,7 @@ import { evaluateSelfDevExit } from "./self_dev_exit_monitor.js";
 import { validatePlanEvidenceCoupling } from "./evidence_envelope.js";
 import { runResearchScout } from "./research_scout.js";
 import { runResearchSynthesizer, persistBenchmarkEntry } from "./research_synthesizer.js";
-import { buildReplayClosureEvidence, CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS, hasVerificationReportEvidence } from "./verification_gate.js";
+import { buildReplayClosureEvidence, CANONICAL_MAIN_BRANCH_REPLAY_COMMANDS, hasCleanTreeStatusEvidence, hasVerificationReportEvidence } from "./verification_gate.js";
 import {
   classifyFailure,
   persistFailureClassification,
@@ -2421,12 +2421,44 @@ function getLastWorkerReportedStatus(session, role) {
   return "";
 }
 
-async function recoverStaleWorkerSessions(config, stateDir, sessions) {
+function parseIsoTimestampMs(value) {
+  const ms = Date.parse(String(value || ""));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export function shouldRecoverWorkingSessionAfterDaemonRestart(session, daemonStartedAtIso) {
+  if (String(session?.status || "") !== "working") return false;
+
+  const daemonStartedAtMs = parseIsoTimestampMs(daemonStartedAtIso);
+  if (daemonStartedAtMs === null) return false;
+
+  const timestamps = [
+    session?.startedAt,
+    session?.updatedAt,
+    ...(Array.isArray(session?.history) ? session.history.map((entry) => entry?.at) : []),
+  ]
+    .map(parseIsoTimestampMs)
+    .filter((value) => value !== null);
+
+  if (timestamps.length === 0) return false;
+  return timestamps.every((value) => value < daemonStartedAtMs);
+}
+
+export async function recoverStaleWorkerSessions(config, stateDir, sessions) {
   const recoveredRoles = [];
   const recoveredSignals = new Map<string, string>();
+  const daemonPid = await readDaemonPid(config).catch(() => null);
+  const daemonStartedAtIso = typeof daemonPid?.startedAt === "string" ? daemonPid.startedAt : null;
 
   for (const [role, session] of Object.entries(sessions || {}) as Array<[string, WorkerSessionRecord]>) {
     if (session?.status !== "working") continue;
+
+    if (daemonStartedAtIso && shouldRecoverWorkingSessionAfterDaemonRestart(session, daemonStartedAtIso)) {
+      session.status = "idle";
+      recoveredRoles.push(role);
+      recoveredSignals.set(role, "daemon-restart-stale-working-session");
+      continue;
+    }
 
     const reportedStatus = getLastWorkerReportedStatus(session, role);
     if (isTerminalWorkerStatus(reportedStatus)) {
@@ -2732,6 +2764,20 @@ async function dispatchWorker(config, plan) {
         return rule ? `${i + 1}. ${rule}` : "";
       }).filter(Boolean).join("\n")
     : (plan.verification || "");
+  const targetFiles = batchPlans
+    ? [...new Set(batchPlans.flatMap((item) => {
+        const files = Array.isArray(item?.target_files)
+          ? item.target_files
+          : Array.isArray(item?.targetFiles)
+            ? item.targetFiles
+            : [];
+        return files.map((file) => String(file || "").trim()).filter(Boolean);
+      }))]
+    : (Array.isArray(plan?.target_files)
+        ? plan.target_files
+        : Array.isArray(plan?.targetFiles)
+          ? plan.targetFiles
+          : []).map((file) => String(file || "").trim()).filter(Boolean);
 
   const capabilityCheck = assertRoleCapabilityForTask(config, roleName, taskKind, task);
   if (!capabilityCheck.allowed) {
@@ -2794,7 +2840,8 @@ async function dispatchWorker(config, plan) {
     task,
     context,
     verification,
-    taskKind
+    taskKind,
+    targetFiles,
   });
 
   const workerResult = {
@@ -3801,6 +3848,12 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
   await appendProgress(config, `[AGENT] ◈◈◈ ATHENA ◈◈◈  req#${_cycleRequests + 1} this cycle`);
   const athenaPremiumEvent = await spendPremium("athena", "plan_review", { pendingOutcome: true });
   await safeUpdatePipelineProgress(config, "athena_reviewing", "Athena reviewing Prometheus plan");
+  // Trace: Athena review entry — proves Athena was invoked this cycle.
+  await recordCapabilityExecution(
+    config,
+    "athena-review-entry",
+    `planCount=${Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0} cycleReqs=${_cycleRequests}`,
+  );
   let planReview;
   try {
     planReview = await runAthenaPlanReview(config, prometheusAnalysis);
@@ -3928,6 +3981,12 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
   markPremiumOutcome(athenaPremiumEvent.eventId, true);
   await safeUpdatePipelineProgress(config, "athena_approved", "Athena approved the plan");
   await appendProgress(config, `[ATHENA] ✓ Done — plan approved — requests this cycle: ${_cycleRequests}`);
+  // Trace: Athena review exit — proves Athena completed and approved this cycle.
+  await recordCapabilityExecution(
+    config,
+    "athena-review-exit",
+    `approved=true autoApproved=${String((planReview as any)?.autoApproved ?? false)} overallScore=${String((planReview as any)?.overallScore ?? "n/a")}`,
+  );
 
   // Record that Athena's gate feasibility check was invoked this cycle.
   await recordCapabilityExecution(
@@ -4183,6 +4242,12 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
         }
         return;
       }
+      // Gate passed — record execution evidence so Jesus can prove evaluation occurred.
+      await recordCapabilityExecution(
+        config,
+        "governance-gate-evaluation",
+        `blocked=false planCount=${plans.length}`,
+      );
     } catch (err) {
       warn(`[orchestrator] Pre-dispatch governance gate failed (non-fatal): ${String(err?.message || err)}`);
       emitEvent(EVENTS.ORCHESTRATION_HEALTH_DEGRADED, EVENT_DOMAIN.ORCHESTRATION, cycleId, {
@@ -4798,6 +4863,12 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
       phase: "start",
       batch,
     });
+    // Trace: worker dispatch invocation — proves dispatchWorker was invoked for this batch.
+    await recordCapabilityExecution(
+      config,
+      "worker-dispatch-invocation",
+      `role=${String(batch?.role || "unknown")} batch=${workersDone + 1}/${workerBatches.length}`,
+    );
 
     let workerResult;
     let transientRetries = 0;
@@ -5705,7 +5776,7 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
       const status = String(row?.status || "").toLowerCase();
       if (status !== "done" && status !== "success") return false;
       if (row?.dispatchContract?.doneWorkerWithCleanTreeStatusEvidence === true) return true;
-      return /CLEAN_TREE_STATUS\s*=\s*clean\b/i.test(String(row?.verificationEvidence || ""));
+      return hasCleanTreeStatusEvidence(String(row?.verificationEvidence || ""));
     }).length;
     const seamChecks = {
       prometheus: {
@@ -5730,7 +5801,7 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
         pass: doneWorkerCleanTreeCount > 0,
         failReasons: doneWorkerCleanTreeCount > 0
           ? []
-          : ["no done/success worker produced CLEAN_TREE_STATUS=clean evidence"],
+          : ["no done/success worker produced accepted clean-tree evidence (global clean or task-scoped clean)"],
       },
       dispatchBlockReason: {
         pass: seamProbe.criteria.dispatchBlockReasonOutcomes.pass === true,
