@@ -971,3 +971,94 @@ describe("collectCycleOutcomes — legacy evolution_progress fallback uses named
       "degradedReason must be CANONICAL_ARTIFACT_ABSENT when canonical file is absent");
   });
 });
+
+// ── capabilityExecutionSummary field ──────────────────────────────────────────
+
+describe("collectCycleOutcomes — capabilityExecutionSummary absent traces", () => {
+  let tmpDir;
+  let result;
+
+  before(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-si-captrace-empty-"));
+    await writeTestJson(tmpDir, "prometheus_analysis.json", PROMETHEUS_ANALYSIS);
+    await writeTestJson(tmpDir, WORKER_CYCLE_ARTIFACTS_FILE, makeWorkerCycleArtifacts());
+    // Intentionally NO capability_execution_traces.json
+    result = await collectCycleOutcomes(makeConfig(tmpDir));
+  });
+
+  after(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("capabilityExecutionSummary is present in result schema", () => {
+    assert.ok("capabilityExecutionSummary" in result,
+      "result must include capabilityExecutionSummary field");
+  });
+
+  it("capabilityExecutionSummary is non-null even when no trace file exists", () => {
+    assert.ok(result.capabilityExecutionSummary !== null,
+      "capabilityExecutionSummary must not be null — loadCapabilityExecutionSummary returns a fallback");
+  });
+
+  it("capabilityExecutionSummary returns empty observed capabilities when no traces exist", () => {
+    assert.deepEqual(result.capabilityExecutionSummary.observedCapabilities, [],
+      "must return empty observedCapabilities when no traces file is present");
+    assert.equal(result.capabilityExecutionSummary.traceCount, 0);
+    assert.equal(result.capabilityExecutionSummary.recentTraceCount, 0);
+  });
+});
+
+describe("collectCycleOutcomes — capabilityExecutionSummary with traces", () => {
+  let tmpDir;
+  let result;
+
+  before(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-si-captrace-present-"));
+    await writeTestJson(tmpDir, "prometheus_analysis.json", PROMETHEUS_ANALYSIS);
+    await writeTestJson(tmpDir, WORKER_CYCLE_ARTIFACTS_FILE, makeWorkerCycleArtifacts());
+    // Write capability_execution_traces.json with fresh traces
+    await writeTestJson(tmpDir, "capability_execution_traces.json", {
+      traces: [
+        { capability: "athena-review-entry", observedAt: new Date().toISOString(), context: "planCount=2 cycleReqs=1" },
+        { capability: "athena-review-exit", observedAt: new Date().toISOString(), context: "approved=true" },
+        { capability: "governance-gate-evaluation", observedAt: new Date().toISOString(), context: "blocked=false planCount=2" },
+        { capability: "worker-dispatch-invocation", observedAt: new Date().toISOString(), context: "role=evolution-worker batch=1/1" },
+      ]
+    });
+    result = await collectCycleOutcomes(makeConfig(tmpDir));
+  });
+
+  after(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("capabilityExecutionSummary is present and has correct structure", () => {
+    assert.ok("capabilityExecutionSummary" in result);
+    assert.ok(typeof result.capabilityExecutionSummary === "object" && result.capabilityExecutionSummary !== null);
+    assert.ok(Array.isArray(result.capabilityExecutionSummary.observedCapabilities));
+    assert.ok(Array.isArray(result.capabilityExecutionSummary.recentTraces));
+    assert.ok(typeof result.capabilityExecutionSummary.traceCount === "number");
+    assert.ok(typeof result.capabilityExecutionSummary.recentTraceCount === "number");
+  });
+
+  it("capabilityExecutionSummary reflects all 4 written traces", () => {
+    assert.equal(result.capabilityExecutionSummary.traceCount, 4);
+    assert.equal(result.capabilityExecutionSummary.recentTraceCount, 4);
+  });
+
+  it("capabilityExecutionSummary observedCapabilities includes all canonical trace names", () => {
+    const caps = result.capabilityExecutionSummary.observedCapabilities;
+    assert.ok(caps.includes("athena-review-entry"), "must include athena-review-entry");
+    assert.ok(caps.includes("athena-review-exit"), "must include athena-review-exit");
+    assert.ok(caps.includes("governance-gate-evaluation"), "must include governance-gate-evaluation");
+    assert.ok(caps.includes("worker-dispatch-invocation"), "must include worker-dispatch-invocation");
+  });
+
+  it("capabilityExecutionSummary.observedCapabilityCount matches unique capabilities", () => {
+    assert.equal(
+      result.capabilityExecutionSummary.observedCapabilityCount,
+      result.capabilityExecutionSummary.observedCapabilities.length
+    );
+  });
+});
+

@@ -174,4 +174,22 @@ describe("persistSelfImprovementDecision", () => {
     assert.equal(log.entries.length, 2);
     assert.equal(log.entries[1].phase, "health_audit");
   });
+
+  it("writes a capability execution trace for the governance gate evaluation", async () => {
+    const config = { paths: { stateDir: tmpDir } };
+
+    await persistSelfImprovementDecision(config, "repair", {
+      gateDecision: "REPLAN_ONCE",
+      gateReason: "trace-test",
+    }, {});
+
+    const traceRaw = await fs.readFile(path.join(tmpDir, "capability_execution_traces.json"), "utf8");
+    const traceData = JSON.parse(traceRaw);
+    assert.ok(Array.isArray(traceData.traces), "traces must be an array");
+    const siTrace = traceData.traces.find((t) => t.capability === "self-improvement-gate-evaluation");
+    assert.ok(siTrace, "must write a self-improvement-gate-evaluation trace");
+    assert.ok(siTrace.context.includes("repair"), "trace context must include phase name");
+    assert.ok(siTrace.context.includes("REPLAN_ONCE"), "trace context must include gate decision");
+  });
 });
+
