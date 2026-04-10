@@ -60,7 +60,7 @@ import { appendCapacityEntry } from "./capacity_scoreboard.js";
 import { computeCapabilityDelta } from "./delta_analytics.js";
 import { evaluateRetune } from "./strategy_retuner.js";
 import { compileLessonsToPolicies } from "./learning_policy_compiler.js";
-import { assignWorkersToPlans, enforceLaneDiversity, evaluateSpecializationAdmissionGate, computeTopologyFeasibility, buildLanePerformanceFromCycleTelemetry, buildReroutePenaltyLedger, SPECIALIZATION_ADMISSION_MAX_BLOCK_CYCLES } from "./capability_pool.js";
+import { assignWorkersToPlans, enforceLaneDiversity, evaluateSpecializationAdmissionGate, computeTopologyFeasibility, buildLanePerformanceFromCycleTelemetry, buildReroutePenaltyLedger, SPECIALIZATION_ADMISSION_MAX_BLOCK_CYCLES, getLaneScore, computeAdaptiveSpecialistFillThreshold } from "./capability_pool.js";
 import { runDoctor } from "./doctor.js";
 import { validateAllPlans, validatePacketBatchAdmission, applyDispatchBoundaryHardCap, bindNamedVerificationTargets } from "./plan_contract_validator.js";
 import {
@@ -72,7 +72,7 @@ import {
 import { isGovernanceCanaryBreachActive } from "./governance_canary.js";
 import { executeRollback, ROLLBACK_LEVEL, ROLLBACK_TRIGGER } from "./rollback_engine.js";
 import { initializeAggregateLiveLog, appendAggregateLiveLogSync } from "./live_log.js";
-import { buildRoleExecutionBatches, buildTokenFirstBatches, measureWaveBoundaryIdleGap, shouldPackAcrossWaveBoundary } from "./worker_batch_planner.js";
+import { buildRoleExecutionBatches, buildTokenFirstBatches, measureWaveBoundaryIdleGap, shouldPackAcrossWaveBoundary, estimatePlanTokens, getUsableModelContextTokens, DEFAULT_SPECIALIST_FILL_THRESHOLD } from "./worker_batch_planner.js";
 import { computeFrontier } from "./dag_scheduler.js";
 import { agentFileExists, nameToSlug, validateCriticalAgentContracts } from "./agent_loader.js";
 import { getRoleRegistry, assertRoleCapabilityForTask, isAthenaReviewOrPostmortemTask } from "./role_registry.js";
@@ -4892,22 +4892,51 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
     for (const { plan, selection } of (capabilityPoolResult.assignments || [])) {
       poolRoleByPlan.set(plan, String(selection?.role || "evolution-worker"));
     }
+
+    // Group rerouted plans by their Athena-assigned role so each specialist role
+    // gets one telemetry record (matching buildTokenFirstBatches convention) with
+    // fillRatio computed from the combined token estimate of that role group.
+    const reroutedByAthenaRole = new Map<string, { lane: string; plans: any[] }>();
+    for (const [plan, poolRole] of poolRoleByPlan.entries()) {
+      const athenaRole = String((plan as any)?._batchWorkerRole || (plan as any)?.role || "evolution-worker");
+      if (athenaRole !== poolRole) {
+        const lane = String((plan as any)?._capabilityLane || "implementation");
+        if (!reroutedByAthenaRole.has(athenaRole)) {
+          reroutedByAthenaRole.set(athenaRole, { lane, plans: [] });
+        }
+        reroutedByAthenaRole.get(athenaRole)!.plans.push(plan);
+      }
+    }
+
+    // Resolve usable context window size for fill-ratio computation, matching
+    // the same model resolution used by buildTokenFirstBatches.
+    const athenaDefaultModel = (config as any)?.copilot?.defaultModel || "Claude Sonnet 4.6";
+    const athenaUsableTokens = getUsableModelContextTokens(config, athenaDefaultModel);
+    const athenaBaseThreshold = DEFAULT_SPECIALIST_FILL_THRESHOLD;
+
     const athenaRerouteReasons: Array<{
       role: string; lane: string; reasonCode: string;
       fillRatio: number; laneScore: number; adaptiveFillThreshold: number;
     }> = [];
-    for (const [plan, poolRole] of poolRoleByPlan.entries()) {
-      const athenaRole = String((plan as any)?._batchWorkerRole || (plan as any)?.role || "evolution-worker");
-      if (athenaRole !== poolRole) {
-        athenaRerouteReasons.push({
-          role: athenaRole,
-          lane: String((plan as any)?._capabilityLane || "implementation"),
-          reasonCode: "below_fill_threshold",
-          fillRatio: 1.0,
-          laneScore: 0.5,
-          adaptiveFillThreshold: 1.0,
-        });
-      }
+    for (const [athenaRole, { lane, plans: rolePlans }] of reroutedByAthenaRole.entries()) {
+      const groupTokens = rolePlans.reduce((sum: number, p: any) => sum + estimatePlanTokens(p), 0);
+      const computedFillRatio = athenaUsableTokens > 0
+        ? Math.round((groupTokens / athenaUsableTokens) * 1000) / 1000
+        : 0;
+      const computedLaneScore = getLaneScore(lanePerformanceFromCycle, lane);
+      const computedAdaptiveThreshold = computeAdaptiveSpecialistFillThreshold(
+        athenaBaseThreshold,
+        lane,
+        lanePerformanceFromCycle,
+      );
+      athenaRerouteReasons.push({
+        role: athenaRole,
+        lane,
+        reasonCode: "below_fill_threshold",
+        fillRatio: computedFillRatio,
+        laneScore: computedLaneScore,
+        adaptiveFillThreshold: computedAdaptiveThreshold,
+      });
     }
 
     firstBatch.specialistReroutes = athenaRerouteReasons.map(r => r.role);

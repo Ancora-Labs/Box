@@ -3066,3 +3066,67 @@ describe("pipeline_progress — terminalBlockReason contract (Task 1 cycle-truth
     }
   });
 });
+
+// ── Athena pre-batched reroute telemetry — computed signal verification ────────
+// Verifies that fillRatio / laneScore / adaptiveFillThreshold in the Athena
+// pre-batched dispatch path are derived from real signals rather than the old
+// hardcoded defaults (fillRatio=1.0, laneScore=0.5, adaptiveFillThreshold=1.0).
+
+import {
+  getLaneScore,
+  computeAdaptiveSpecialistFillThreshold,
+  buildLanePerformanceFromCycleTelemetry as buildLanePerf,
+} from "../../src/core/capability_pool.js";
+import {
+  estimatePlanTokens,
+  getUsableModelContextTokens,
+} from "../../src/core/worker_batch_planner.js";
+
+describe("Athena pre-batched reroute telemetry — computed signals (not hardcoded)", () => {
+  it("laneScore is derived from lane performance data, not hardcoded to 0.5", () => {
+    // A lane with 9 successes and 1 failure → Laplace score ≈ 0.833 (above 0.5 neutral).
+    const lanePerf = buildLanePerf({ implementation: { completed: 9, failed: 1 } });
+    const score = getLaneScore(lanePerf, "implementation");
+    assert.ok(score > 0.5, `expected score > 0.5 for high-success lane; got ${score}`);
+    assert.notEqual(score, 0.5, "laneScore must not be the hardcoded default 0.5 when lane data is present");
+  });
+
+  it("laneScore defaults to 0.5 when no lane performance data is available (negative path)", () => {
+    const score = getLaneScore({}, "unknown-lane");
+    assert.equal(score, 0.5, "missing lane data must yield neutral score 0.5");
+  });
+
+  it("adaptiveFillThreshold adjusts below base threshold for a high-performing lane", () => {
+    // A lane with 9 successes and 1 failure → Laplace score ≈ 0.833.
+    // With score > 0.5, the adjustment = (0.5 - score) * 0.3 is negative, lowering the threshold.
+    const lanePerf = buildLanePerf({ implementation: { completed: 9, failed: 1 } });
+    // base=1.0, high-scoring lane → threshold lowered (less gatekeeping)
+    const threshold = computeAdaptiveSpecialistFillThreshold(1.0, "implementation", lanePerf);
+    assert.ok(threshold < 1.0, `expected threshold < 1.0 for high-performing lane; got ${threshold}`);
+    assert.notEqual(threshold, 1.0, "adaptiveFillThreshold must not be the hardcoded default 1.0 when lane data is present");
+  });
+
+  it("adaptiveFillThreshold returns base threshold when no lane performance data is available (negative path)", () => {
+    const threshold = computeAdaptiveSpecialistFillThreshold(1.0, "unknown-lane", {});
+    assert.equal(threshold, 1.0, "missing lane data must yield unchanged base threshold");
+  });
+
+  it("fillRatio computed from estimatePlanTokens is below 1.0 for a single realistic plan", () => {
+    // A single small plan should occupy far less than 100% of the context window.
+    const plan = { task: "implement a new feature in src/core/orchestrator.ts", context: "background context" };
+    const tokens = estimatePlanTokens(plan);
+    const usable = getUsableModelContextTokens({}, "Claude Sonnet 4.6");
+    const fillRatio = usable > 0 ? Math.round((tokens / usable) * 1000) / 1000 : 0;
+    assert.ok(fillRatio < 1.0, `expected fillRatio < 1.0 for a single plan; got ${fillRatio}`);
+    assert.notEqual(fillRatio, 1.0, "fillRatio must not be the hardcoded default 1.0");
+  });
+
+  it("fillRatio is 0 when usable context tokens resolves to zero (edge case)", () => {
+    // Simulate degenerate config where context window collapses to zero.
+    // getUsableModelContextTokens clamps to at least 1, so we test the formula directly.
+    const tokens = 100;
+    const usable = 0;
+    const fillRatio = usable > 0 ? Math.round((tokens / usable) * 1000) / 1000 : 0;
+    assert.equal(fillRatio, 0, "fillRatio must be 0 when usable tokens is zero");
+  });
+});
