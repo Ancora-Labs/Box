@@ -41,7 +41,7 @@ import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REA
 import { updatePipelineProgress, readPipelineProgress } from "./pipeline_progress.js";
 import { loadEscalationQueue, sortEscalationQueue, processEscalationQueueClosures } from "./escalation_queue.js";
 import { computeCycleSLOs, persistSloMetrics, detectCoupledAlerts, patchSloMetricsReplayEvidence } from "./slo_checker.js";
-import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealthComposite, CYCLE_PHASE, computeRuntimeContractProbe, readCycleAnalytics, evaluateBenchmarkGroundTruth, WORKER_CYCLE_ARTIFACTS_FILE, migrateWorkerCycleArtifacts, selectWorkerCycleRecord } from "./cycle_analytics.js";
+import { computeCycleAnalytics, persistCycleAnalytics, computeCycleHealth, persistCycleHealthComposite, CYCLE_PHASE, computeRuntimeContractProbe, readCycleAnalytics, evaluateBenchmarkGroundTruth, WORKER_CYCLE_ARTIFACTS_FILE, migrateWorkerCycleArtifacts, selectWorkerCycleRecord, generateDeterministicTaskId } from "./cycle_analytics.js";
 import { computeBaselineRecoveryState, persistBaselineMetrics, PARSER_CONFIDENCE_RECOVERY_THRESHOLD } from "./parser_baseline_recovery.js";
 import { computeDispatchStrictness, loadReplayRegressionState, DISPATCH_STRICTNESS } from "./parser_replay_harness.js";
 import {
@@ -1953,6 +1953,9 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
   const workerBatches = applyDispatchBoundaryHardCap(_rawWorkerBatchesResume as any[]) as typeof _rawWorkerBatchesResume;
   if (workerBatches.length === 0) return false;
 
+  // Stamp deterministic task IDs so resume-path artifact events carry non-empty taskIds.
+  stampBatchPlanTaskIds(workerBatches as any[]);
+
   let checkpoint = await readDispatchCheckpoint(config);
   const checkpointMatchesPlanIdentity = checkpointMatchesPlanSet(
     checkpoint,
@@ -2276,6 +2279,44 @@ function extractPlanTaskIds(planLike: any): string[] {
   return [...new Set<string>(ids)];
 }
 
+/**
+ * Derive a short task summary string from a batch object for activity-event
+ * logging.  The batch object itself has no `.task` / `.title` field — those
+ * live on the child plan objects.  This helper joins the first plan's task
+ * text (up to 120 chars) with an ellipsis when multiple plans are present so
+ * the logged `task` field is always non-empty when plans are available.
+ */
+export function extractBatchTaskSummary(batch: any): string {
+  const plans: any[] = Array.isArray(batch?.plans) ? batch.plans : [];
+  if (plans.length === 0) return String(batch?.task || batch?.title || "");
+  const first = String(plans[0]?.task || plans[0]?.title || "").trim().slice(0, 120);
+  return plans.length > 1 ? `${first} (+${plans.length - 1} more)` : first;
+}
+
+/**
+ * Stamp deterministic `task_id` values on every plan in every batch that does
+ * not already carry an explicit `task_id` or `id`.  IDs are generated at
+ * plan-batch time (before dispatch) so they are stable across hot-reload
+ * restarts and resume paths that rebuild batches from the same plan set.
+ *
+ * planOffset tracks the global position across all batches so plans in later
+ * batches receive distinct IDs from plans in earlier batches that happen to
+ * share the same task text.
+ */
+export function stampBatchPlanTaskIds(workerBatches: any[]): void {
+  let planOffset = 0;
+  for (const batch of workerBatches) {
+    const plans: any[] = Array.isArray(batch?.plans) ? batch.plans : [];
+    const role = String(batch?.role || "unknown").trim();
+    for (const plan of plans) {
+      if (!String(plan?.task_id || plan?.id || "").trim()) {
+        plan.task_id = generateDeterministicTaskId(role, planOffset, String(plan?.task || ""));
+      }
+      planOffset += 1;
+    }
+  }
+}
+
 function toLegacySessionsBody(rawSessions: unknown): Record<string, any> {
   if (!rawSessions || typeof rawSessions !== "object" || Array.isArray(rawSessions)) return {};
   const out = { ...(rawSessions as Record<string, any>) };
@@ -2376,6 +2417,7 @@ async function persistWorkerDispatchArtifacts(config, input: {
     if (!cycleRecord.workerSessions[role]) cycleRecord.workerSessions[role] = {};
     const session = cycleRecord.workerSessions[role];
     const taskIds = extractPlanTaskIds(input.batch);
+    const taskSummary = extractBatchTaskSummary(input.batch);
 
     if (input.phase === "start") {
       session.status = "working";
@@ -2384,7 +2426,7 @@ async function persistWorkerDispatchArtifacts(config, input: {
       cycleRecord.workerActivity[role].push({
         at: nowIso,
         status: "working",
-        task: String(input.batch?.task || input.batch?.title || ""),
+        task: taskSummary,
         taskIds,
         wave: Number.isFinite(Number(input.batch?.wave)) ? Number(input.batch.wave) : null,
       });
@@ -2397,7 +2439,7 @@ async function persistWorkerDispatchArtifacts(config, input: {
       cycleRecord.workerActivity[role].push({
         at: nowIso,
         status,
-        task: String(input.batch?.task || input.batch?.title || ""),
+        task: taskSummary,
         taskIds,
         pr: input.workerResult?.pr || null,
         dispatchBlockReason: input.workerResult?.dispatchBlockReason || null,
@@ -2413,8 +2455,8 @@ async function persistWorkerDispatchArtifacts(config, input: {
         at: nowIso,
         status: "recovered",
         signal: String(input.recoveredSignal || "stale"),
-        taskIds: [],
-        wave: null,
+        taskIds,
+        wave: Number.isFinite(Number(input.batch?.wave)) ? Number(input.batch.wave) : null,
       });
     }
 
@@ -4807,6 +4849,13 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
       );
     }
   }
+
+  // ── Stamp deterministic task IDs on all plans at batch time ──────────────
+  // Plans that arrive without a task_id (or id) are assigned a stable
+  // deterministic ID before the first dispatch event fires.  This ensures
+  // workerActivity.taskIds and completedTaskIds are always non-empty when
+  // plans carry task text, regardless of which batching path produced them.
+  stampBatchPlanTaskIds(workerBatches as any[]);
 
   await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${workerBatches.length} worker batch(es)`, {
     workersTotal: workerBatches.length,

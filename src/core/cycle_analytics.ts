@@ -45,6 +45,7 @@
  */
 
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { readJson, writeJson } from "./fs_utils.js";
 import { warn, emitEvent } from "./logger.js";
 import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
@@ -261,6 +262,22 @@ export const WORKER_CYCLE_ARTIFACT_MIGRATION_REASON = Object.freeze({
   INVALID_DATA: "invalid_data",
   UNKNOWN_FUTURE_VERSION: "unknown_future_version",
 });
+
+/**
+ * Generate a short, deterministic task ID from the dispatching role, the
+ * plan's position within the full plan set, and its task description text.
+ *
+ * The result is stable across restarts as long as the plan set does not change
+ * (same role + same position + same text → same id).  It is intentionally
+ * short (12 hex chars) to keep artifact files readable.
+ *
+ * Used by stampBatchPlanTaskIds in orchestrator.ts to backfill plans that do
+ * not carry an explicit task_id from the planner.
+ */
+export function generateDeterministicTaskId(role: string, planIndex: number, taskText: string): string {
+  const input = `${String(role || "unknown").trim()}:${planIndex}:${String(taskText || "").trim().slice(0, 200)}`;
+  return createHash("sha256").update(input).digest("hex").slice(0, 12);
+}
 
 function sanitizeCompletedTaskIds(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
