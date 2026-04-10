@@ -213,6 +213,34 @@ const CI_CRITICAL_TEXT_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
 /** Pattern to detect CI-broken debt in system-learning findings. */
 const CI_SYSTEM_LEARNING_DEBT_PATTERN = /\bci[-_\s]?(?:broken|break|fail(?:ed|ing)?|fix|repair)\b/i;
 
+/**
+ * Maximum age in ms for CI-break findings stored in health_audit_findings.json
+ * before they are suppressed when fresh main-branch CI success evidence exists.
+ *
+ * Set to 2 hours — aligns with the general diagnostics freshness window and
+ * allows short-lived CI flaps to surface without permanently gating healthy runs.
+ */
+export const CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Return true when a health audit finding is a direct CI-break finding emitted
+ * by runSystemHealthAudit (area=ci with a CI repair capability).
+ *
+ * Used by freshness normalization (normalizeStaleCiBreakFindings in prometheus.ts)
+ * to suppress stale CI-break findings when current main-branch CI evidence is healthy.
+ *
+ * Narrower than isCiCriticalMandatoryFinding: targets only the canonical shape
+ * produced by runSystemHealthAudit, not arbitrary pattern-matched text findings.
+ */
+export function isCiBreakFinding(finding: unknown): boolean {
+  if (!finding || typeof finding !== "object") return false;
+  const entry = finding as Record<string, unknown>;
+  const area = String(entry.area || "").trim().toLowerCase();
+  if (area !== "ci") return false;
+  const capability = String(entry.capabilityNeeded || "").trim().toLowerCase();
+  return capability === "ci-fix" || capability === "ci-setup";
+}
+
 export function isCiCriticalMandatoryFinding(finding: unknown): boolean {
   if (!finding || typeof finding !== "object") return false;
   const entry = finding as Record<string, unknown>;

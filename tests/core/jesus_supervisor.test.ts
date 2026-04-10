@@ -1261,3 +1261,55 @@ describe("hasCiSystemLearningDebt", () => {
     assert.equal(hasCiSystemLearningDebt([null, undefined, 42, "string"]), false);
   });
 });
+
+// ── runSystemHealthAudit — CI context in findings for freshness arbitration ────
+
+describe("jesus_supervisor — runSystemHealthAudit CI finding shape", () => {
+  function withTempRepo<T>(fn: (ctx: { stateDir: string }) => Promise<T>): Promise<T> {
+    const repoDir = mkdtempSync(path.join(tmpdir(), "jesus-ci-audit-"));
+    const stateDir = path.join(repoDir, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const previousCwd = process.cwd();
+    return Promise.resolve()
+      .then(() => { process.chdir(repoDir); return fn({ stateDir }); })
+      .finally(() => {
+        process.chdir(previousCwd);
+        rmSync(repoDir, { recursive: true, force: true });
+      });
+  }
+
+  it("emits a ci-fix finding with area=ci when latestMainCi.conclusion is failure", async () => {
+    await withTempRepo(async ({ stateDir }) => {
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        {
+          latestMainCi: { conclusion: "failure", branch: "main", headSha: "abc123", updatedAt: new Date().toISOString() },
+          failedCiRuns: [],
+          pullRequests: [],
+        },
+        {},
+        {},
+      );
+      const ciFinding = findings.find((f: any) => f.area === "ci" && f.capabilityNeeded === "ci-fix");
+      assert.ok(ciFinding, "must emit a ci-fix finding when main CI is failed");
+      assert.equal(ciFinding.severity, "critical");
+    });
+  });
+
+  it("does not emit a ci area finding when latestMainCi.conclusion is success", async () => {
+    await withTempRepo(async ({ stateDir }) => {
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        {
+          latestMainCi: { conclusion: "success", branch: "main", headSha: "def456", updatedAt: new Date().toISOString() },
+          failedCiRuns: [],
+          pullRequests: [],
+        },
+        {},
+        {},
+      );
+      const ciFinding = findings.find((f: any) => f.area === "ci" && f.capabilityNeeded === "ci-fix");
+      assert.equal(ciFinding, undefined, "must NOT emit ci-fix finding when main CI is healthy");
+    });
+  });
+});
