@@ -61,6 +61,7 @@ import {
   OUTPUT_FIDELITY_GATE_FAIL_REASON,
   isCiCriticalMandatoryFinding,
   extractCiEvidenceFromMandatoryFinding,
+  isCiBreakFinding,
   type WaveTaskObject,
 } from "./plan_contract_validator.js";
 import {
@@ -642,6 +643,76 @@ export function enforceCiRepairPacketForMandatoryFindings(
   });
   return { output, injected: true, findingIds };
 }
+
+/**
+ * Freshness-aware normalization for CI-break findings loaded from
+ * health_audit_findings.json at the mandatory finding ingestion boundary.
+ *
+ * When the stored payload carries `latestMainCiConclusion === "success"`, the
+ * main-branch CI was healthy when Jesus wrote the file.  Any CI-break findings
+ * present in that same payload are stale carry-overs from a prior write cycle
+ * (written when the file was last updated with non-empty findings during a
+ * previous broken-CI cycle) and must be suppressed so Prometheus does not force
+ * unnecessary wave-1 CI-fix tasks.
+ *
+ * The check is deliberately narrow: only findings where area="ci" AND
+ * capabilityNeeded ∈ {ci-fix, ci-setup} are suppressed — system-learning or
+ * capability-gap findings that mention CI in their text are retained.
+ *
+ * Pure function — returns a new payload object; does not mutate the input.
+ *
+ * @param payload — raw parsed health_audit_findings.json content
+ * @param nowMs   — current epoch ms for age checks (default: Date.now())
+ * @returns normalized payload, suppression count, and machine-readable reasons
+ */
+export function normalizeStaleCiBreakFindings(
+  payload: unknown,
+  _nowMs: number = Date.now(),
+): { payload: unknown; suppressedCount: number; suppressedReasons: string[] } {
+  if (!payload || typeof payload !== "object") {
+    return { payload, suppressedCount: 0, suppressedReasons: [] };
+  }
+  const obj = payload as Record<string, unknown>;
+  const findings = Array.isArray(obj.findings) ? obj.findings : [];
+  const latestMainCiConclusion = String(obj.latestMainCiConclusion || "").trim().toLowerCase();
+  const auditedAt = String(obj.auditedAt || "").trim();
+
+  // Only suppress when stored CI evidence confirms main was healthy at audit time.
+  // Absent or non-success CI conclusion → pass through unchanged (fail-safe).
+  if (latestMainCiConclusion !== "success") {
+    return { payload, suppressedCount: 0, suppressedReasons: [] };
+  }
+
+  const suppressedReasons: string[] = [];
+  const normalizedFindings = findings.filter((f: unknown) => {
+    if (!isCiBreakFinding(f)) return true; // non-CI-break findings always pass through
+    const entry = f as Record<string, unknown>;
+    suppressedReasons.push(
+      `stale_ci_break_suppressed:area=ci:capabilityNeeded=${String(entry.capabilityNeeded || "")}` +
+      `:latestMainCiConclusion=success:auditedAt=${auditedAt}`,
+    );
+    return false;
+  });
+
+  if (suppressedReasons.length === 0) {
+    return { payload, suppressedCount: 0, suppressedReasons: [] };
+  }
+
+  const normalizedPayload: Record<string, unknown> = {
+    ...obj,
+    findings: normalizedFindings,
+    _staleCiBreakFindingsSuppressed: suppressedReasons.length,
+    _staleCiBreakSuppressedReasons: suppressedReasons,
+  };
+  return {
+    payload: normalizedPayload,
+    suppressedCount: suppressedReasons.length,
+    suppressedReasons,
+  };
+}
+
+// Export the freshness max-age constant so callers (tests, prometheus prompt) can reference it.
+export { CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS } from "./plan_contract_validator.js";
 
 function sanitizePromptLine(value: unknown, maxLen = 220): string {
   const compact = String(value || "")
@@ -4831,7 +4902,15 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
 
   try {
     const healthAuditPayload = await readJson(path.join(stateDir, "health_audit_findings.json"), null);
-    mandatoryFindings = extractMandatoryHealthAuditFindings(healthAuditPayload);
+    const { payload: normalizedHealthPayload, suppressedCount: ciBreakSuppressedCount } =
+      normalizeStaleCiBreakFindings(healthAuditPayload);
+    if (ciBreakSuppressedCount > 0) {
+      await appendProgress(
+        config,
+        `[PROMETHEUS][FRESHNESS] Suppressed ${ciBreakSuppressedCount} stale CI-break finding(s) — main-branch CI was healthy at audit time (latestMainCiConclusion=success)`,
+      );
+    }
+    mandatoryFindings = extractMandatoryHealthAuditFindings(normalizedHealthPayload);
     mandatoryTasksSection = buildMandatoryTasksPromptSection(mandatoryFindings);
     if (mandatoryFindings.length > 0) {
       await appendProgress(

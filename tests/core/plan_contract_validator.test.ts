@@ -26,6 +26,8 @@ import {
   validateAndInjectRolePlans,
   ROLE_PLAN_COVERAGE_MISSING_MARKER_PREFIX,
   ROLE_PLAN_SKELETON_METADATA_SOURCE,
+  isCiBreakFinding,
+  CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS,
 } from "../../src/core/plan_contract_validator.js";
 import { checkForbiddenCommands } from "../../src/core/verification_command_registry.js";
 
@@ -1540,5 +1542,55 @@ describe("lane-aware packet-size defaults", () => {
     const large  = LANE_PACKET_SIZE_DEFAULTS[PACKET_LANE.LARGE].minExecutionTokens;
     assert.ok(small  <= medium, "small must not exceed medium token floor");
     assert.ok(medium <= large,  "medium must not exceed large token floor");
+  });
+});
+
+// ── isCiBreakFinding — freshness-aware CI-break predicate ────────────────────
+
+describe("plan_contract_validator — isCiBreakFinding", () => {
+  it("returns true for canonical ci-fix finding (area=ci, capabilityNeeded=ci-fix)", () => {
+    assert.equal(
+      isCiBreakFinding({ area: "ci", severity: "critical", capabilityNeeded: "ci-fix", finding: "CI broken", remediation: "Fix it" }),
+      true,
+    );
+  });
+
+  it("returns true for canonical ci-setup finding (area=ci, capabilityNeeded=ci-setup)", () => {
+    assert.equal(
+      isCiBreakFinding({ area: "ci", severity: "warning", capabilityNeeded: "ci-setup", finding: "No CI", remediation: "Add CI" }),
+      true,
+    );
+  });
+
+  it("returns false for non-ci area (system-learning finding that mentions CI)", () => {
+    assert.equal(
+      isCiBreakFinding({ area: "system-learning", severity: "warning", capabilityNeeded: "system-improvement", finding: "CI is broken in lessons" }),
+      false,
+    );
+  });
+
+  it("returns false for capability-gap finding with ci area absent", () => {
+    assert.equal(
+      isCiBreakFinding({ area: "capability-gap", severity: "warning", capabilityNeeded: "ci-fix" }),
+      false,
+    );
+  });
+
+  it("negative path: returns false for null or non-object input", () => {
+    assert.equal(isCiBreakFinding(null), false);
+    assert.equal(isCiBreakFinding(undefined), false);
+    assert.equal(isCiBreakFinding("string"), false);
+    assert.equal(isCiBreakFinding(42), false);
+  });
+
+  it("negative path: returns false for ci area with unrelated capability (ci-management)", () => {
+    assert.equal(
+      isCiBreakFinding({ area: "ci", severity: "info", capabilityNeeded: "ci-management" }),
+      false,
+    );
+  });
+
+  it("CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS is exactly 2 hours in ms", () => {
+    assert.equal(CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS, 2 * 60 * 60 * 1000);
   });
 });

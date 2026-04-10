@@ -757,28 +757,39 @@ export async function runJesusCycle(config) {
   chatLog(stateDir, jesusName, "[LIVE] running hierarchical health audit");
   const healthFindings = await runSystemHealthAudit(config, githubState, AthenaCoordination, sessions);
   chatLog(stateDir, jesusName, `[LIVE] health audit complete findings=${healthFindings.length}`);
-  if (healthFindings.length > 0) {
-    const criticalCount = healthFindings.filter(f => f.severity === "critical").length;
-    await appendProgress(config, `[JESUS][AUDIT] ${healthFindings.length} finding(s) — ${criticalCount} critical`);
-    chatLog(stateDir, jesusName, `Health audit: ${healthFindings.length} findings (${criticalCount} critical)`);
 
-    // Persist findings for self-improvement to consume.
-    // capabilityInvocationStatus provides a per-capability record distinguishing
-    // "code present in source" from "actually invoked at runtime this cycle".
-    const capabilityExecutionSummary = await loadCapabilityExecutionSummary(config);
-    const tracedCapabilities = new Set(capabilityExecutionSummary.observedCapabilities);
-    const capabilityInvocationStatus = Object.keys(CAPABILITY_SOURCE_SIGNATURES).map(id => ({
-      capability: id,
-      status: tracedCapabilities.has(id) ? "invoked" : "absent",
-      lastInvokedAt: capabilityExecutionSummary.lastInvokedAtByCapability[id] ?? null,
-    }));
-    await writeJson(path.join(stateDir, "health_audit_findings.json"), {
+  // Always persist the findings file so Prometheus can perform freshness-aware
+  // normalization.  Include latestMainCiConclusion and latestMainCiUpdatedAt so
+  // the normalization layer can detect when a previously-stale CI-break finding
+  // has been superseded by a healthy CI run.
+  {
+    const healthFindingsPayload: Record<string, unknown> = {
       findings: healthFindings,
-      capabilityExecutionSummary,
-      capabilityExecutionTraces: capabilityExecutionSummary.recentTraces,
-      capabilityInvocationStatus,
-      auditedAt: new Date().toISOString()
-    });
+      auditedAt: new Date().toISOString(),
+      latestMainCiConclusion: githubState.latestMainCi?.conclusion ?? null,
+      latestMainCiUpdatedAt: githubState.latestMainCi?.updatedAt ?? null,
+    };
+
+    if (healthFindings.length > 0) {
+      const criticalCount = healthFindings.filter(f => f.severity === "critical").length;
+      await appendProgress(config, `[JESUS][AUDIT] ${healthFindings.length} finding(s) — ${criticalCount} critical`);
+      chatLog(stateDir, jesusName, `Health audit: ${healthFindings.length} findings (${criticalCount} critical)`);
+
+      // Persist capability execution status alongside findings so self-improvement
+      // can distinguish "code present in source" from "actually invoked at runtime".
+      const capabilityExecutionSummary = await loadCapabilityExecutionSummary(config);
+      const tracedCapabilities = new Set(capabilityExecutionSummary.observedCapabilities);
+      const capabilityInvocationStatus = Object.keys(CAPABILITY_SOURCE_SIGNATURES).map(id => ({
+        capability: id,
+        status: tracedCapabilities.has(id) ? "invoked" : "absent",
+        lastInvokedAt: capabilityExecutionSummary.lastInvokedAtByCapability[id] ?? null,
+      }));
+      healthFindingsPayload.capabilityExecutionSummary = capabilityExecutionSummary;
+      healthFindingsPayload.capabilityExecutionTraces = capabilityExecutionSummary.recentTraces;
+      healthFindingsPayload.capabilityInvocationStatus = capabilityInvocationStatus;
+    }
+
+    await writeJson(path.join(stateDir, "health_audit_findings.json"), healthFindingsPayload);
   }
 
   // ── Strategic Calibration — compare previous directive expectations vs reality ──

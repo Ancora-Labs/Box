@@ -70,6 +70,8 @@ import {
   applyDiagnosticsFreshnessTruthToPlanning,
   ROLE_PLAN_COMPLETENESS_ERROR_CODE,
   RolePlanCompletenessError,
+  normalizeStaleCiBreakFindings,
+  CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS,
 } from "../../src/core/prometheus.js";
 import { compilePrompt, markCacheableSegments } from "../../src/core/prompt_compiler.js";
 import {
@@ -5903,5 +5905,129 @@ describe("RolePlanCompletenessError", () => {
       0,
       "no skeleton plans should exist in output when injectMissing=false"
     );
+  });
+});
+
+// ── normalizeStaleCiBreakFindings — freshness-aware CI-break suppression ──────
+
+describe("normalizeStaleCiBreakFindings", () => {
+  const ciBreakFinding = {
+    area: "ci",
+    severity: "critical",
+    capabilityNeeded: "ci-fix",
+    finding: "CI on main is failure",
+    remediation: "Fix CI immediately",
+  };
+
+  const systemLearningFinding = {
+    area: "system-learning",
+    severity: "warning",
+    capabilityNeeded: "system-improvement",
+    finding: "Self-improvement flagged CI has been broken",
+    remediation: "Address in next cycle",
+  };
+
+  const ciSetupFinding = {
+    area: "ci",
+    severity: "warning",
+    capabilityNeeded: "ci-setup",
+    finding: "No CI configured",
+    remediation: "Add GitHub Actions workflow",
+  };
+
+  it("suppresses CI-break findings when latestMainCiConclusion=success", () => {
+    const payload = {
+      findings: [ciBreakFinding, systemLearningFinding],
+      auditedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      latestMainCiConclusion: "success",
+      latestMainCiUpdatedAt: new Date().toISOString(),
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 1, "exactly one CI-break finding should be suppressed");
+    const normalized = result.payload as any;
+    assert.equal(normalized.findings.length, 1, "system-learning finding must be retained");
+    assert.equal(normalized.findings[0].area, "system-learning");
+    assert.equal(normalized._staleCiBreakFindingsSuppressed, 1);
+    assert.ok(Array.isArray(normalized._staleCiBreakSuppressedReasons));
+    assert.ok(result.suppressedReasons[0].includes("stale_ci_break_suppressed"));
+    assert.ok(result.suppressedReasons[0].includes("latestMainCiConclusion=success"));
+  });
+
+  it("suppresses ci-setup findings when latestMainCiConclusion=success", () => {
+    const payload = {
+      findings: [ciSetupFinding],
+      auditedAt: new Date().toISOString(),
+      latestMainCiConclusion: "success",
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 1);
+    const normalized = result.payload as any;
+    assert.equal(normalized.findings.length, 0);
+  });
+
+  it("retains all findings when latestMainCiConclusion=failure (CI is broken)", () => {
+    const payload = {
+      findings: [ciBreakFinding, systemLearningFinding],
+      auditedAt: new Date().toISOString(),
+      latestMainCiConclusion: "failure",
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 0);
+    assert.equal(result.payload, payload, "payload must be returned unchanged (same reference)");
+  });
+
+  it("retains all findings when latestMainCiConclusion is absent (fail-safe)", () => {
+    const payload = {
+      findings: [ciBreakFinding],
+      auditedAt: new Date().toISOString(),
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 0);
+    assert.equal(result.payload, payload);
+  });
+
+  it("retains system-learning findings that mention CI even when CI is healthy", () => {
+    const payload = {
+      findings: [systemLearningFinding],
+      auditedAt: new Date().toISOString(),
+      latestMainCiConclusion: "success",
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 0, "system-learning finding must NOT be suppressed");
+    const normalized = result.payload as any;
+    assert.equal(normalized.findings.length, 1, "system-learning finding must be retained");
+  });
+
+  it("handles null payload gracefully", () => {
+    const result = normalizeStaleCiBreakFindings(null);
+    assert.equal(result.suppressedCount, 0);
+    assert.equal(result.payload, null);
+  });
+
+  it("handles empty findings array with CI success gracefully", () => {
+    const payload = {
+      findings: [],
+      auditedAt: new Date().toISOString(),
+      latestMainCiConclusion: "success",
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 0);
+    assert.equal(result.payload, payload, "empty findings payload returned unchanged");
+  });
+
+  it("CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS is re-exported from prometheus and is 2 hours", () => {
+    assert.equal(CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS, 2 * 60 * 60 * 1000);
+  });
+
+  it("suppresses multiple CI-break findings in the same payload", () => {
+    const payload = {
+      findings: [ciBreakFinding, ciSetupFinding, systemLearningFinding],
+      auditedAt: new Date().toISOString(),
+      latestMainCiConclusion: "success",
+    };
+    const result = normalizeStaleCiBreakFindings(payload);
+    assert.equal(result.suppressedCount, 2, "both ci-fix and ci-setup findings should be suppressed");
+    const normalized = result.payload as any;
+    assert.equal(normalized.findings.length, 1, "only system-learning finding remains");
   });
 });
