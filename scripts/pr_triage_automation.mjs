@@ -41,6 +41,9 @@ const AUTOMATED_TITLE_PATTERNS = [
 /** Minimum age in milliseconds before a PR is considered stale (3 days). */
 const STALE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 
+/** Branch drift threshold: PRs more than this many commits behind base are closed. */
+const BRANCH_DRIFT_CLOSE_THRESHOLD = 10;
+
 /**
  * Determine whether a PR is BOX-owned and automated.
  *
@@ -175,20 +178,38 @@ async function fetchPrDiffMeta(prNumber, repo) {
 }
 
 /**
- * Decide whether to merge or close a PR based on CI + diff evidence.
+ * Decide whether to merge or close a PR based on CI + diff + merge-state evidence.
  *
  * Rules (in priority order):
- *  1. CI has failing checks → CLOSE (do not promote broken code)
- *  2. CI is fully pending and PR is stale → CLOSE
- *  3. CI passes and diff has substantive changes → MERGE
- *  4. CI passes but diff is empty/trivial → CLOSE (no-op automated PR)
+ *  1. Merge conflicts (mergeable=false) → hard CLOSE (branch triage signal)
+ *  2. Excessive branch drift (behindBy > threshold) → hard CLOSE (stale branch signal)
+ *  3. CI has failing checks → CLOSE (do not promote broken code)
+ *  4. CI is fully pending and PR is stale → CLOSE
+ *  5. CI passes and diff has substantive changes → MERGE
+ *  6. CI passes but diff is empty/trivial → CLOSE (no-op automated PR)
  *
  * @param {{ allChecksPassed: boolean, failingChecks: number, pendingChecks: number }} ci
  * @param {{ hasSubstantiveChanges: boolean }} diff
  * @param {number} ageMs
+ * @param {{ mergeable?: boolean|null, behindBy?: number }} [mergeState]
  * @returns {{ decision: "MERGE" | "CLOSE", rationale: string }}
  */
-function makeTriageDecision(ci, diff, ageMs) {
+function makeTriageDecision(ci, diff, ageMs, mergeState) {
+  // Hard CLOSE: merge conflicts detected — content requires manual conflict resolution.
+  if (mergeState?.mergeable === false) {
+    return {
+      decision: "CLOSE",
+      rationale: "PR has merge conflicts. Branch must be rebased or conflicts resolved before merging. Salvage: identify relevant commits and open a fresh branch from main.",
+    };
+  }
+  // Hard CLOSE: excessive branch drift — branch too far behind base to be reliable.
+  const behindBy = Number(mergeState?.behindBy ?? 0);
+  if (behindBy > BRANCH_DRIFT_CLOSE_THRESHOLD) {
+    return {
+      decision: "CLOSE",
+      rationale: `Branch is ${behindBy} commits behind base (threshold: ${BRANCH_DRIFT_CLOSE_THRESHOLD}). Salvage: cherry-pick relevant commits onto a fresh branch from main.`,
+    };
+  }
   if (ci.failingChecks > 0) {
     return {
       decision: "CLOSE",

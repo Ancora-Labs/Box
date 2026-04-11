@@ -328,9 +328,20 @@ function normalizeWorkerCycleRecord(rawRecord: unknown, cycleIdHint: string): Re
   const cycleId = String(rec.cycleId || cycleIdHint || "unknown-cycle");
   const status = String(rec.status || "unknown");
   const updatedAt = String(rec.updatedAt || new Date().toISOString());
-  const workerSessions = rec.workerSessions && typeof rec.workerSessions === "object" && !Array.isArray(rec.workerSessions)
+  const rawSessions = rec.workerSessions && typeof rec.workerSessions === "object" && !Array.isArray(rec.workerSessions)
     ? rec.workerSessions as Record<string, unknown>
     : {};
+  // Propagate resolvedRole within each session entry so consumers can correlate
+  // the logical batch role with the actual dispatched role (after access-fallback).
+  const workerSessions: Record<string, unknown> = {};
+  for (const [role, session] of Object.entries(rawSessions)) {
+    if (session && typeof session === "object" && !Array.isArray(session)) {
+      const s = session as Record<string, unknown>;
+      workerSessions[role] = s.resolvedRole !== undefined ? s : { ...s };
+    } else {
+      workerSessions[role] = session;
+    }
+  }
   const workerActivity = rec.workerActivity && typeof rec.workerActivity === "object" && !Array.isArray(rec.workerActivity)
     ? rec.workerActivity as Record<string, unknown>
     : {};

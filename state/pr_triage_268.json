@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "triageTimestamp": "2026-04-10T17:20:14.633Z",
+  "triageTimestamp": "2026-04-11T06:11:33.584Z",
   "pr": {
     "number": 268,
     "title": "[quality-worker] api-blocked recovery — automated commit",
@@ -17,20 +17,39 @@
     "failingChecks": 0,
     "passingChecks": 1,
     "pendingChecks": 0,
-    "checkNames": ["CI/Lint & Test (Node 20) (pull_request)"]
+    "checkNames": [
+      "Lint & Test (Node 20)"
+    ]
   },
   "diff": {
     "filesChanged": [
       "box.config.json",
       "src/core/capability_pool.ts",
       "src/core/orchestrator.ts",
-      "src/core/plan_contract_validator.ts"
+      "src/core/plan_contract_validator.ts",
+      "src/core/prometheus.ts",
+      "src/core/research_synthesizer.ts",
+      "state/benchmark_ground_truth.json",
+      "state/carry_forward_backlog.json",
+      "state/prompt_self-improvement_1774351798922.md",
+      "state/prompt_self-improvement_1774358246182.md",
+      "state/prompt_self-improvement_1774359389483.md",
+      "state/prompt_self-improvement_1774370481845.md",
+      "tests/core/capability_pool.test.ts",
+      "tests/core/orchestrator_ci_fix_context.test.ts",
+      "tests/core/prometheus_parse.test.ts",
+      "tests/core/worker_batch_planner.test.ts",
+      "tmp_synth_check.mts"
     ],
     "hasSubstantiveChanges": true,
-    "summary": "Adds explicit role preservation in selectWorkerForPlan, CI evidence extraction from plan packets via _readCiEvidenceFromPlan, CI critical area pattern detection in plan_contract_validator, and config toggles for jesusDisableTier1 and researchScoutDisableCache"
+    "summary": "17 file(s): box.config.json, src/core/capability_pool.ts, src/core/orchestrator.ts, src/core/plan_contract_validator.ts, src/core/prometheus.ts …"
   },
-  "decision": "MERGE",
-  "rationale": "CI checks all pass (1/1 green). Diff contains substantive production improvements: capability_pool worker role/lane preservation, orchestrator CI evidence extraction, plan_contract_validator CI critical finding detection, and non-breaking config additions. No duplicate merged PRs found with matching title. Safe to merge automatically.",
-  "decidedBy": "pr_triage_automation",
-  "decidedAt": "2026-04-10T17:20:14.633Z"
+  "mergeState": {
+    "mergeable": null,
+    "behindBy": 0
+  },
+  "decision": "CLOSE",
+  "rationale": "Branch recovery/quality-worker-1775718158258 was auto-committed when the quality-worker was API-blocked. It touches src/core/orchestrator.ts and other core files that are actively modified by current workers on the main branch — merging without rebase would introduce silent conflicts and regress ongoing work. Hard triage signal: close-no-merge. Salvage guidance: identify specific commits from this branch that contain valid work (e.g. capability_pool.ts, plan_contract_validator.ts changes), cherry-pick those onto a fresh branch from main, validate tests pass, and open a new PR with a clean conflict-free diff.",
+  "decidedBy": "manual-triage-override",
+  "decidedAt": "2026-04-14T00:00:00.000Z"
 }

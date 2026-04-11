@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { runOnce, runResumeDispatch, evaluatePreDispatchGovernanceGate, BLOCK_REASON, processEscalationQueueClosureWorkflow } from "../../src/core/orchestrator.js";
+import { runOnce, runResumeDispatch, evaluatePreDispatchGovernanceGate, BLOCK_REASON, processEscalationQueueClosureWorkflow, isDispatchCheckpointResumable } from "../../src/core/orchestrator.js";
 import { ATHENA_PLAN_REVIEW_REASON_CODE } from "../../src/core/athena_reviewer.js";
 import { readPipelineProgress, PIPELINE_STAGE_ENUM, PIPELINE_STEPS } from "../../src/core/pipeline_progress.js";
 import { EVENTS } from "../../src/core/event_schema.js";
@@ -3218,5 +3218,40 @@ describe("computeLaneROIAdmission — specialization admission by lane ROI", () 
     assert.ok(LANE_ROI_ADMISSION_MIN_ROI > 0, "min ROI is positive");
     assert.ok(LANE_ROI_ADMISSION_MIN_COMPLETION_RATE < 1, "min completion rate is less than 1");
     assert.ok(LANE_ROI_ADMISSION_MIN_ROI < 1, "min ROI is less than 1");
+  });
+});
+
+// ── isDispatchCheckpointResumable — resume-first semantics ───────────────────────
+
+describe("isDispatchCheckpointResumable — resume-first daemon flow", () => {
+  it("returns true for an in-progress checkpoint with remaining plans", () => {
+    const checkpoint = { status: "dispatching", totalPlans: 5, completedPlans: 2 };
+    assert.equal(isDispatchCheckpointResumable(checkpoint), true);
+  });
+
+  it("returns false when checkpoint is complete (all plans done)", () => {
+    const checkpoint = { status: "dispatching", totalPlans: 5, completedPlans: 5 };
+    assert.equal(isDispatchCheckpointResumable(checkpoint), false);
+  });
+
+  it("returns false when status is not 'dispatching'", () => {
+    assert.equal(isDispatchCheckpointResumable({ status: "complete", totalPlans: 3, completedPlans: 1 }), false);
+    assert.equal(isDispatchCheckpointResumable({ status: "failed", totalPlans: 3, completedPlans: 0 }), false);
+  });
+
+  it("returns false when totalPlans is 0 (nothing to resume)", () => {
+    const checkpoint = { status: "dispatching", totalPlans: 0, completedPlans: 0 };
+    assert.equal(isDispatchCheckpointResumable(checkpoint), false);
+  });
+
+  it("returns false for null or undefined checkpoint", () => {
+    assert.equal(isDispatchCheckpointResumable(null), false);
+    assert.equal(isDispatchCheckpointResumable(undefined), false);
+  });
+
+  it("negative path: completed checkpoint at exactly totalPlans is not resumable", () => {
+    const checkpoint = { status: "dispatching", totalPlans: 3, completedPlans: 3 };
+    assert.equal(isDispatchCheckpointResumable(checkpoint), false,
+      "completedPlans === totalPlans means all dispatches are done — not resumable");
   });
 });

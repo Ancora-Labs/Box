@@ -11,6 +11,14 @@ import {
   isGovernanceCanaryBreachActive
 } from "./governance_canary.js";
 
+/**
+ * The reason code prefix used when a runtime hook enforcement denies a tool-use envelope.
+ * Value matches the prefix of the blockReason string returned by enforcePreExecuteHookDecisions.
+ * Consumers can use this constant to deterministically detect hook denial blocks without
+ * hard-coding the string literal in every check.
+ */
+export const HOOK_DENIAL_REASON_CODE = "runtime_hook_denied";
+
 export async function loadPolicy(config) {
   return readJson(config.paths.policyFile, {
     protectedPaths: [],
@@ -255,6 +263,64 @@ export function generateRuntimeHookDecisions(
     envelope: envelope as Partial<ToolIntentEnvelope>,
     decision: evaluateToolIntentEnvelope(policy, roleName, envelope as Partial<ToolIntentEnvelope>),
   }));
+}
+
+/**
+ * Typed result from authoritative pre-execute hook decision enforcement.
+ * Callers use `allowed` to gate worker execution and `blockReason` to
+ * populate dispatchBlockReason when denying.
+ */
+export interface PreExecuteEnforcementResult {
+  /** True when no envelope was denied; false when at least one denial exists. */
+  allowed: boolean;
+  /** Number of denied envelopes in this evaluation. */
+  deniedCount: number;
+  /** reasonCode from the first denied decision, or null when all allowed. */
+  firstDeniedReasonCode: string | null;
+  /** scope from the first denied envelope, or null when all allowed. */
+  firstDeniedScope: string | null;
+  /** All runtime-generated decisions for audit/telemetry. */
+  decisions: Array<{ envelope: Partial<ToolIntentEnvelope>; decision: ToolIntentDecision }>;
+  /** Structured block reason string suitable for dispatchBlockReason, or null when allowed. */
+  blockReason: string | null;
+}
+
+/**
+ * Authoritative pre-execute hook decision enforcement.
+ *
+ * Wraps generateRuntimeHookDecisions() as the single source of truth for whether
+ * worker tool usage should be allowed. Workers are NOT trusted to self-report
+ * HOOK_DECISION lines — only the runtime-generated decisions govern enforcement.
+ *
+ * @param policy    - loaded policy from loadPolicy/loadPolicyWithGovernance
+ * @param roleName  - the worker role being evaluated
+ * @param envelopes - TOOL_INTENT envelopes parsed from worker output
+ * @returns PreExecuteEnforcementResult
+ */
+export function enforcePreExecuteHookDecisions(
+  policy: unknown,
+  roleName: string,
+  envelopes: unknown[],
+): PreExecuteEnforcementResult {
+  const decisions = generateRuntimeHookDecisions(policy, roleName, envelopes);
+  const denied = decisions.filter((r) => r.decision.decision === "deny");
+  const firstDenied = denied.length > 0 ? denied[0] : null;
+  const firstDeniedReasonCode = firstDenied?.decision?.reasonCode
+    ? String(firstDenied.decision.reasonCode)
+    : null;
+  const firstDeniedScope = firstDenied?.envelope?.scope
+    ? String(firstDenied.envelope.scope)
+    : null;
+  return {
+    allowed:              denied.length === 0,
+    deniedCount:          denied.length,
+    firstDeniedReasonCode,
+    firstDeniedScope,
+    decisions,
+    blockReason: firstDenied
+      ? `runtime_hook_denied:${firstDeniedReasonCode ?? "unknown"}`
+      : null,
+  };
 }
 
 function normalizeRoleName(roleName) {

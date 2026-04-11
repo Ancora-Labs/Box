@@ -17,6 +17,7 @@ const AUTOMATED_TITLE_PATTERNS = [
   /\[auto\]/i,
 ];
 const STALE_PR_GUARD_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+const BRANCH_DRIFT_CLOSE_THRESHOLD = 10;
 
 function isAutomatedPrBranch(branch: string, title: string): boolean {
   return (
@@ -39,7 +40,15 @@ function makeStaleGuardDecision(
   ci: { allChecksPassed: boolean; failingChecks: number; pendingChecks: number; totalChecks: number; passingChecks: number },
   diff: { hasSubstantiveChanges: boolean },
   ageMs: number,
+  mergeState?: { mergeable?: boolean | null; behindBy?: number },
 ): { decision: "MERGE" | "CLOSE"; rationale: string } {
+  if (mergeState?.mergeable === false) {
+    return { decision: "CLOSE", rationale: "PR has merge conflicts. Branch must be rebased or conflicts resolved before merging. Salvage: identify relevant commits and open a fresh branch from main." };
+  }
+  const behindBy = Number(mergeState?.behindBy ?? 0);
+  if (behindBy > BRANCH_DRIFT_CLOSE_THRESHOLD) {
+    return { decision: "CLOSE", rationale: `Branch is ${behindBy} commits behind base (threshold: ${BRANCH_DRIFT_CLOSE_THRESHOLD}). Salvage: cherry-pick relevant commits onto a fresh branch from main.` };
+  }
   if (ci.failingChecks > 0) {
     return { decision: "CLOSE", rationale: `CI has ${ci.failingChecks} failing check(s). Cannot merge failing code.` };
   }
@@ -141,6 +150,41 @@ describe("pr_triage_automation — makeStaleGuardDecision", () => {
     // This is acceptable: guard does not promote uncertain PRs
     assert.equal(typeof decision, "string");
     assert.ok(decision === "MERGE" || decision === "CLOSE");
+  });
+});
+
+describe("pr_triage_automation — makeStaleGuardDecision with merge-state signals", () => {
+  const goodCi = { allChecksPassed: true, failingChecks: 0, pendingChecks: 0, totalChecks: 1, passingChecks: 1 };
+  const goodDiff = { hasSubstantiveChanges: true };
+  const freshAge = 1 * 24 * 60 * 60 * 1000;
+
+  it("hard CLOSE when PR has merge conflicts (mergeable=false)", () => {
+    const { decision, rationale } = makeStaleGuardDecision(goodCi, goodDiff, freshAge, { mergeable: false });
+    assert.equal(decision, "CLOSE");
+    assert.match(rationale, /merge conflict/i);
+  });
+
+  it("hard CLOSE when branch is excessively far behind base (behindBy > threshold)", () => {
+    const { decision, rationale } = makeStaleGuardDecision(goodCi, goodDiff, freshAge, { mergeable: true, behindBy: 25 });
+    assert.equal(decision, "CLOSE");
+    assert.match(rationale, /commits behind/i);
+    assert.match(rationale, /cherry-pick/i);
+  });
+
+  it("merge-state CLOSE takes priority over CI pass", () => {
+    const { decision } = makeStaleGuardDecision(goodCi, goodDiff, freshAge, { mergeable: false });
+    assert.equal(decision, "CLOSE");
+  });
+
+  it("MERGE when mergeable=true and behindBy is within threshold", () => {
+    const { decision } = makeStaleGuardDecision(goodCi, goodDiff, freshAge, { mergeable: true, behindBy: 5 });
+    assert.equal(decision, "MERGE");
+  });
+
+  it("negative path: behindBy exactly at threshold does NOT close", () => {
+    const { decision } = makeStaleGuardDecision(goodCi, goodDiff, freshAge, { mergeable: true, behindBy: BRANCH_DRIFT_CLOSE_THRESHOLD });
+    // Equal to threshold is not > threshold, so should not trigger drift CLOSE
+    assert.equal(decision, "MERGE");
   });
 });
 

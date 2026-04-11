@@ -671,6 +671,53 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
         "incomplete wave finding must name wave-1");
     });
   });
+
+  it("does NOT flag a working session as stuck when lastActiveAt is absent but startedAt is recent", async () => {
+    await withTempRepo(async ({ stateDir, repoDir }) => {
+      writeFileSync(path.join(repoDir, "src", "core", "placeholder.ts"), "export const ok = true;", "utf8");
+      writeFileSync(path.join(stateDir, "knowledge_memory.json"), JSON.stringify({ lessons: [], capabilityGaps: [] }), "utf8");
+
+      // Worker with status=working, no lastActiveAt, but startedAt is 2 minutes ago (not stuck)
+      const recentStart = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      const sessions = {
+        "quality-worker": { status: "working", startedAt: recentStart, lastActiveAt: undefined },
+      };
+
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        { latestMainCi: null, failedCiRuns: [], pullRequests: [] },
+        {},
+        sessions,
+      );
+
+      const workerHealth = findings.filter((f: any) => f.area === "worker-health");
+      assert.equal(workerHealth.length, 0,
+        "worker with no lastActiveAt but recent startedAt must NOT be flagged as stuck");
+    });
+  });
+
+  it("does NOT flag a working session as stuck when neither lastActiveAt nor startedAt is present", async () => {
+    await withTempRepo(async ({ stateDir, repoDir }) => {
+      writeFileSync(path.join(repoDir, "src", "core", "placeholder.ts"), "export const ok = true;", "utf8");
+      writeFileSync(path.join(stateDir, "knowledge_memory.json"), JSON.stringify({ lessons: [], capabilityGaps: [] }), "utf8");
+
+      // Worker with status=working but no timestamp at all — Infinity fallback must not trigger
+      const sessions = {
+        "quality-worker": { status: "working" },
+      };
+
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        { latestMainCi: null, failedCiRuns: [], pullRequests: [] },
+        {},
+        sessions,
+      );
+
+      const workerHealth = findings.filter((f: any) => f.area === "worker-health");
+      assert.equal(workerHealth.length, 0,
+        "worker with no timestamps must NOT generate false stuck finding");
+    });
+  });
 });
 
 // ── Jesus outcome ledger ───────────────────────────────────────────────────────

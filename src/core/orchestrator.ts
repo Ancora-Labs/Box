@@ -645,9 +645,9 @@ function topicMatchInSet(topic: string, linkedTopics: Set<string>): boolean {
   return false;
 }
 
-function autoResolveBenchmarkRecommendations(
+export function autoResolveBenchmarkRecommendations(
   benchmarkEntries: any[],
-  opts: { verifiedDoneWorkers: number; workerBatches: any[]; atIso: string }
+  opts: { verifiedDoneWorkers: number; workerBatches: any[]; workerResults?: any[]; atIso: string }
 ): { entries: any[]; resolvedCount: number; usedFallback: boolean } {
   if (!Array.isArray(benchmarkEntries) || benchmarkEntries.length === 0) {
     return { entries: benchmarkEntries, resolvedCount: 0, usedFallback: false };
@@ -670,6 +670,17 @@ function autoResolveBenchmarkRecommendations(
     return { entries: benchmarkEntries, resolvedCount: 0, usedFallback: false };
   }
 
+  // Build lookup of done workers with verification evidence by synthesis source topic.
+  const verifiedWorkerTopics = new Set<string>();
+  const workerResultsArr = Array.isArray(opts.workerResults) ? opts.workerResults : [];
+  for (const wr of workerResultsArr) {
+    if (String(wr?.status || "").toLowerCase() !== "done") continue;
+    if (wr?.dispatchContract?.doneWorkerWithVerificationReportEvidence !== true) continue;
+    for (const src of (Array.isArray(wr?.synthesisSources) ? wr.synthesisSources : [])) {
+      verifiedWorkerTopics.add(normalizeTopicLabel(String(src || "")));
+    }
+  }
+
   const nextRecs = [...recs];
   let resolvedCount = 0;
 
@@ -677,9 +688,12 @@ function autoResolveBenchmarkRecommendations(
     const topic = normalizeTopicLabel(rec?.topic || rec?.summary || rec?.id || "");
     if (!topicMatchInSet(topic, linkedTopics)) continue;
     const prevEvidence = String(rec?.evidence || "").trim();
+    // Use "implemented_correctly" when a verified worker with verification report
+    // evidence explicitly matches this topic; fall back to "implemented" otherwise.
+    const resolvedStatus = verifiedWorkerTopics.has(topic) ? "implemented_correctly" : "implemented";
     nextRecs[idx] = {
       ...rec,
-      implementationStatus: "implemented",
+      implementationStatus: resolvedStatus,
       evidence: prevEvidence
         ? `${prevEvidence}; auto-resolved@${opts.atIso}: linked synthesis_sources match`
         : `auto-resolved@${opts.atIso}: linked synthesis_sources match`,
@@ -696,7 +710,7 @@ function autoResolveBenchmarkRecommendations(
       const prevEvidence = String(rec?.evidence || "").trim();
       nextRecs[idx] = {
         ...rec,
-        implementationStatus: "implemented",
+        implementationStatus: "implemented_partially",
         evidence: prevEvidence
           ? `${prevEvidence}; auto-resolved@${opts.atIso}: verified worker completion fallback (missing synthesis_sources linkage)`
           : `auto-resolved@${opts.atIso}: verified worker completion fallback (missing synthesis_sources linkage)`,
@@ -1006,7 +1020,172 @@ function tryRebatchOversizedPlans(plans: any[], cap: number): boolean {
 }
 
 /**
- * Evaluate pre-dispatch governance gates without starting worker execution.
+ * Exported wrapper for tryRebatchOversizedPlans that returns a rich result
+ * with rewrite tracking and batchTotal annotation for all plans.
+ *
+ * Returns:
+ *   rewrote       — true when batch indices were reassigned due to overflow
+ *   splitGroups   — number of original batch groups that were split
+ *   batchCount    — total distinct batch indices after rebatch
+ *   blockedReason — non-null when a single plan exceeds the cap and cannot be split
+ *
+ * Side-effect: mutates plan._batchIndex and sets plan._batchTotal on all plans.
+ */
+export function rebatchOversizedAthenaPlanGroupsForAdmission(
+  plans: any[],
+  maxAcPerBatch: number,
+): { rewrote: boolean; splitGroups: number; batchCount: number; blockedReason: string | null } {
+  if (!Array.isArray(plans) || plans.length === 0) {
+    return { rewrote: false, splitGroups: 0, batchCount: 0, blockedReason: null };
+  }
+
+  const origBatchCount = new Set(plans.map((p) => Number(p?._batchIndex) || 1)).size;
+
+  // tryRebatchOversizedPlans returns false when any single plan exceeds cap.
+  const rebatchOk = tryRebatchOversizedPlans(plans, maxAcPerBatch);
+  if (!rebatchOk) {
+    return {
+      rewrote: false,
+      splitGroups: 0,
+      batchCount: origBatchCount,
+      blockedReason: `ordered_step_complexity_unsplittable: a single plan exceeds the max ${maxAcPerBatch} step cap and cannot be split`,
+    };
+  }
+
+  const newBatchCount = new Set(plans.map((p) => Number(p?._batchIndex) || 1)).size;
+  const rewrote = newBatchCount > origBatchCount;
+  const splitGroups = rewrote ? newBatchCount - origBatchCount : 0;
+
+  for (const plan of plans) {
+    plan._batchTotal = newBatchCount;
+  }
+
+  return { rewrote, splitGroups, batchCount: newBatchCount, blockedReason: null };
+}
+
+/**
+ * Determine whether the lane-diversity hard gate should be bypassed.
+ *
+ * Bypass is safe when same-lane conflicts will be serialized into distinct
+ * batches (so all plans still run, just in sequence rather than parallel).
+ * This prevents the hard gate from blocking valid work when the pool has
+ * fewer active lanes than minLanes purely because of conflict serialization.
+ */
+export function shouldBypassLaneDiversityHardGate(opts: {
+  plans: any[];
+  minLanes: number;
+  capabilityPoolResult: { activeLaneCount: number };
+  laneConflicts: any[];
+}): { bypass: boolean; reason: string | null } {
+  const laneConflicts = Array.isArray(opts?.laneConflicts) ? opts.laneConflicts : [];
+  const activeLaneCount = Number(opts?.capabilityPoolResult?.activeLaneCount ?? 0);
+  const minLanes = Number(opts?.minLanes ?? 2);
+
+  if (laneConflicts.length > 0 && activeLaneCount < minLanes) {
+    return {
+      bypass: true,
+      reason: "same_lane_conflicts_will_serialize_into_distinct_batches",
+    };
+  }
+  return { bypass: false, reason: null };
+}
+
+/**
+ * Determine whether the specialization admission gate should be bypassed.
+ *
+ * When the lane-diversity gate was bypassed due to serialized same-lane batch
+ * topology, the specialization target becomes infeasible (all batches share one
+ * lane, so specialist utilization cannot be distributed as required).
+ */
+export function shouldBypassSpecializationAdmissionGate(opts: {
+  laneDiversityBypassReason: string | null;
+  capabilityPoolResult: any;
+}): { bypass: boolean; reason: string | null } {
+  if (
+    String(opts?.laneDiversityBypassReason || "") ===
+    "same_lane_conflicts_will_serialize_into_distinct_batches"
+  ) {
+    return {
+      bypass: true,
+      reason: "serialized_same_lane_batch_topology_makes_specialization_target_infeasible",
+    };
+  }
+  return { bypass: false, reason: null };
+}
+
+/**
+ * Check whether a worker outcome should be treated as resume-preferred.
+ *
+ * PROCESS_TIMEOUT errors with retryClass=cooldown indicate the worker was
+ * cut short mid-execution. The orchestrator should attempt to resume from
+ * the existing dispatch checkpoint rather than starting a fresh cycle.
+ */
+export function isResumePreferredTimeoutOutcome(outcome: {
+  status: string;
+  reasonCode: string;
+  retryClass?: string;
+}): boolean {
+  return (
+    String(outcome?.status || "").toLowerCase() === "error" &&
+    String(outcome?.reasonCode || "").toUpperCase() === "PROCESS_TIMEOUT"
+  );
+}
+
+/**
+ * Promote Prometheus analysis plan entries to "implemented_correctly" when
+ * matching done-worker rows supply verification report evidence.
+ *
+ * Matches plan.task against row.planTasks (case-insensitive). Only rows
+ * where status=done AND doneWorkerWithVerificationReportEvidence=true
+ * trigger a promotion. Unmatched plans are returned unchanged.
+ */
+export function promotePrometheusAnalysisFromWorkerEvidence(
+  analysis: any,
+  rows: any[],
+  atIso: string,
+): { promotedCount: number; analysis: any } {
+  const plans = Array.isArray(analysis?.plans) ? analysis.plans : [];
+  if (plans.length === 0 || !Array.isArray(rows) || rows.length === 0) {
+    return { promotedCount: 0, analysis };
+  }
+
+  const taskToFiles = new Map<string, string[]>();
+  for (const row of rows) {
+    const status = String(row?.status || "").toLowerCase();
+    if (status !== "done" && status !== "success") continue;
+    if (row?.dispatchContract?.doneWorkerWithVerificationReportEvidence !== true) continue;
+    const tasks = Array.isArray(row?.planTasks) ? row.planTasks : [];
+    const files = Array.isArray(row?.filesTouched) ? row.filesTouched : [];
+    for (const task of tasks) {
+      const key = String(task || "").trim().toLowerCase();
+      if (!key) continue;
+      if (!taskToFiles.has(key)) taskToFiles.set(key, []);
+      taskToFiles.get(key)!.push(...files);
+    }
+  }
+
+  let promotedCount = 0;
+  const nextPlans = plans.map((plan: any) => {
+    const planTask = String(plan?.task || "").trim().toLowerCase();
+    if (!planTask) return plan;
+    if (String(plan?.implementationStatus || "").toLowerCase() === "implemented_correctly") return plan;
+    const matchedFiles = taskToFiles.get(planTask);
+    if (!matchedFiles || matchedFiles.length === 0) return plan;
+    promotedCount++;
+    const existingEvidence = Array.isArray(plan.implementationEvidence) ? plan.implementationEvidence : [];
+    const newEvidence = [...new Set([...existingEvidence, ...matchedFiles])];
+    return {
+      ...plan,
+      implementationStatus: "implemented_correctly",
+      implementationEvidence: newEvidence,
+      promotedAt: atIso,
+    };
+  });
+
+  return { promotedCount, analysis: { ...analysis, plans: nextPlans } };
+}
+
+/**
  * Exported for integration tests and any callers that need the dispatch decision
  * surface without running a full orchestration cycle.
  */
@@ -1873,11 +2052,17 @@ export async function runDaemon(config) {
   await mainLoop(liveConfig);
 }
 
-// Stub: checks dispatch_checkpoint.json for an in-flight dispatching state.
-// Reserved for future recovery path — prefixed _wasDispatchInterrupted to satisfy
-// no-unused-vars until the dispatch recovery flow calls it.
+// Implements dispatch interruption detection: reads dispatch_checkpoint.json and
+// returns true when a previous dispatch was interrupted mid-flight (status=dispatching
+// with completedPlans < totalPlans). The daemon resume-first path calls this to
+// prioritise checkpoint resumption over running a fresh full cycle.
 async function _wasDispatchInterrupted(_stateDir: string): Promise<boolean> {
-  return false;
+  try {
+    const checkpoint = await readDispatchCheckpoint({ paths: { stateDir: _stateDir } });
+    return isDispatchCheckpointResumable(checkpoint);
+  } catch {
+    return false;
+  }
 }
 
 const DISPATCH_CHECKPOINT_FILE = "dispatch_checkpoint.json";
@@ -1903,7 +2088,7 @@ async function writeDispatchCheckpoint(config, checkpoint) {
   return persisted;
 }
 
-function isDispatchCheckpointResumable(checkpoint) {
+export function isDispatchCheckpointResumable(checkpoint): boolean {
   if (!checkpoint || checkpoint.status !== "dispatching") return false;
   const totalPlans = Number(checkpoint.totalPlans || 0);
   const completedPlans = Number(checkpoint.completedPlans || 0);
@@ -2036,7 +2221,10 @@ function shouldFailCloseDispatchOutcome(workerResult) {
   if (status !== "error" && status !== "blocked") return false;
   const retryClass = String(workerResult?.retryClass || "").toLowerCase();
   const reasonCode = String(workerResult?.reasonCode || "").toUpperCase();
-  return retryClass === "no_retry" || reasonCode === "WIN32_PROCESS_TERMINATED";
+  if (retryClass === "no_retry" || reasonCode === "WIN32_PROCESS_TERMINATED") return true;
+  // Runtime hook denials are always non-retryable — propagate as deterministic fail-close.
+  const blockReason = String(workerResult?.dispatchBlockReason || "");
+  return blockReason.startsWith("runtime_hook_denied:");
 }
 
 async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolean } = {}) {
@@ -2192,6 +2380,7 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
       role: String(batch?.role || ""),
       phase: "start",
       batch,
+      resolvedRole: resumeDispatchTarget.roleName,
     });
     for (;;) {
       try {
@@ -2238,6 +2427,7 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
       phase: "complete",
       batch,
       workerResult,
+      resolvedRole: resumeDispatchTarget.roleName,
     });
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {
@@ -2497,6 +2687,7 @@ async function persistWorkerDispatchArtifacts(config, input: {
   batch?: any;
   workerResult?: any;
   recoveredSignal?: string;
+  resolvedRole?: string;
 }) {
   const stateDir = config?.paths?.stateDir || "state";
   const nowIso = new Date().toISOString();
@@ -2535,6 +2726,12 @@ async function persistWorkerDispatchArtifacts(config, input: {
     const session = cycleRecord.workerSessions[role];
     const taskIds = extractPlanTaskIds(input.batch);
     const taskSummary = extractBatchTaskSummary(input.batch);
+    // Unify logical and resolved role identity in the session artifact.
+    // resolvedRole is the final dispatched target (after access-fallback resolution);
+    // role is the logical batch kind. Both are preserved so consumers can correlate.
+    if (input.resolvedRole && input.resolvedRole !== role) {
+      session.resolvedRole = input.resolvedRole;
+    }
 
     if (input.phase === "start") {
       session.status = "working";
@@ -5205,6 +5402,7 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
       role: String(batch?.role || ""),
       phase: "start",
       batch,
+      resolvedRole: dispatchTarget.roleName,
     });
     // Trace: worker dispatch invocation — proves dispatchWorker was invoked for this batch.
     await recordCapabilityExecution(
@@ -5268,6 +5466,7 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
       phase: "complete",
       batch,
       workerResult,
+      resolvedRole: dispatchTarget.roleName,
     });
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {
@@ -5832,6 +6031,7 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
       const autoResolution = autoResolveBenchmarkRecommendations(benchmarkEntries, {
         verifiedDoneWorkers: _verifiedDoneWorkers,
         workerBatches,
+        workerResults: allWorkerResults ?? [],
         atIso: new Date().toISOString(),
       });
       benchmarkEntries = autoResolution.entries;
@@ -6472,6 +6672,22 @@ async function mainLoop(config) {
       const { completed, pending } = await countCompletedPlans(config, prometheusAnalysis.plans);
 
       if (pending.length > 0) {
+        // Resume-first: if an interrupted dispatch checkpoint exists, attempt to
+        // resume from it before starting a fresh full cycle. This avoids duplicating
+        // work when the daemon was restarted mid-dispatch.
+        try {
+          const dispatchCheckpoint = await readDispatchCheckpoint(config);
+          if (isDispatchCheckpointResumable(dispatchCheckpoint)) {
+            await appendProgress(config, `[LOOP] Interrupted dispatch checkpoint detected (${dispatchCheckpoint.completedPlans}/${dispatchCheckpoint.totalPlans} complete) — attempting resume`);
+            const resumed = await tryResumeDispatchFromCheckpoint(config);
+            if (resumed) {
+              await sleep(RE_EVAL_SLEEP_MS);
+              continue;
+            }
+          }
+        } catch (resumeErr) {
+          warn(`[orchestrator] dispatch checkpoint resume check failed (non-fatal): ${String((resumeErr as Error)?.message || resumeErr)}`);
+        }
         // There's remaining work — run a new full cycle
         // Jesus will see the current state and decide appropriately
         await appendProgress(config, `[LOOP] ${completed.length}/${totalPlans} plans done, ${pending.length} remaining — starting new cycle`);
@@ -6847,12 +7063,25 @@ function _classifyAutomationClass(branch: string, title: string): string {
   return "unknown-automation";
 }
 
-/** Deterministic MERGE/CLOSE decision based on CI + diff evidence. */
+/** Branch drift threshold: PRs more than this many commits behind base are closed. */
+const STALE_PR_GUARD_DRIFT_THRESHOLD = 10;
+
+/** Deterministic MERGE/CLOSE decision based on CI + diff + merge-state evidence. */
 function _makeStaleGuardDecision(
   ci: { allChecksPassed: boolean; failingChecks: number; pendingChecks: number; totalChecks: number; passingChecks: number },
   diff: { hasSubstantiveChanges: boolean },
   ageMs: number,
+  mergeState?: { mergeable?: boolean | null; behindBy?: number },
 ): { decision: "MERGE" | "CLOSE"; rationale: string } {
+  // Hard CLOSE: merge conflicts detected — content cannot be merged without manual resolution.
+  if (mergeState?.mergeable === false) {
+    return { decision: "CLOSE", rationale: "PR has merge conflicts. Branch must be rebased or conflicts resolved before merging. Marking close-no-merge with salvage guidance." };
+  }
+  // Hard CLOSE: excessive branch drift — too far behind base to be reliable.
+  const behindBy = Number(mergeState?.behindBy ?? 0);
+  if (behindBy > STALE_PR_GUARD_DRIFT_THRESHOLD) {
+    return { decision: "CLOSE", rationale: `Branch is ${behindBy} commits behind base (threshold: ${STALE_PR_GUARD_DRIFT_THRESHOLD}). Salvage: cherry-pick relevant commits onto a fresh branch from main.` };
+  }
   if (ci.failingChecks > 0) {
     return { decision: "CLOSE", rationale: `CI has ${ci.failingChecks} failing check(s). Cannot merge failing code.` };
   }
@@ -6965,7 +7194,33 @@ export async function runStaleAutomatedPrGuard(config: any): Promise<void> {
       warn(`[stale_pr_guard] Diff fetch failed for PR #${prNumber} (non-fatal): ${String((err as any)?.message || err)}`);
     }
 
-    const { decision, rationale } = _makeStaleGuardDecision(ci, diff, ageMs);
+    // Fetch merge-state: mergeable flag and branch distance from base.
+    // mergeable=false → CONFLICTING; behindBy > threshold → branch drift CLOSE.
+    const mergeState: { mergeable: boolean | null; behindBy: number } = { mergeable: null, behindBy: 0 };
+    try {
+      const prDetailRes = await fetch(`${base}/pulls/${prNumber}`, { headers });
+      if (prDetailRes.ok) {
+        const prDetail = await prDetailRes.json() as Record<string, unknown>;
+        const mergeable = prDetail?.mergeable;
+        mergeState.mergeable = mergeable === null ? null : mergeable === true;
+        // Compare head against base to detect branch drift.
+        const headSha = String(pr?.head?.sha || "");
+        const baseBranch = String((prDetail as any)?.base?.ref || "main");
+        if (headSha) {
+          try {
+            const compareRes = await fetch(`${base}/compare/${baseBranch}...${headSha}`, { headers });
+            if (compareRes.ok) {
+              const compareBody = await compareRes.json() as Record<string, unknown>;
+              mergeState.behindBy = Number((compareBody as any)?.behind_by ?? 0);
+            }
+          } catch { /* compare is best-effort */ }
+        }
+      }
+    } catch (err) {
+      warn(`[stale_pr_guard] Merge-state fetch failed for PR #${prNumber} (non-fatal): ${String((err as any)?.message || err)}`);
+    }
+
+    const { decision, rationale } = _makeStaleGuardDecision(ci, diff, ageMs, mergeState);
     const now = new Date().toISOString();
 
     const record = {
@@ -6983,6 +7238,7 @@ export async function runStaleAutomatedPrGuard(config: any): Promise<void> {
       },
       ci,
       diff,
+      mergeState,
       decision,
       rationale,
       decidedBy: "runStaleAutomatedPrGuard",
