@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import {
+  buildConversationContext,
   parseWorkerResponse,
   deriveDeterministicCleanTreeEvidence,
   resolveCleanTreeEvidenceTargets,
@@ -318,6 +319,22 @@ describe("inferWorkerReportedTaskScopedCleanTreeEvidence", () => {
     assert.equal(result.mode, "none");
     assert.deepEqual(result.lines, []);
   });
+
+  it("returns none for non-terminal worker outcomes even when merged metadata exists", () => {
+    const result = inferWorkerReportedTaskScopedCleanTreeEvidence(
+      {
+        status: "partial",
+        mergedSha: "abc1234",
+        filesTouched: ["src/core/doctor.ts"],
+      },
+      {
+        targetFiles: ["src/core/doctor.ts"],
+      },
+    );
+
+    assert.equal(result.mode, "none");
+    assert.deepEqual(result.lines, []);
+  });
 });
 
 describe("isTerminalWorkerStatus", () => {
@@ -350,8 +367,13 @@ describe("tool access + capability guards", () => {
     assert.equal(allowAll, true);
   });
 
-  it("keeps least-privilege defaults for non-implementation/non-review tasks", () => {
+  it("grants full tools to registered specialist workers even when taskKind is not implementation", () => {
     const allowAll = shouldEnableFullToolAccess("infrastructure-worker", "observation", "Collect dashboard screenshots");
+    assert.equal(allowAll, true);
+  });
+
+  it("keeps least-privilege defaults for non-worker non-review roles", () => {
+    const allowAll = shouldEnableFullToolAccess("prometheus", "observation", "Collect dashboard screenshots");
     assert.equal(allowAll, false);
   });
 
@@ -359,6 +381,28 @@ describe("tool access + capability guards", () => {
     const check = evaluateWorkerRoleCapability({}, "unknown-worker", "athena-review", "Review dispatch failures");
     assert.equal(check.allowed, false);
     assert.equal(check.code, "ROLE_NOT_REGISTERED");
+  });
+
+  it("worker prompt no longer asks for TOOL_INTENT or HOOK_DECISION pseudo-telemetry", () => {
+    const prompt = buildConversationContext(
+      [],
+      {
+        task: "Collect dashboard screenshots",
+        taskKind: "observation",
+        context: "Use the dashboard and save evidence.",
+      },
+      {},
+      {
+        env: { targetRepo: "test/repo" },
+        paths: { stateDir: path.join(os.tmpdir(), "box-worker-runner-prompt-test") },
+      },
+      "infrastructure",
+      {},
+    );
+
+    assert.ok(prompt.includes("Do not print TOOL_INTENT or HOOK_DECISION pseudo-telemetry lines in your response."));
+    assert.ok(!prompt.includes("Before every execute tool call, emit one explicit tool-intent envelope:"));
+    assert.ok(!prompt.includes("[TOOL_INTENT] scope=<repo-path-or-subsystem> intent=<goal> impact=<low|medium|high|critical> clearance=<read|write|admin>"));
   });
 });
 

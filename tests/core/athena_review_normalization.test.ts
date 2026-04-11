@@ -1134,16 +1134,32 @@ describe("evaluateStaleArtifactClosureFastpath — eligibility contract", () => 
     );
   });
 
-  it("returns eligible=true when all records are superseded and CI is green", () => {
+  it("returns eligible=true when all records are terminal, recent, and CI is green", () => {
     const result = evaluateStaleArtifactClosureFastpath({
       staleTriageRecords: [
-        { applyState: "superseded" },
-        { applyState: "applied" },
+        { applyState: "superseded", triageTimestamp: "2026-04-11T17:00:00.000Z" },
+        { applyState: "applied", appliedAt: "2026-04-11T17:10:00.000Z" },
       ],
       mainCiGreen: true,
+      nowMs: Date.parse("2026-04-11T17:15:00.000Z"),
+      recencyWindowMs: 60 * 60 * 1000,
     });
     assert.equal(result.eligible, true);
     assert.equal(result.reason, ATHENA_FAST_PATH_REASON.STALE_SUPERSEDED_CI_GREEN);
+  });
+
+  it("returns eligible=false when all records are terminal but archival", () => {
+    const result = evaluateStaleArtifactClosureFastpath({
+      staleTriageRecords: [
+        { applyState: "superseded", triageTimestamp: "2026-04-11T12:00:00.000Z" },
+        { applyState: "applied", appliedAt: "2026-04-11T12:05:00.000Z" },
+      ],
+      mainCiGreen: true,
+      nowMs: Date.parse("2026-04-11T17:15:00.000Z"),
+      recencyWindowMs: 60 * 60 * 1000,
+    });
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, "archival_terminal_stale_pr_records");
   });
 
   it("returns eligible=false when there are no triage records", () => {
@@ -1157,8 +1173,10 @@ describe("evaluateStaleArtifactClosureFastpath — eligibility contract", () => 
 
   it("returns eligible=false when main CI is not green", () => {
     const result = evaluateStaleArtifactClosureFastpath({
-      staleTriageRecords: [{ applyState: "superseded" }],
+      staleTriageRecords: [{ applyState: "superseded", triageTimestamp: "2026-04-11T17:00:00.000Z" }],
       mainCiGreen: false,
+      nowMs: Date.parse("2026-04-11T17:15:00.000Z"),
+      recencyWindowMs: 60 * 60 * 1000,
     });
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "main_ci_not_green");
@@ -1195,8 +1213,10 @@ describe("evaluateStaleArtifactClosureFastpath — eligibility contract", () => 
 
   it("single superseded record with green CI is eligible", () => {
     const result = evaluateStaleArtifactClosureFastpath({
-      staleTriageRecords: [{ applyState: "superseded" }],
+      staleTriageRecords: [{ applyState: "superseded", triageTimestamp: "2026-04-11T17:00:00.000Z" }],
       mainCiGreen: true,
+      nowMs: Date.parse("2026-04-11T17:15:00.000Z"),
+      recencyWindowMs: 60 * 60 * 1000,
     });
     assert.equal(result.eligible, true);
   });
@@ -1204,11 +1224,13 @@ describe("evaluateStaleArtifactClosureFastpath — eligibility contract", () => 
   it("mixed applied/superseded records with green CI is eligible", () => {
     const result = evaluateStaleArtifactClosureFastpath({
       staleTriageRecords: [
-        { applyState: "applied" },
-        { applyState: "superseded" },
-        { applyState: "applied" },
+        { applyState: "applied", appliedAt: "2026-04-11T17:01:00.000Z" },
+        { applyState: "superseded", triageTimestamp: "2026-04-11T17:02:00.000Z" },
+        { applyState: "applied", appliedAt: "2026-04-11T17:03:00.000Z" },
       ],
       mainCiGreen: true,
+      nowMs: Date.parse("2026-04-11T17:15:00.000Z"),
+      recencyWindowMs: 60 * 60 * 1000,
     });
     assert.equal(result.eligible, true);
   });

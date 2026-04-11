@@ -4538,10 +4538,32 @@ export function computeRecurrenceQualityScore(postmortems: unknown[]): {
  * performed by the caller before invoking this function.
  */
 export function evaluateStaleArtifactClosureFastpath(opts: {
-  staleTriageRecords: Array<{ applyState: string }>;
+  staleTriageRecords: Array<Record<string, unknown>>;
   mainCiGreen: boolean;
+  nowMs?: number;
+  recencyWindowMs?: number;
 }): { eligible: boolean; reason: string } {
   const records = Array.isArray(opts.staleTriageRecords) ? opts.staleTriageRecords : [];
+  const nowMs = Number.isFinite(Number(opts.nowMs)) ? Number(opts.nowMs) : Date.now();
+  const recencyWindowMs = Number.isFinite(Number(opts.recencyWindowMs))
+    ? Math.max(0, Number(opts.recencyWindowMs))
+    : 60 * 60 * 1000;
+
+  const extractRecordTimestampMs = (record: Record<string, unknown>): number | null => {
+    const candidates = [
+      record.appliedAt,
+      record.supersededAt,
+      record.decidedAt,
+      record.triageTimestamp,
+      record.createdAt,
+      record.updatedAt,
+    ];
+    for (const candidate of candidates) {
+      const parsed = Date.parse(String(candidate || ""));
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  };
 
   // Need at least one triage record to evaluate stale PR debt.
   if (records.length === 0) {
@@ -4554,6 +4576,15 @@ export function evaluateStaleArtifactClosureFastpath(opts: {
   );
   if (!allTerminal) {
     return { eligible: false, reason: "non_terminal_stale_pr_records" };
+  }
+
+  const hasRecentTerminalRecord = records.some((record) => {
+    const ts = extractRecordTimestampMs(record);
+    if (!Number.isFinite(ts)) return false;
+    return nowMs - ts <= recencyWindowMs;
+  });
+  if (!hasRecentTerminalRecord) {
+    return { eligible: false, reason: "archival_terminal_stale_pr_records" };
   }
 
   // Main CI must be green.

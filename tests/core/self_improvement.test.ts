@@ -35,6 +35,7 @@ import os from "node:os";
 import {
   collectCycleOutcomes,
   OUTCOME_DEGRADED_REASON,
+  buildSelfImprovementStabilitySnapshot,
   computeWeightedDecisionScore,
   DECISION_QUALITY_WEIGHTS,
   KNOWLEDGE_MEMORY_SCHEMA_VERSION,
@@ -150,6 +151,55 @@ describe("upsertKnowledgeMemoryLesson", () => {
     assert.equal(km.working.lessons.length, 1);
     assert.equal(km.working.lessons[0].recurrenceCount, 3);
     assert.equal(km.working.lessons[0].lastSeenAt, "2026-04-11T11:00:00.000Z");
+  });
+});
+
+describe("buildSelfImprovementStabilitySnapshot", () => {
+  it("summarizes planner health and recurring lesson pressure from persisted state", () => {
+    const snapshot = buildSelfImprovementStabilitySnapshot(
+      {
+        plannerHealth: "critical",
+        operationalStatus: "degraded",
+        pipelineStatus: "critical",
+        divergenceState: "both_degraded",
+        isWarning: true,
+      },
+      {
+        schemaVersion: KNOWLEDGE_MEMORY_SCHEMA_VERSION,
+        working: {
+          lessons: [
+            { lesson: "Resume must fail closed", severity: "critical", recurrenceCount: 3 },
+            { lesson: "Closure proof was too loose", severity: "warning", recurrenceCount: 1 },
+          ],
+          configTunings: [],
+          promptHints: [],
+          updatedAt: null,
+        },
+        episodic: {
+          lessons: [
+            { lesson: "Planner packet omitted verification targets", severity: "critical", recurrenceCount: 2 },
+          ],
+          retainedAt: null,
+        },
+        policy: { rules: [], updatedAt: null },
+        lastUpdated: null,
+      },
+      [
+        { recurred: true },
+        { recurred: false },
+        { recurred: true },
+      ],
+    );
+
+    assert.equal(snapshot.plannerHealth, "critical");
+    assert.equal(snapshot.pipelineStatus, "critical");
+    assert.equal(snapshot.isWarning, true);
+    assert.equal(snapshot.recurrenceImpact.recurrenceCount, 2);
+    assert.equal(snapshot.recurrenceImpact.totalPostmortems, 3);
+    assert.equal(snapshot.knowledgeMemory.totalLessons, 3);
+    assert.equal(snapshot.knowledgeMemory.recurringLessons, 2);
+    assert.equal(snapshot.knowledgeMemory.criticalRecurringLessons, 2);
+    assert.equal(snapshot.knowledgeMemory.maxRecurrenceCount, 3);
   });
 });
 

@@ -834,6 +834,8 @@ function findWorkerByName(config, roleName) {
 export function shouldEnableFullToolAccess(roleName: unknown, taskKind: unknown, taskText: unknown = ""): boolean {
   const normalizedRole = String(roleName || "").trim().toLowerCase();
   const normalizedTaskKind = normalizeTaskKindLabel(taskKind);
+  const registeredWorker = findWorkerByName({}, normalizedRole);
+  if (registeredWorker) return true;
   const isImplementationTask = !normalizedTaskKind || normalizedTaskKind === "implementation";
   if (isImplementationTask) return true;
   if (normalizedRole === "evolution-worker") return true;
@@ -1074,7 +1076,7 @@ async function resolveModel(config, roleName, taskKind, taskHints: TaskHints = {
 
 // ── Build conversation-only context (persona is in .agent.md) ───────────────
 
-function buildConversationContext(history, instruction: WorkerInstruction, sessionState: WorkerSessionState = {}, config: WorkerRunnerConfig = {}, workerKind = null, promptControls: PromptControls = {}) {
+export function buildConversationContext(history, instruction: WorkerInstruction, sessionState: WorkerSessionState = {}, config: WorkerRunnerConfig = {}, workerKind = null, promptControls: PromptControls = {}) {
   const parts = [];
 
   // Persistent worker state — always injected first so workers always know where they stand
@@ -1267,11 +1269,10 @@ function buildConversationContext(history, instruction: WorkerInstruction, sessi
   parts.push("- Complete your ENTIRE assigned task in one shot — do not leave partial work for a follow-up request.");
   parts.push("- If your task involves multiple files, fix ALL of them before reporting done.");
   parts.push("- Senior production standard: correct logic, proper error handling, edge cases handled, tests where relevant.");
-  parts.push("\n## TOOL EXECUTION GOVERNANCE (MANDATORY)");
-  parts.push("Before every execute tool call, emit one explicit tool-intent envelope:");
-  parts.push("[TOOL_INTENT] scope=<repo-path-or-subsystem> intent=<goal> impact=<low|medium|high|critical> clearance=<read|write|admin>");
-  parts.push("Hook decisions are enforced by the worker runtime against the loaded policy.");
-  parts.push("If a tool call would violate policy, the runtime will block it — do not self-generate HOOK_DECISION lines.");
+  parts.push("\n## TOOL EXECUTION GOVERNANCE");
+  parts.push("Use tools directly when needed to complete the task.");
+  parts.push("Runtime policy and hook enforcement are applied automatically by the runner.");
+  parts.push("Do not print TOOL_INTENT or HOOK_DECISION pseudo-telemetry lines in your response.");
 
   // Canonical verification commands from the central registry
   const verifCmds = getVerificationCommands(config);
@@ -1707,7 +1708,12 @@ export function inferWorkerReportedTaskScopedCleanTreeEvidence(parsed, instructi
 }
 
 async function supplementCleanTreeEvidenceIfMissing(config, parsed, instruction) {
-  if (!parsed || hasCleanTreeStatusEvidence(parsed.fullOutput || "")) {
+  const normalizedStatus = String(parsed?.status || "").trim().toLowerCase();
+  if (
+    !parsed
+    || hasCleanTreeStatusEvidence(parsed.fullOutput || "")
+    || (normalizedStatus !== "done" && normalizedStatus !== "success")
+  ) {
     return { applied: false, mode: "none" as const };
   }
 
@@ -2071,7 +2077,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   }
 
   // Single-prompt mode: no autopilot continuations.
-  // All implementation workers dispatched by the daemon need full tool access.
+  // All executable workers dispatched by the daemon need full tool access.
   const allowAllTools = shouldEnableFullToolAccess(roleName, instruction.taskKind, instruction.task);
   const runContract = buildWorkerRunContract(config, instruction);
   const args = buildAgentArgs({

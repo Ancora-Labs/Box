@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { runOnce, runResumeDispatch, evaluateDispatchResumeReadiness, evaluatePreDispatchGovernanceGate, BLOCK_REASON, processEscalationQueueClosureWorkflow, isDispatchCheckpointResumable, loadStaleTriageRecords, runStaleArtifactClosureFastpath } from "../../src/core/orchestrator.js";
+import { runOnce, runResumeDispatch, evaluateDispatchResumeReadiness, evaluatePreDispatchGovernanceGate, BLOCK_REASON, processEscalationQueueClosureWorkflow, isDispatchCheckpointResumable, loadStaleTriageRecords, runStaleArtifactClosureFastpath, persistSkippedDispatchCheckpoint, clearAthenaPlanRejectionLatch } from "../../src/core/orchestrator.js";
 import { ATHENA_PLAN_REVIEW_REASON_CODE } from "../../src/core/athena_reviewer.js";
 import { readPipelineProgress, PIPELINE_STAGE_ENUM, PIPELINE_STEPS } from "../../src/core/pipeline_progress.js";
 import { EVENTS } from "../../src/core/event_schema.js";
@@ -3589,13 +3589,18 @@ describe("runStaleArtifactClosureFastpath — orchestrator decision", () => {
 
   it("returns eligible=false when records exist but CI status is non-green", async () => {
     // Write a terminal triage record.
+    const recentTimestamp = new Date(Date.now() - (5 * 60 * 1000)).toISOString();
     await fs.writeFile(
       path.join(tmpDir, "pr_triage_99.json"),
-      JSON.stringify({ applyState: "superseded" }),
+      JSON.stringify({ applyState: "superseded", triageTimestamp: recentTimestamp }),
       "utf8",
     );
     // No GitHub credentials → CI green = false.
-    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const cfg = {
+      paths: { stateDir: tmpDir },
+      env: {},
+      runtime: { staleArtifactClosureRecencyMs: 60 * 60 * 1000 },
+    };
     const result = await runStaleArtifactClosureFastpath(cfg);
     assert.equal(result.eligible, false);
     assert.equal(result.stalePrCount, 1);
@@ -3637,5 +3642,98 @@ describe("runStaleArtifactClosureFastpath — orchestrator decision", () => {
     const result = await runStaleArtifactClosureFastpath(cfg);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "non_terminal_stale_pr_records");
+  });
+
+  it("returns eligible=false when terminal triage records are only archival", async () => {
+    const now = Date.now();
+    const archivalTimestamp = new Date(now - (5 * 60 * 60 * 1000)).toISOString();
+
+    await fs.writeFile(
+      path.join(tmpDir, "pr_triage_1.json"),
+      JSON.stringify({ applyState: "superseded", triageTimestamp: archivalTimestamp }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(tmpDir, "pr_triage_2.json"),
+      JSON.stringify({ applyState: "applied", appliedAt: archivalTimestamp }),
+      "utf8",
+    );
+
+    const cfg = {
+      paths: { stateDir: tmpDir },
+      env: {},
+      runtime: { staleArtifactClosureRecencyMs: 60 * 60 * 1000 },
+    };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+
+    assert.equal(result.eligible, false);
+    assert.equal(result.stalePrCount, 2);
+    assert.equal(result.reason, "archival_terminal_stale_pr_records");
+  });
+
+  it("returns eligible=false for recent terminal records when CI is still non-green", async () => {
+    const recentTimestamp = new Date(Date.now() - (5 * 60 * 1000)).toISOString();
+
+    await fs.writeFile(
+      path.join(tmpDir, "pr_triage_1.json"),
+      JSON.stringify({ applyState: "superseded", triageTimestamp: recentTimestamp }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(tmpDir, "pr_triage_2.json"),
+      JSON.stringify({ applyState: "applied", appliedAt: recentTimestamp }),
+      "utf8",
+    );
+
+    const cfg = {
+      paths: { stateDir: tmpDir },
+      env: {},
+      runtime: { staleArtifactClosureRecencyMs: 60 * 60 * 1000 },
+    };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+
+    assert.equal(result.eligible, false);
+    assert.equal(result.stalePrCount, 2);
+    assert.equal(result.mainCiGreen, false);
+    assert.equal(result.reason, "main_ci_not_green");
+  });
+
+  it("persists a complete checkpoint for a skipped dispatch plan set", async () => {
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const plans = [
+      { role: "quality-worker", task: "Close stale PR debt", task_id: "plan-1", wave: 1 },
+      { role: "infrastructure-worker", task: "Archive superseded artifacts", task_id: "plan-2", wave: 2 },
+    ];
+
+    await persistSkippedDispatchCheckpoint(cfg, plans, {
+      planAnalyzedAt: "2026-04-11T15:13:33.184Z",
+    });
+
+    const checkpoint = JSON.parse(
+      await fs.readFile(path.join(tmpDir, "dispatch_checkpoint.json"), "utf8"),
+    );
+    assert.equal(checkpoint.status, "complete");
+    assert.equal(checkpoint.completedPlans, 2);
+    assert.equal(checkpoint.planCount, 2);
+    assert.equal(checkpoint.planAnalyzedAt, "2026-04-11T15:13:33.184Z");
+    assert.equal(typeof checkpoint.planSetSignature, "string");
+    assert.ok(checkpoint.planSetSignature.length > 0);
+  });
+
+  it("clears a stale Athena rejection latch after approval paths recover", async () => {
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    await fs.writeFile(
+      path.join(tmpDir, "athena_plan_rejection.json"),
+      JSON.stringify({ rejectedAt: "2026-04-08T17:39:43.300Z" }),
+      "utf8",
+    );
+
+    const cleared = await clearAthenaPlanRejectionLatch(cfg);
+    assert.equal(cleared, true);
+
+    const existsAfter = await fs.access(path.join(tmpDir, "athena_plan_rejection.json"))
+      .then(() => true)
+      .catch(() => false);
+    assert.equal(existsAfter, false);
   });
 });

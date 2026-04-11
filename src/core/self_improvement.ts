@@ -53,6 +53,7 @@ import {
   WORKER_CYCLE_ARTIFACTS_FILE,
   LEGACY_EVOLUTION_PROGRESS_FILE,
   LEGACY_EVOLUTION_PROGRESS_SCHEMA_VERSION,
+  computePostmortemRecurrenceImpact,
   migrateWorkerCycleArtifacts,
   migrateLegacyEvolutionProgressToCompletedTaskIds,
   selectWorkerCycleRecord,
@@ -353,6 +354,15 @@ async function saveKnowledgeMemory(stateDir, memory) {
   await writeJson(path.join(stateDir, "knowledge_memory.json"), memory);
 }
 
+async function persistSelfImprovementState(stateDir: string, updates: Record<string, unknown>) {
+  const statePath = path.join(stateDir, "self_improvement_state.json");
+  const existing = await readJson(statePath, {});
+  await writeJson(statePath, {
+    ...existing,
+    ...updates,
+  });
+}
+
 /**
  * Return all lessons from a knowledge memory object, regardless of schema version.
  * Unions working.lessons + episodic.lessons (v2) or flat lessons (v1).
@@ -365,6 +375,33 @@ function getKnowledgeMemoryAllLessons(km: any): any[] {
     ];
   }
   return Array.isArray(km?.lessons) ? km.lessons : [];
+}
+
+export function buildSelfImprovementStabilitySnapshot(cycleHealth: any, knowledgeMemory: any, postmortems: unknown[]): any {
+  const allLessons = getKnowledgeMemoryAllLessons(knowledgeMemory);
+  const recurringLessons = allLessons.filter((entry: any) => Number(entry?.recurrenceCount || 0) > 1);
+  const criticalRecurringLessons = recurringLessons.filter((entry: any) =>
+    String(entry?.severity || "").trim().toLowerCase() === "critical"
+  );
+  const maxRecurrenceCount = recurringLessons.reduce((max, entry: any) => {
+    const recurrenceCount = Number(entry?.recurrenceCount || 0);
+    return Number.isFinite(recurrenceCount) && recurrenceCount > max ? recurrenceCount : max;
+  }, 0);
+
+  return {
+    plannerHealth: String(cycleHealth?.plannerHealth || "unknown"),
+    operationalStatus: String(cycleHealth?.operationalStatus || "unknown"),
+    pipelineStatus: String(cycleHealth?.pipelineStatus || "unknown"),
+    divergenceState: String(cycleHealth?.divergenceState || "unknown"),
+    isWarning: cycleHealth?.isWarning === true,
+    recurrenceImpact: computePostmortemRecurrenceImpact(postmortems, []),
+    knowledgeMemory: {
+      totalLessons: allLessons.length,
+      recurringLessons: recurringLessons.length,
+      criticalRecurringLessons: criticalRecurringLessons.length,
+      maxRecurrenceCount,
+    },
+  };
 }
 
 function normalizeKnowledgeLessonText(value: unknown): string {
@@ -2476,18 +2513,19 @@ export async function runSelfImprovementCycle(config) {
   if (existingReports.reports.length > (siConfig.maxReports || 200)) {
     existingReports.reports = existingReports.reports.slice(-(siConfig.maxReports || 200));
   }
-  await writeJson(reportsPath, existingReports);
 
   // 8. Compute reviewer precision/recall and feed into policy tuning
   // Reads the full athena_postmortems history to compute precision, recall,
   // and FP rate. Derives policy adjustment signals and persists to reviewer_metrics.json.
   let reviewerMetrics = null;
+  let reviewerPostmortemEntries: any[] = [];
   try {
     const rawPmsForPR = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
     if (rawPmsForPR !== null) {
       const migratedForPR = migrateData(rawPmsForPR, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
       if (migratedForPR.ok) {
         const entriesForPR = extractPostmortemEntries(migratedForPR.data);
+        reviewerPostmortemEntries = entriesForPR;
         reviewerMetrics = computeReviewerPrecisionRecall(entriesForPR);
         await persistReviewerMetrics(config, reviewerMetrics);
         const policyAdj = deriveReviewerPolicyAdjustment(reviewerMetrics);
@@ -2525,6 +2563,22 @@ export async function runSelfImprovementCycle(config) {
     knownOutcomes: reviewerMetrics.knownOutcomes
   } : null;
   const healthScore = analysis.systemHealthScore || 0;
+  const stabilitySnapshot = buildSelfImprovementStabilitySnapshot(
+    (policyImpact as any).cycleHealthSnapshot || await loadCycleHealthSnapshot(stateDir),
+    knowledgeMemory,
+    reviewerPostmortemEntries,
+  );
+  (report as any).stability = stabilitySnapshot;
+  await persistSelfImprovementState(stateDir, {
+    lastRunAt: report.cycleAt,
+    cyclesSinceLastRun: 0,
+    lastHealthScore: healthScore,
+    lastLessonsCount: newLessons.length,
+    lastCapabilityGapsCount: newGaps.length,
+    stabilitySnapshot,
+  });
+  existingReports.reports[existingReports.reports.length - 1] = report;
+  await writeJson(reportsPath, existingReports);
   const lessonsStr = newLessons.map(l => `[${l.severity}] ${l.lesson}`).join("; ").slice(0, 300);
   await appendProgress(config,
     `[SELF-IMPROVEMENT] Analysis complete — health=${healthScore}/100 | lessons=${newLessons.length} | config-changes=${appliedCount} | config-blocked=${blockedCount} | canary-started=${canaryStartedCount} | ${lessonsStr}`

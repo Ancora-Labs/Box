@@ -2409,6 +2409,30 @@ async function completeDispatchCheckpoint(config, checkpoint) {
   await writeDispatchCheckpoint(config, checkpoint);
 }
 
+export async function persistSkippedDispatchCheckpoint(config, plans, opts: { planAnalyzedAt?: string | null } = {}) {
+  const normalizedPlans = Array.isArray(plans) ? plans : [];
+  if (normalizedPlans.length === 0) return null;
+  const checkpoint = await beginDispatchCheckpoint(
+    config,
+    normalizedPlans,
+    normalizedPlans.length,
+    { planAnalyzedAt: opts?.planAnalyzedAt || null },
+  );
+  await completeDispatchCheckpoint(config, checkpoint);
+  return checkpoint;
+}
+
+export async function clearAthenaPlanRejectionLatch(config) {
+  const stateDir = config.paths?.stateDir || "state";
+  try {
+    await fs.rm(path.join(stateDir, "athena_plan_rejection.json"), { force: true });
+    return true;
+  } catch (err) {
+    warn(`[orchestrator] failed to clear athena rejection latch (non-fatal): ${String((err as Error)?.message || err)}`);
+    return false;
+  }
+}
+
 async function failCloseDispatchCheckpoint(config, checkpoint, detail: {
   reasonCode?: string | null;
   retryClass?: string | null;
@@ -4745,6 +4769,9 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
     `gateBlockRisk=${String((planReview as any)?.gateBlockRiskAtApproval ?? (planReview as any)?.gateBlockRisk ?? "unknown")}`,
   );
 
+  // A prior Athena rejection must not force fresh replans after a later approval.
+  await clearAthenaPlanRejectionLatch(config);
+
   // Persist auto-approve telemetry whenever Athena's deterministic fast-path
   // fires.  This was previously defined but never called, leaving the
   // auto_approve_telemetry.json empty and breaking downstream ROI analysis.
@@ -4760,6 +4787,10 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
   try {
     const staleClosureFastpath = await runStaleArtifactClosureFastpath(config);
     if (staleClosureFastpath.eligible) {
+      const closurePlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
+      await persistSkippedDispatchCheckpoint(config, closurePlans, {
+        planAnalyzedAt: String(prometheusAnalysis?.analyzedAt || ""),
+      });
       await appendProgress(
         config,
         `[CYCLE] Stale-artifact closure fastpath — skipping worker dispatch: reason=${staleClosureFastpath.reason} stalePrCount=${staleClosureFastpath.stalePrCount}`,
@@ -7742,12 +7773,12 @@ export async function fetchMainBranchCiStatus(config: any): Promise<{
  * Returns an empty array when the state dir is missing or no triage files exist.
  * Individual file read errors are silently skipped (best-effort).
  */
-export async function loadStaleTriageRecords(config: any): Promise<Array<{ applyState: string; pr?: { number: number } }>> {
+export async function loadStaleTriageRecords(config: any): Promise<Array<Record<string, unknown>>> {
   const stateDir = config?.paths?.stateDir || "state";
   try {
     const entries = await fs.readdir(stateDir);
     const triageFiles = entries.filter((e) => /^pr_triage_\d+\.json$/.test(e));
-    const records: Array<{ applyState: string; pr?: { number: number } }> = [];
+    const records: Array<Record<string, unknown>> = [];
     for (const file of triageFiles) {
       try {
         const data = await readJson(path.join(stateDir, file), null);
@@ -7783,9 +7814,14 @@ export async function runStaleArtifactClosureFastpath(config: any): Promise<{
 }> {
   const triageRecords = await loadStaleTriageRecords(config);
   const ciStatus = await fetchMainBranchCiStatus(config);
+  const recencyWindowMs = Number.isFinite(Number(config?.runtime?.staleArtifactClosureRecencyMs))
+    ? Math.max(0, Number(config.runtime.staleArtifactClosureRecencyMs))
+    : 60 * 60 * 1000;
   const result = evaluateStaleArtifactClosureFastpath({
     staleTriageRecords: triageRecords,
     mainCiGreen: ciStatus.green,
+    nowMs: Date.now(),
+    recencyWindowMs,
   });
   return {
     eligible: result.eligible,
