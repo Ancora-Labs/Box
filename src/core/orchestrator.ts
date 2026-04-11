@@ -512,12 +512,23 @@ export function computeHealthDivergence(operationalStatus, plannerHealth, planne
     };
   }
 
-  // operational + good → fully healthy
+  if (isOperational && isGood) {
+    return {
+      divergenceState: HEALTH_DIVERGENCE_STATE.NONE,
+      pipelineStatus:  PIPELINE_HEALTH_STATUS.HEALTHY,
+      operationalStatus: opStatus,
+      plannerHealth:     phStatus,
+      plannerTruthStatus: truthStatus,
+      isWarning: false,
+    };
+  }
+
+  // No recognised combination matched — missing, null, or unrecognised inputs.
   return {
-    divergenceState: HEALTH_DIVERGENCE_STATE.NONE,
-    pipelineStatus:  PIPELINE_HEALTH_STATUS.HEALTHY,
-    operationalStatus: opStatus,
-    plannerHealth:     phStatus,
+    divergenceState: HEALTH_DIVERGENCE_STATE.UNKNOWN,
+    pipelineStatus:  PIPELINE_HEALTH_STATUS.UNKNOWN,
+    operationalStatus: opStatus || "unknown",
+    plannerHealth:     phStatus || "unknown",
     plannerTruthStatus: truthStatus,
     isWarning: false,
   };
@@ -672,6 +683,7 @@ export function autoResolveBenchmarkRecommendations(
 
   const nextRecs = [...recs];
   let resolvedCount = 0;
+  const resolvedIdxs = new Set<number>();
 
   for (const { rec, idx } of pendingIndexes) {
     const topic = normalizeTopicLabel(rec?.topic || rec?.summary || rec?.id || "");
@@ -687,10 +699,28 @@ export function autoResolveBenchmarkRecommendations(
         ? `${prevEvidence}; auto-resolved@${opts.atIso}: linked synthesis_sources match`
         : `auto-resolved@${opts.atIso}: linked synthesis_sources match`,
     };
+    resolvedIdxs.add(idx);
     resolvedCount += 1;
   }
 
-  const usedFallback = false;
+  // Partial fallback: when verified done workers exist but no specific topic link
+  // was found, mark unresolved pending recommendations as "implemented_partially".
+  let usedFallback = false;
+  if (opts.verifiedDoneWorkers > 0) {
+    for (const { rec, idx } of pendingIndexes) {
+      if (resolvedIdxs.has(idx)) continue;
+      const prevEvidence = String(rec?.evidence || "").trim();
+      nextRecs[idx] = {
+        ...rec,
+        implementationStatus: "implemented_partially",
+        evidence: prevEvidence
+          ? `${prevEvidence}; partial-fallback@${opts.atIso}: ${opts.verifiedDoneWorkers} verified worker(s) completed`
+          : `partial-fallback@${opts.atIso}: ${opts.verifiedDoneWorkers} verified worker(s) completed`,
+      };
+      usedFallback = true;
+      resolvedCount += 1;
+    }
+  }
 
   const nextEntries = [...benchmarkEntries];
   nextEntries[0] = {
