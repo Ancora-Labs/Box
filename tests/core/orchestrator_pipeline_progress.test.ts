@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { runOnce, runResumeDispatch, evaluatePreDispatchGovernanceGate, BLOCK_REASON, processEscalationQueueClosureWorkflow, isDispatchCheckpointResumable } from "../../src/core/orchestrator.js";
+import { runOnce, runResumeDispatch, evaluateDispatchResumeReadiness, evaluatePreDispatchGovernanceGate, BLOCK_REASON, processEscalationQueueClosureWorkflow, isDispatchCheckpointResumable, loadStaleTriageRecords, runStaleArtifactClosureFastpath } from "../../src/core/orchestrator.js";
 import { ATHENA_PLAN_REVIEW_REASON_CODE } from "../../src/core/athena_reviewer.js";
 import { readPipelineProgress, PIPELINE_STAGE_ENUM, PIPELINE_STEPS } from "../../src/core/pipeline_progress.js";
 import { EVENTS } from "../../src/core/event_schema.js";
@@ -692,6 +692,148 @@ describe("orchestrator checkpoint resume — pre-dispatch governance gate", () =
       typeof checkpoint.totalPlans === "number" && checkpoint.totalPlans > 0,
       `dispatch_checkpoint.json must record totalPlans > 0 when plans are present; got totalPlans=${checkpoint.totalPlans}`
     );
+  });
+
+  it("resumes from checkpoint snapshot even when live Athena review artifacts are absent", async () => {
+    const checkpoint = {
+      status: "dispatching",
+      createdAt: "2026-04-11T07:31:14.738Z",
+      updatedAt: "2026-04-11T07:58:39.727Z",
+      totalPlans: 1,
+      planCount: 1,
+      completedPlans: 0,
+      planSetSignature: "resume-snapshot-test",
+      planAnalyzedAt: "2026-04-11T07:28:14.861Z",
+      dispatchPlanSnapshot: [
+        {
+          id: "T1",
+          task_id: "T1",
+          task: "task one",
+          role: "evolution-worker",
+          wave: 1,
+          targetFiles: ["src/core/orchestrator.ts"],
+          scope: "implementation",
+          verification_commands: ["npm test"],
+          acceptance_criteria: ["tests pass"],
+        },
+      ],
+      workerBatchesSnapshot: [
+        {
+          role: "evolution-worker",
+          wave: 1,
+          plans: [
+            {
+              id: "T1",
+              task_id: "T1",
+              task: "task one",
+              role: "evolution-worker",
+              wave: 1,
+              targetFiles: ["src/core/orchestrator.ts"],
+              scope: "implementation",
+              verification_commands: ["npm test"],
+              acceptance_criteria: ["tests pass"],
+            },
+          ],
+        },
+      ],
+    };
+
+    await fs.writeFile(
+      path.join(tmpDir, "dispatch_checkpoint.json"),
+      JSON.stringify(checkpoint, null, 2),
+      "utf8",
+    );
+
+    await assert.doesNotReject(
+      () => runResumeDispatch(config),
+      "runResumeDispatch must resume from checkpoint snapshots even without athena_plan_review.json"
+    );
+
+    const progressLog = await fs.readFile(config.paths.progressFile, "utf8").catch(() => "");
+    assert.match(progressLog, /\[RESUME\] Force-resuming dispatch checkpoint/);
+    assert.match(progressLog, /\[RESUME\] Source=checkpoint_snapshot/);
+  });
+
+  it("reports blocked auto-resume when interrupted checkpoint has no usable plan source", async () => {
+    const checkpoint = {
+      status: "dispatching",
+      createdAt: "2026-04-11T07:31:14.738Z",
+      updatedAt: "2026-04-11T07:58:39.727Z",
+      totalPlans: 2,
+      planCount: 2,
+      completedPlans: 0,
+      planSetSignature: "resume-missing-plan-source",
+    };
+
+    await fs.writeFile(
+      path.join(tmpDir, "dispatch_checkpoint.json"),
+      JSON.stringify(checkpoint, null, 2),
+      "utf8",
+    );
+
+    const readiness = await evaluateDispatchResumeReadiness(config);
+    assert.equal(readiness.interrupted, true);
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.reason, "missing_live_plan_source");
+    assert.equal(readiness.planSource, "none");
+  });
+
+  it("treats checkpoint snapshots as sufficient for auto-resume readiness", async () => {
+    const checkpoint = {
+      status: "dispatching",
+      createdAt: "2026-04-11T07:31:14.738Z",
+      updatedAt: "2026-04-11T07:58:39.727Z",
+      totalPlans: 1,
+      planCount: 1,
+      completedPlans: 0,
+      planSetSignature: "resume-readiness-snapshot",
+      dispatchPlanSnapshot: [
+        {
+          id: "T1",
+          task_id: "T1",
+          task: "task one",
+          role: "evolution-worker",
+          wave: 1,
+          targetFiles: ["src/core/orchestrator.ts"],
+          scope: "implementation",
+          verification_commands: ["npm test"],
+          acceptance_criteria: ["tests pass"],
+        },
+      ],
+      workerBatchesSnapshot: [
+        {
+          role: "evolution-worker",
+          wave: 1,
+          plans: [
+            {
+              id: "T1",
+              task_id: "T1",
+              task: "task one",
+              role: "evolution-worker",
+              wave: 1,
+              targetFiles: ["src/core/orchestrator.ts"],
+              scope: "implementation",
+              verification_commands: ["npm test"],
+              acceptance_criteria: ["tests pass"],
+            },
+          ],
+        },
+      ],
+    };
+
+    await fs.writeFile(
+      path.join(tmpDir, "dispatch_checkpoint.json"),
+      JSON.stringify(checkpoint, null, 2),
+      "utf8",
+    );
+
+    const readiness = await evaluateDispatchResumeReadiness(config);
+    assert.equal(readiness.interrupted, true);
+    assert.equal(readiness.ready, true);
+    assert.equal(readiness.reason, "checkpoint_snapshot_ready");
+    assert.equal(readiness.planSource, "checkpoint_snapshot");
+    assert.equal(readiness.planCount, 1);
+    assert.equal(readiness.workerBatchCount, 1);
   });
 });
 
@@ -3266,11 +3408,14 @@ describe("runStaleAutomatedPrGuard — applyState state machine", () => {
   // Reproduce the idempotency gate logic to verify it is correct in isolation.
   function isTerminalApplyState(record: unknown): boolean {
     if (!record || typeof record !== "object") return false;
-    return (record as Record<string, unknown>).applyState === "applied";
+    const state = (record as Record<string, unknown>).applyState;
+    // "applied"    — action successfully executed; do not repeat.
+    // "superseded" — GitHub returned HTTP 404; PR is permanently resolved.
+    return state === "applied" || state === "superseded";
   }
 
   // Reproduce the valid-state set for schema validation.
-  const VALID_APPLY_STATES = ["pending", "applied", "failed", "skipped"];
+  const VALID_APPLY_STATES = ["pending", "applied", "failed", "skipped", "superseded"];
 
   function buildTriageRecord(applyState: string, decision: string = "MERGE") {
     return {
@@ -3300,6 +3445,11 @@ describe("runStaleAutomatedPrGuard — applyState state machine", () => {
   it("applyState=failed is not terminal — retry on next cycle", () => {
     const record = buildTriageRecord("failed");
     assert.equal(isTerminalApplyState(record), false);
+  });
+
+  it("applyState=superseded is terminal — HTTP 404 means PR is permanently resolved", () => {
+    const record = buildTriageRecord("superseded");
+    assert.equal(isTerminalApplyState(record), true);
   });
 
   it("applyState=skipped (dry-run) is not terminal — can be applied later", () => {
@@ -3356,5 +3506,136 @@ describe("runStaleAutomatedPrGuard — applyState state machine", () => {
       // the invariant is tracked. Existing records without appliedAt are migration candidates.
       assert.equal(typeof hasAppliedAt, "boolean", "appliedAt presence check must be boolean");
     }
+  });
+});
+
+// ── Stale-artifact closure fastpath — orchestrator integration ────────────────
+
+describe("loadStaleTriageRecords — file discovery", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-stale-triage-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("returns empty array when state dir has no pr_triage files", async () => {
+    const cfg = { paths: { stateDir: tmpDir } };
+    const records = await loadStaleTriageRecords(cfg);
+    assert.deepEqual(records, []);
+  });
+
+  it("reads a single triage record correctly", async () => {
+    const record = { schemaVersion: 1, applyState: "superseded", pr: { number: 42 } };
+    await fs.writeFile(path.join(tmpDir, "pr_triage_42.json"), JSON.stringify(record), "utf8");
+    const cfg = { paths: { stateDir: tmpDir } };
+    const records = await loadStaleTriageRecords(cfg);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].applyState, "superseded");
+  });
+
+  it("reads multiple triage records from the state dir", async () => {
+    for (const [num, state] of [[10, "applied"], [11, "superseded"], [12, "failed"]]) {
+      await fs.writeFile(
+        path.join(tmpDir, `pr_triage_${num}.json`),
+        JSON.stringify({ applyState: state }),
+        "utf8",
+      );
+    }
+    const cfg = { paths: { stateDir: tmpDir } };
+    const records = await loadStaleTriageRecords(cfg);
+    assert.equal(records.length, 3);
+    const states = records.map((r) => r.applyState).sort();
+    assert.deepEqual(states, ["applied", "failed", "superseded"]);
+  });
+
+  it("ignores non-triage files in the state dir", async () => {
+    await fs.writeFile(path.join(tmpDir, "orchestrator_health.json"), "{}", "utf8");
+    await fs.writeFile(path.join(tmpDir, "prometheus_analysis.json"), "{}", "utf8");
+    const cfg = { paths: { stateDir: tmpDir } };
+    const records = await loadStaleTriageRecords(cfg);
+    assert.deepEqual(records, []);
+  });
+
+  it("returns empty array when state dir does not exist", async () => {
+    const cfg = { paths: { stateDir: path.join(tmpDir, "nonexistent") } };
+    const records = await loadStaleTriageRecords(cfg);
+    assert.deepEqual(records, []);
+  });
+});
+
+describe("runStaleArtifactClosureFastpath — orchestrator decision", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-closure-fp-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("returns eligible=false when no triage records exist (even if CI were green)", async () => {
+    // No GitHub token → fetchMainBranchCiStatus returns green=false, and no records.
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+    assert.equal(result.eligible, false);
+    assert.equal(result.stalePrCount, 0);
+    assert.equal(result.reason, "no_stale_pr_records");
+  });
+
+  it("returns eligible=false when records exist but CI status is non-green", async () => {
+    // Write a terminal triage record.
+    await fs.writeFile(
+      path.join(tmpDir, "pr_triage_99.json"),
+      JSON.stringify({ applyState: "superseded" }),
+      "utf8",
+    );
+    // No GitHub credentials → CI green = false.
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+    assert.equal(result.eligible, false);
+    assert.equal(result.stalePrCount, 1);
+    assert.equal(result.mainCiGreen, false);
+    assert.equal(result.reason, "main_ci_not_green");
+  });
+
+  it("returns eligible=false when a non-terminal record exists", async () => {
+    await fs.writeFile(
+      path.join(tmpDir, "pr_triage_55.json"),
+      JSON.stringify({ applyState: "pending" }),
+      "utf8",
+    );
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+    assert.equal(result.eligible, false);
+    assert.equal(result.stalePrCount, 1);
+    assert.equal(result.reason, "non_terminal_stale_pr_records");
+  });
+
+  it("result always includes stalePrCount and mainCiGreen fields", async () => {
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+    assert.ok("stalePrCount" in result, "stalePrCount must be present");
+    assert.ok("mainCiGreen" in result, "mainCiGreen must be present");
+    assert.ok("eligible" in result, "eligible must be present");
+    assert.ok("reason" in result, "reason must be present");
+  });
+
+  it("negative path: mixed terminal/non-terminal records block the fastpath", async () => {
+    for (const [num, state] of [[1, "applied"], [2, "pending"]]) {
+      await fs.writeFile(
+        path.join(tmpDir, `pr_triage_${num}.json`),
+        JSON.stringify({ applyState: state }),
+        "utf8",
+      );
+    }
+    const cfg = { paths: { stateDir: tmpDir }, env: {} };
+    const result = await runStaleArtifactClosureFastpath(cfg);
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, "non_terminal_stale_pr_records");
   });
 });
