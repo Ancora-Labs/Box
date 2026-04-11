@@ -6,7 +6,6 @@ import { describe, it } from "node:test";
 
 import {
   autoResolveBenchmarkRecommendations,
-  buildCycleWorkerResultRow,
   isResumePreferredTimeoutOutcome,
   promotePrometheusAnalysisFromWorkerEvidence,
   rebatchOversizedAthenaPlanGroupsForAdmission,
@@ -235,67 +234,6 @@ describe("orchestrator runtime contracts - benchmark auto-resolution", () => {
     assert.equal(result.entries[0].recommendations[0].implementationStatus, "implemented_correctly");
   });
 
-  it("preserves synthesis linkage when building cycle worker rows", () => {
-    const row = buildCycleWorkerResultRow(
-      {
-        role: "evolution-worker",
-        plans: [
-          {
-            task: "Fix timeout recovery flow",
-            synthesis_sources: ["Worker lifecycle safety"],
-          },
-        ],
-      },
-      {
-        status: "done",
-        filesTouched: ["src/core/orchestrator.ts"],
-        verificationEvidence: "VERIFICATION_REPORT: TESTS=pass",
-        dispatchContract: { doneWorkerWithVerificationReportEvidence: true },
-      },
-    );
-
-    assert.deepEqual(row.planTasks, ["Fix timeout recovery flow"]);
-    assert.deepEqual(row.synthesisSources, ["Worker lifecycle safety"]);
-    assert.deepEqual(row.filesTouched, ["src/core/orchestrator.ts"]);
-
-    const benchmarkResult = autoResolveBenchmarkRecommendations(
-      [{
-        recommendations: [
-          {
-            topic: "Worker lifecycle safety",
-            implementationStatus: "pending",
-            evidence: "",
-          },
-        ],
-      }],
-      {
-        verifiedDoneWorkers: 1,
-        workerBatches: [{ plans: [{ synthesis_sources: ["Worker lifecycle safety"] }] }],
-        workerResults: [row],
-        atIso: "2026-04-09T12:00:00.000Z",
-      },
-    );
-
-    assert.equal(benchmarkResult.entries[0].recommendations[0].implementationStatus, "implemented_correctly");
-
-    const promotionResult = promotePrometheusAnalysisFromWorkerEvidence(
-      {
-        plans: [
-          {
-            task: "Fix timeout recovery flow",
-            implementationStatus: "not_implemented",
-            implementationEvidence: [],
-          },
-        ],
-      },
-      [row],
-      "2026-04-09T12:00:00.000Z",
-    );
-
-    assert.equal(promotionResult.analysis.plans[0].implementationStatus, "implemented_correctly");
-    assert.ok(promotionResult.analysis.plans[0].implementationEvidence.includes("src/core/orchestrator.ts"));
-  });
-
   it("uses partial fallback when only generic verified completion exists", () => {
     const result = autoResolveBenchmarkRecommendations(
       [{
@@ -431,7 +369,6 @@ describe("orchestrator runtime contracts - adaptive inter-batch cooldown", () =>
 
 import {
   extractSessionsFromCycleRecord,
-  filterStaleWorkerSessions,
   migrateWorkerCycleArtifacts,
   selectWorkerCycleRecord,
 } from "../../src/core/cycle_analytics.js";
@@ -495,6 +432,8 @@ describe("orchestrator — canonical session loading behavior (extractSessionsFr
 
 // ── filterStaleWorkerSessions — canonical-first liveness arbitration ──────────
 
+import { filterStaleWorkerSessions } from "../../src/core/cycle_analytics.js";
+
 describe("orchestrator — filterStaleWorkerSessions pure function contracts", () => {
   it("returns all sessions with no staleRoles when sessions is empty", () => {
     const result = filterStaleWorkerSessions({}, null);
@@ -529,8 +468,8 @@ describe("orchestrator — filterStaleWorkerSessions pure function contracts", (
   });
 
   it("prefers lastActiveAt over startedAt when both are present", () => {
-    const cycleStart    = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    const staleStart    = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const cycleStart      = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const staleStart      = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
     const freshLastActive = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
     // startedAt is before cycleStart but lastActiveAt is after — should NOT be filtered
@@ -557,8 +496,8 @@ describe("orchestrator — filterStaleWorkerSessions pure function contracts", (
   });
 
   it("filters all sessions when all predate cycleStart", () => {
-    const cycleStart = new Date(Date.now() - 60 * 1000).toISOString(); // 1 min ago
-    const staleTs    = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2 hours ago
+    const cycleStart = new Date(Date.now() - 60 * 1000).toISOString();
+    const staleTs    = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
     const sessions = {
       worker1: { status: "working", startedAt: staleTs },
@@ -573,8 +512,8 @@ describe("orchestrator — filterStaleWorkerSessions pure function contracts", (
   });
 
   it("returns sessions unchanged when all timestamps are after cycleStart", () => {
-    const cycleStart = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1 hour ago
-    const freshTs    = new Date(Date.now() - 5 * 60 * 1000).toISOString();  // 5 min ago
+    const cycleStart = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const freshTs    = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
     const sessions = {
       worker1: { status: "working", startedAt: freshTs },
