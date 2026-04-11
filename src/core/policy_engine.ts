@@ -11,6 +11,14 @@ import {
   isGovernanceCanaryBreachActive
 } from "./governance_canary.js";
 
+/**
+ * The reason code prefix used when a runtime hook enforcement denies a tool-use envelope.
+ * Value matches the prefix of the blockReason string returned by enforcePreExecuteHookDecisions.
+ * Consumers can use this constant to deterministically detect hook denial blocks without
+ * hard-coding the string literal in every check.
+ */
+export const HOOK_DENIAL_REASON_CODE = "runtime_hook_denied";
+
 export async function loadPolicy(config) {
   return readJson(config.paths.policyFile, {
     protectedPaths: [],

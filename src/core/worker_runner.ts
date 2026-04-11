@@ -1755,6 +1755,8 @@ export function isNonRetryablePolicyBlockReason(reason: unknown): boolean {
   if (text.startsWith("cloud_agent_governance_policy_violation:")) return true;
   if (text.includes("non_retryable=true")) return true;
   if (text.startsWith("tool_policy_denied:hook_deny_")) return true;
+  // Runtime hook denials from enforcePreExecuteHookDecisions are always non-retryable.
+  if (text.startsWith("runtime_hook_denied:")) return true;
   return false;
 }
 

@@ -326,8 +326,15 @@ export async function runSystemHealthAudit(config, githubState, AthenaCoordinati
       workerIssues.push(`${role}: errored`);
     }
     if (session?.status === "working") {
-      const lastActive = session.lastActiveAt ? new Date(session.lastActiveAt).getTime() : 0;
-      const minutesSinceActive = lastActive ? (Date.now() - lastActive) / 60000 : Infinity;
+      const lastActive = session.lastActiveAt
+        ? new Date(session.lastActiveAt).getTime()
+        : session.startedAt
+          ? new Date(session.startedAt).getTime()
+          : null;
+      // Only report stuck when we have a meaningful timestamp; skip if neither
+      // lastActiveAt nor startedAt is present to avoid Infinity false positives.
+      if (lastActive === null) continue;
+      const minutesSinceActive = (Date.now() - lastActive) / 60000;
       if (minutesSinceActive > 60) {
         workerIssues.push(`${role}: stuck working for ${minutesSinceActive.toFixed(0)}m`);
       }

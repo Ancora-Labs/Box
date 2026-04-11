@@ -1166,3 +1166,36 @@ describe("buildAttemptArtifact", () => {
     assert.equal(artifact.outcome, "done");
   });
 });
+
+// ── isNonRetryablePolicyBlockReason ─────────────────────────────────────────────
+
+import { isNonRetryablePolicyBlockReason } from "../../src/core/worker_runner.js";
+
+describe("isNonRetryablePolicyBlockReason", () => {
+  it("returns true for runtime_hook_denied: prefix", () => {
+    assert.equal(isNonRetryablePolicyBlockReason("runtime_hook_denied:SOME_CODE"), true);
+  });
+
+  it("returns true for runtime_hook_denied: with any suffix", () => {
+    assert.equal(isNonRetryablePolicyBlockReason("runtime_hook_denied:write_critical_system_file"), true);
+  });
+
+  it("returns true for cloud_agent_governance_policy_violation: prefix", () => {
+    assert.equal(isNonRetryablePolicyBlockReason("cloud_agent_governance_policy_violation:sec123"), true);
+  });
+
+  it("returns true for tool_policy_denied:hook_deny_ prefix", () => {
+    assert.equal(isNonRetryablePolicyBlockReason("tool_policy_denied:hook_deny_write"), true);
+  });
+
+  it("returns false for plain policy reasons that are retryable", () => {
+    assert.equal(isNonRetryablePolicyBlockReason("rate_limited"), false);
+    assert.equal(isNonRetryablePolicyBlockReason("temporary_outage"), false);
+    assert.equal(isNonRetryablePolicyBlockReason(""), false);
+  });
+
+  it("negative path: partial prefix match does not trigger non-retryable", () => {
+    assert.equal(isNonRetryablePolicyBlockReason("runtime_hook"), false);
+    assert.equal(isNonRetryablePolicyBlockReason("runtime_hook_allowed:X"), false);
+  });
+});

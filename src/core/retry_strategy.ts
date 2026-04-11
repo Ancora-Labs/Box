@@ -139,6 +139,22 @@ export const RETRY_RESOLVE_REASON = Object.freeze({
   INVALID_ATTEMPTS:      "INVALID_ATTEMPTS",
 });
 
+/**
+ * Sentinel constant indicating that runtime hook denial blocks are always
+ * non-retryable. Hook denials require policy change or role-access adjustment,
+ * not re-execution — the correct retry action is ESCALATE immediately.
+ *
+ * Consumers that detect a "runtime_hook_denied:" dispatchBlockReason should
+ * short-circuit retry logic and escalate directly rather than cycling through
+ * REASSIGN or SPLIT attempts.
+ */
+export const HOOK_DENIAL_NON_RETRYABLE = Object.freeze({
+  retryAction:   "escalate",
+  retryable:     false,
+  reason:        "runtime_hook_denied_always_non_retryable",
+  escalateAfter: 0,
+});
+
 // ── Default retry policies per failure class (AC#12) ─────────────────────────
 
 /**
