@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import {
   autoResolveBenchmarkRecommendations,
+  buildCycleWorkerResultRow,
   isResumePreferredTimeoutOutcome,
   promotePrometheusAnalysisFromWorkerEvidence,
   rebatchOversizedAthenaPlanGroupsForAdmission,
@@ -234,6 +235,67 @@ describe("orchestrator runtime contracts - benchmark auto-resolution", () => {
     assert.equal(result.entries[0].recommendations[0].implementationStatus, "implemented_correctly");
   });
 
+  it("preserves synthesis linkage when building cycle worker rows", () => {
+    const row = buildCycleWorkerResultRow(
+      {
+        role: "evolution-worker",
+        plans: [
+          {
+            task: "Fix timeout recovery flow",
+            synthesis_sources: ["Worker lifecycle safety"],
+          },
+        ],
+      },
+      {
+        status: "done",
+        filesTouched: ["src/core/orchestrator.ts"],
+        verificationEvidence: "VERIFICATION_REPORT: TESTS=pass",
+        dispatchContract: { doneWorkerWithVerificationReportEvidence: true },
+      },
+    );
+
+    assert.deepEqual(row.planTasks, ["Fix timeout recovery flow"]);
+    assert.deepEqual(row.synthesisSources, ["Worker lifecycle safety"]);
+    assert.deepEqual(row.filesTouched, ["src/core/orchestrator.ts"]);
+
+    const benchmarkResult = autoResolveBenchmarkRecommendations(
+      [{
+        recommendations: [
+          {
+            topic: "Worker lifecycle safety",
+            implementationStatus: "pending",
+            evidence: "",
+          },
+        ],
+      }],
+      {
+        verifiedDoneWorkers: 1,
+        workerBatches: [{ plans: [{ synthesis_sources: ["Worker lifecycle safety"] }] }],
+        workerResults: [row],
+        atIso: "2026-04-09T12:00:00.000Z",
+      },
+    );
+
+    assert.equal(benchmarkResult.entries[0].recommendations[0].implementationStatus, "implemented_correctly");
+
+    const promotionResult = promotePrometheusAnalysisFromWorkerEvidence(
+      {
+        plans: [
+          {
+            task: "Fix timeout recovery flow",
+            implementationStatus: "not_implemented",
+            implementationEvidence: [],
+          },
+        ],
+      },
+      [row],
+      "2026-04-09T12:00:00.000Z",
+    );
+
+    assert.equal(promotionResult.analysis.plans[0].implementationStatus, "implemented_correctly");
+    assert.ok(promotionResult.analysis.plans[0].implementationEvidence.includes("src/core/orchestrator.ts"));
+  });
+
   it("uses partial fallback when only generic verified completion exists", () => {
     const result = autoResolveBenchmarkRecommendations(
       [{
@@ -369,6 +431,7 @@ describe("orchestrator runtime contracts - adaptive inter-batch cooldown", () =>
 
 import {
   extractSessionsFromCycleRecord,
+  filterStaleWorkerSessions,
   migrateWorkerCycleArtifacts,
   selectWorkerCycleRecord,
 } from "../../src/core/cycle_analytics.js";
@@ -427,5 +490,100 @@ describe("orchestrator — canonical session loading behavior (extractSessionsFr
     // Verify the extracted sessions can feed recoverStaleWorkerSessions (structural compatibility).
     const recovered = recoverStaleWorkerSessions(sessions!);
     assert.ok(typeof recovered === "object" && recovered !== null, "recovered must be an object");
+  });
+});
+
+// ── filterStaleWorkerSessions — canonical-first liveness arbitration ──────────
+
+describe("orchestrator — filterStaleWorkerSessions pure function contracts", () => {
+  it("returns all sessions with no staleRoles when sessions is empty", () => {
+    const result = filterStaleWorkerSessions({}, null);
+    assert.deepEqual(result.sessions, {});
+    assert.deepEqual(result.staleRoles, []);
+  });
+
+  it("returns all sessions unchanged when cycleStart is null (no reference available)", () => {
+    const sessions = {
+      worker1: { status: "working", startedAt: "2020-01-01T00:00:00.000Z" },
+    };
+    const result = filterStaleWorkerSessions(sessions, null);
+    assert.ok("worker1" in result.sessions, "session must be kept when cycleStart is null");
+    assert.deepEqual(result.staleRoles, [], "no stale roles when cycleStart is null");
+  });
+
+  it("excludes sessions whose startedAt predates cycleStart", () => {
+    const cycleStart = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const staleTs    = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    const freshTs    = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    const sessions = {
+      stale:  { status: "working", startedAt: staleTs },
+      active: { status: "working", startedAt: freshTs },
+    };
+    const result = filterStaleWorkerSessions(sessions, cycleStart);
+
+    assert.ok(!("stale" in result.sessions), "stale session must be excluded");
+    assert.ok("active" in result.sessions, "active session must remain");
+    assert.ok(result.staleRoles.includes("stale"), "stale role must be reported");
+    assert.equal(result.staleRoles.length, 1);
+  });
+
+  it("prefers lastActiveAt over startedAt when both are present", () => {
+    const cycleStart    = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const staleStart    = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const freshLastActive = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+    // startedAt is before cycleStart but lastActiveAt is after — should NOT be filtered
+    const sessions = {
+      mixed: { status: "working", startedAt: staleStart, lastActiveAt: freshLastActive },
+    };
+    const result = filterStaleWorkerSessions(sessions, cycleStart);
+
+    assert.ok("mixed" in result.sessions,
+      "session with stale startedAt but fresh lastActiveAt must be kept");
+    assert.deepEqual(result.staleRoles, []);
+  });
+
+  it("keeps sessions with no parseable timestamp (cannot be proven stale)", () => {
+    const cycleStart = new Date().toISOString();
+    const sessions = {
+      unknown: { status: "working" }, // no timestamps at all
+    };
+    const result = filterStaleWorkerSessions(sessions, cycleStart);
+
+    assert.ok("unknown" in result.sessions,
+      "session with no timestamp must be kept (cannot prove staleness)");
+    assert.deepEqual(result.staleRoles, []);
+  });
+
+  it("filters all sessions when all predate cycleStart", () => {
+    const cycleStart = new Date(Date.now() - 60 * 1000).toISOString(); // 1 min ago
+    const staleTs    = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2 hours ago
+
+    const sessions = {
+      worker1: { status: "working", startedAt: staleTs },
+      worker2: { status: "idle",    startedAt: staleTs },
+    };
+    const result = filterStaleWorkerSessions(sessions, cycleStart);
+
+    assert.deepEqual(result.sessions, {}, "all sessions must be filtered");
+    assert.equal(result.staleRoles.length, 2);
+    assert.ok(result.staleRoles.includes("worker1"));
+    assert.ok(result.staleRoles.includes("worker2"));
+  });
+
+  it("returns sessions unchanged when all timestamps are after cycleStart", () => {
+    const cycleStart = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1 hour ago
+    const freshTs    = new Date(Date.now() - 5 * 60 * 1000).toISOString();  // 5 min ago
+
+    const sessions = {
+      worker1: { status: "working", startedAt: freshTs },
+      worker2: { status: "working", startedAt: freshTs },
+    };
+    const result = filterStaleWorkerSessions(sessions, cycleStart);
+
+    assert.ok("worker1" in result.sessions);
+    assert.ok("worker2" in result.sessions);
+    assert.deepEqual(result.staleRoles, []);
   });
 });
