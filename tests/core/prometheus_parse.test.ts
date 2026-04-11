@@ -1970,7 +1970,7 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
       wave: 1,
       capacityDelta: 0.15,
       requestROI: 2.5,
-      verification_commands: ["npm test"],
+      verification_commands: ["tests/core/prometheus_parse.test.ts"],
       ...overrides,
     };
   }
@@ -1981,67 +1981,76 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
     assert.deepEqual(result.reasons, []);
   });
 
-  it("returns recoverable=false with no_task_identity when task/title/task_id/id are all absent", () => {
+  it("returns recoverable=false with missing task identity, ROI, and verification coupling when raw packet is skeletal", () => {
     const result = checkPacketCompleteness({ capacityDelta: 0.1, requestROI: 1.5 });
     assert.equal(result.recoverable, false);
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY));
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
-  it("returns recoverable=true when capacityDelta is absent (normalization synthesizes default)", () => {
+  it("returns recoverable=false when capacityDelta is absent", () => {
     const plan = validRawPlan();
     delete (plan as any).capacityDelta;
     const result = checkPacketCompleteness(plan);
-    assert.equal(result.recoverable, true);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_CAPACITY_DELTA));
   });
 
-  it("returns recoverable=true when capacityDelta is out of range (normalization synthesizes default)", () => {
+  it("returns recoverable=false when capacityDelta is out of range", () => {
     const result = checkPacketCompleteness(validRawPlan({ capacityDelta: 2.0 }));
-    assert.equal(result.recoverable, true);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA));
   });
 
-  it("returns recoverable=true when capacityDelta is non-finite (normalization synthesizes default)", () => {
+  it("returns recoverable=false when capacityDelta is non-finite", () => {
     const result = checkPacketCompleteness(validRawPlan({ capacityDelta: NaN }));
-    assert.equal(result.recoverable, true);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA));
   });
 
-  it("returns recoverable=true when requestROI is absent (normalization synthesizes default)", () => {
+  it("returns recoverable=false when requestROI is absent", () => {
     const plan = validRawPlan();
     delete (plan as any).requestROI;
     const result = checkPacketCompleteness(plan);
-    assert.equal(result.recoverable, true);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_REQUEST_ROI));
   });
 
-  it("returns recoverable=true when requestROI is zero (normalization synthesizes default)", () => {
+  it("returns recoverable=false when requestROI is zero", () => {
     const result = checkPacketCompleteness(validRawPlan({ requestROI: 0 }));
-    assert.equal(result.recoverable, true);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI));
   });
 
-  it("returns recoverable=true when requestROI is negative (normalization synthesizes default)", () => {
+  it("returns recoverable=false when requestROI is negative", () => {
     const result = checkPacketCompleteness(validRawPlan({ requestROI: -1 }));
-    assert.equal(result.recoverable, true);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI));
   });
 
-  it("accepts non-empty verification text when verification_commands is absent", () => {
-    const plan = validRawPlan({ verification: "npm test" });
+  it("accepts specific verification text when verification_commands is absent", () => {
+    const plan = validRawPlan({ verification: "tests/core/prometheus_parse.test.ts" });
     delete (plan as any).verification_commands;
     const result = checkPacketCompleteness(plan);
     assert.equal(result.recoverable, true);
-    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+    assert.deepEqual(result.reasons, []);
   });
 
-  it("keeps packet recoverable when verification_commands is absent and verification is blank", () => {
+  it("returns recoverable=false when verification_commands is absent and verification is blank", () => {
     const plan = validRawPlan({ verification: "   " });
     delete (plan as any).verification_commands;
     const result = checkPacketCompleteness(plan);
-    assert.equal(result.recoverable, true);
-    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
-  it("only reports no_task_identity when task is missing (capacityDelta/requestROI handled by normalization)", () => {
-    const result = checkPacketCompleteness({ wave: 1 }); // no task — only unrecoverable condition
+  it("reports all unrecoverable raw-field reasons when task is missing", () => {
+    const result = checkPacketCompleteness({ wave: 1 });
     assert.equal(result.recoverable, false);
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY));
-    assert.equal(result.reasons.length, 1);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_CAPACITY_DELTA));
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_REQUEST_ROI));
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
   it("accepts title as task identity fallback", () => {
@@ -2074,45 +2083,51 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
     assert.equal(result.recoverable, true);
   });
 
-  it("negative path: only task identity is checked at raw stage", () => {
-    // No task identity → single reason (capacityDelta/requestROI not checked here)
+  it("negative path: raw stage can report multiple unrecoverable reasons together", () => {
     const result = checkPacketCompleteness({ capacityDelta: 999, requestROI: 2.0 });
     assert.equal(result.recoverable, false);
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY));
-    assert.equal(result.reasons.length, 1);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA));
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
-  // ── Raw packet stage: verification coupling is synthesized downstream ─────
+  // ── Raw packet stage: verification coupling is mandatory ─────────────────
 
-  it("returns recoverable=true when verification_commands is absent", () => {
+  it("returns recoverable=false when verification_commands is absent", () => {
     const plan = validRawPlan();
     delete (plan as any).verification_commands;
     const result = checkPacketCompleteness(plan);
-    assert.equal(result.recoverable, true);
-    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
-  it("returns recoverable=true when verification_commands is empty array", () => {
+  it("returns recoverable=false when verification_commands is empty array", () => {
     const result = checkPacketCompleteness(validRawPlan({ verification_commands: [] }));
-    assert.equal(result.recoverable, true);
-    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
-  it("returns recoverable=true when all verification_commands are empty strings", () => {
+  it("returns recoverable=false when all verification_commands are empty strings", () => {
     const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["", "  "] }));
-    assert.equal(result.recoverable, true);
-    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 
   it("returns recoverable=true when verification_commands has one non-empty command", () => {
-    const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["npm test"] }));
+    const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["tests/core/prometheus_parse.test.ts"] }));
     assert.equal(result.recoverable, true);
     assert.deepEqual(result.reasons, []);
   });
 
-  it("negative path: packet with all unrecoverable fields does not add missing coupling at raw stage", () => {
+  it("negative path: packet with all unrecoverable fields includes missing verification coupling", () => {
     const result = checkPacketCompleteness({ wave: 1 }); // missing everything
-    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), false);
+    assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), true);
+  });
+
+  it("returns recoverable=false when verification_commands contain only non-specific CLI commands", () => {
+    const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["npm test", "pnpm vitest"] }));
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
   });
 });
 

@@ -57,6 +57,7 @@ import {
   computePacketDensityMetrics,
   isThinPacketForAdmission,
   getPacketThresholdsForLane,
+  resolveNamedVerificationTarget,
   scanParsedOutputForProcessThought,
   OUTPUT_FIDELITY_GATE_FAIL_REASON,
   isCiCriticalMandatoryFinding,
@@ -2002,8 +2003,10 @@ export function checkHighRiskPacketConfidence(rawPlan: any): { requiresRejection
  * Unrecoverable conditions:
  *  1. No task identity  — all of task/title/task_id/id are absent or empty.
  *     Normalization falls back to "Task-N" which carries no semantic meaning.
- * Fields like capacityDelta, requestROI, and verification are NOT treated as
- * unrecoverable because normalizePlanFromTask() synthesizes sensible defaults.
+ *  2. Missing/invalid capacityDelta — raw packet must declare measurable impact.
+ *  3. Missing/invalid requestROI    — raw packet must declare request economics.
+ *  4. Missing verification coupling — no specific named verification target can
+ *     be resolved from verification or verification_commands.
  *
  * Reason codes are values from the canonical PACKET_VIOLATION_CODE taxonomy
  * (plan_contract_validator.ts) so they are identical to codes emitted by the
@@ -2025,8 +2028,27 @@ export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; r
     reasons.push(PACKET_VIOLATION_CODE.NO_TASK_IDENTITY);
   }
 
-  // capacityDelta and requestROI are NOT checked here because
-  // normalizePlanFromTask() synthesizes defaults (0.1 and 1.0 respectively).
+  if (!("capacityDelta" in rawPlan)) {
+    reasons.push(PACKET_VIOLATION_CODE.MISSING_CAPACITY_DELTA);
+  } else {
+    const capacityDelta = Number(rawPlan.capacityDelta);
+    if (!Number.isFinite(capacityDelta) || capacityDelta < -1 || capacityDelta > 1) {
+      reasons.push(PACKET_VIOLATION_CODE.INVALID_CAPACITY_DELTA);
+    }
+  }
+
+  if (!("requestROI" in rawPlan)) {
+    reasons.push(PACKET_VIOLATION_CODE.MISSING_REQUEST_ROI);
+  } else {
+    const requestROI = Number(rawPlan.requestROI);
+    if (!Number.isFinite(requestROI) || requestROI <= 0) {
+      reasons.push(PACKET_VIOLATION_CODE.INVALID_REQUEST_ROI);
+    }
+  }
+
+  if (resolveNamedVerificationTarget(rawPlan) === null) {
+    reasons.push(PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING);
+  }
 
   return { recoverable: reasons.length === 0, reasons };
 }
