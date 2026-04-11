@@ -503,6 +503,17 @@ describe("resolveAthenaCorrectionDispatchBlockReason precedence", () => {
     ]);
     assert.equal(reason, null);
   });
+
+  it("treats rolling_yield_throttle correction token as a blocking governance signal", () => {
+    const reason = resolveAthenaCorrectionDispatchBlockReason([
+      "athena correction: rolling_yield_throttle observed in dispatch telemetry",
+      "autonomy_execution_gate_not_ready (advisory)",
+    ]);
+    assert.equal(
+      reason,
+      `${BLOCK_REASON.ROLLING_YIELD_THROTTLE}:athena_correction_token=${BLOCK_REASON.ROLLING_YIELD_THROTTLE}`,
+    );
+  });
 });
 
 // ── Task 2: AUTO_APPROVE_DISPATCH_SIGNAL invariants ───────────────────────────
@@ -629,5 +640,39 @@ describe("evaluatePreDispatchGovernanceGate — ROLLING_COMPLETION_YIELD gate", 
     } finally {
       await fs.rm(stateDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("evaluatePreDispatchGovernanceGate — lane diversity pre-dispatch gate", () => {
+  it("blocks in pre-dispatch gate when active lane count is below minLanes", async () => {
+    const config = passAllConfig({
+      workerPool: { minLanes: 2 },
+    });
+    const plans = [
+      {
+        role: "Evolution Worker",
+        task: "task-a",
+        task_id: "a",
+        acceptance_criteria: ["ac-a"],
+        verification: "npm test -- tests/core/orchestrator_gate_precedence.test.ts",
+        verification_commands: ["npm test -- tests/core/orchestrator_gate_precedence.test.ts"],
+      },
+      {
+        role: "Evolution Worker",
+        task: "task-b",
+        task_id: "b",
+        acceptance_criteria: ["ac-b"],
+        verification: "npm test -- tests/core/orchestrator_gate_precedence.test.ts",
+        verification_commands: ["npm test -- tests/core/orchestrator_gate_precedence.test.ts"],
+      },
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "lane-diversity-test");
+    assert.equal(result.blocked, true);
+    assert.ok(
+      String(result.reason || "").startsWith(BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED),
+      `reason must start with '${BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED}' — got: ${result.reason}`,
+    );
+    assert.equal(result.gateKey, "LANE_DIVERSITY");
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.LANE_DIVERSITY);
   });
 });

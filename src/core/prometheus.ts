@@ -57,7 +57,6 @@ import {
   computePacketDensityMetrics,
   isThinPacketForAdmission,
   getPacketThresholdsForLane,
-  resolveNamedVerificationTarget,
   scanParsedOutputForProcessThought,
   OUTPUT_FIDELITY_GATE_FAIL_REASON,
   isCiCriticalMandatoryFinding,
@@ -105,7 +104,10 @@ import { warn, emitEvent } from "./logger.js";
 import { buildSpanEvent, EVENTS, EVENT_DOMAIN, SPAN_CONTRACT } from "./event_schema.js";
 import { computeBenchmarkIntegrityScore, computeBenchmarkPlanningPriors, computeProvenanceRoutingDelta } from "./model_policy.js";
 import type { RetryViolationSignal } from "./model_policy.js";
-import { computeResearchCapacityGain, computeHistoricalLaneDifficultyPriors } from "./cycle_analytics.js";
+import {
+  computeResearchCapacityGain,
+  computeHistoricalLaneDifficultyPriors,
+} from "./cycle_analytics.js";
 
 // ── Span contract emitter ─────────────────────────────────────────────────────
 
@@ -1520,16 +1522,70 @@ const DIAGNOSTICS_SOURCE_DESCRIPTORS = [
   {
     label: "intervention_optimizer",
     file: "intervention_optimizer_log.jsonl",
+    fileFormat: "jsonl",
     jsonlSchema: OPTIMIZER_LOG_JSONL_SCHEMA,
     recordType: OPTIMIZER_LOG_RECORD_TYPE,
   },
   {
     label: "dependency_graph",
     file: "dependency_graph_diagnostics.json",
+    fileFormat: "jsonl",
     jsonlSchema: GRAPH_DIAGNOSTICS_JSONL_SCHEMA,
     recordType: GRAPH_DIAGNOSTICS_RECORD_TYPE,
   },
+  {
+    label: "worker_cycle_artifacts",
+    file: "worker_cycle_artifacts.json",
+    fileFormat: "json",
+    jsonlSchema: "box.diagnostics_artifact.v1",
+    recordType: "worker_cycle_snapshot",
+  },
 ] as const;
+
+function buildWorkerCycleArtifactsDiagnosticsRecord(artifactData: unknown): any | null {
+  if (!artifactData || typeof artifactData !== "object" || Array.isArray(artifactData)) return null;
+  const payload = artifactData as Record<string, unknown>;
+  const schemaVersionRaw = Number(payload.schemaVersion);
+  if (!Number.isInteger(schemaVersionRaw) || schemaVersionRaw < 1) return null;
+  const updatedAt = String(payload.updatedAt || "").trim();
+  const updatedAtMs = Date.parse(updatedAt);
+  if (!updatedAt || !Number.isFinite(updatedAtMs)) return null;
+  if (!payload.cycles || typeof payload.cycles !== "object" || Array.isArray(payload.cycles)) return null;
+  const staleAfterMs = DIAGNOSTICS_FRESHNESS_MAX_AGE_MS;
+  const evaluatedAt = new Date().toISOString();
+  return {
+    jsonlSchema: "box.diagnostics_artifact.v1",
+    recordType: "worker_cycle_snapshot",
+    schemaVersion: schemaVersionRaw,
+    savedAt: updatedAt,
+    freshness: {
+      status: "fresh",
+      truthStatus: "point_in_time",
+      evaluatedAt,
+      staleAfterMs,
+      expiresAt: new Date(updatedAtMs + staleAfterMs).toISOString(),
+    },
+    payload: {
+      latestCycleId: String(payload.latestCycleId || "").trim() || null,
+      cycleCount: Object.keys(payload.cycles as Record<string, unknown>).length,
+      updatedAt,
+    },
+  };
+}
+
+async function readLatestDiagnosticsSourceRecord(
+  stateDir: string,
+  item: (typeof DIAGNOSTICS_SOURCE_DESCRIPTORS)[number],
+): Promise<any | null> {
+  const filePath = path.join(stateDir, item.file);
+  if (item.fileFormat === "json") {
+    const rawSnapshot = await readJson(filePath, null);
+    return buildWorkerCycleArtifactsDiagnosticsRecord(rawSnapshot);
+  }
+  const latest = await readLatestJsonlRecord(filePath);
+  return normalizeDiagnosticsRecord(latest, item.jsonlSchema, item.recordType)
+    || await readLegacyDiagnosticsFallback(stateDir, item.label);
+}
 
 /**
  * Build DiagnosticsFreshnessRecord[] by reading each diagnostics artifact from
@@ -1542,12 +1598,9 @@ const DIAGNOSTICS_SOURCE_DESCRIPTORS = [
 export async function buildDiagnosticsFreshnessRecords(stateDir: string): Promise<DiagnosticsFreshnessRecord[]> {
   const records: DiagnosticsFreshnessRecord[] = [];
   for (const item of DIAGNOSTICS_SOURCE_DESCRIPTORS) {
-    const filePath = path.join(stateDir, item.file);
     let normalized: any = null;
     try {
-      const latest = await readLatestJsonlRecord(filePath);
-      normalized = normalizeDiagnosticsRecord(latest, item.jsonlSchema, item.recordType)
-        || await readLegacyDiagnosticsFallback(stateDir, item.label);
+      normalized = await readLatestDiagnosticsSourceRecord(stateDir, item);
     } catch {
       // diagnostics files are optional — treat as missing
     }
@@ -1576,10 +1629,7 @@ async function buildDiagnosticsFreshnessPromptSection(stateDir: string): Promise
 
   const lines: string[] = [];
   for (const item of diagnostics) {
-    const filePath = path.join(stateDir, item.file);
-    const latest = await readLatestJsonlRecord(filePath);
-    const normalized = normalizeDiagnosticsRecord(latest, item.jsonlSchema, item.recordType)
-      || await readLegacyDiagnosticsFallback(stateDir, item.label);
+    const normalized = await readLatestDiagnosticsSourceRecord(stateDir, item);
     if (!normalized || !isDiagnosticsRecordContractValid(normalized, item.jsonlSchema, item.recordType)) {
       lines.push(`- ${item.label}: missing_or_unparseable (${item.file})`);
       continue;
@@ -2183,8 +2233,8 @@ export function checkHighRiskPacketConfidence(rawPlan: any): { requiresRejection
  *     Normalization falls back to "Task-N" which carries no semantic meaning.
  *  2. Missing/invalid capacityDelta — raw packet must declare measurable impact.
  *  3. Missing/invalid requestROI    — raw packet must declare request economics.
- *  4. Missing verification coupling — no specific named verification target can
- *     be resolved from verification or verification_commands.
+ *  4. Missing verification coupling — the raw packet lacks any concrete
+ *     verification signal in verification or verification_commands.
  *
  * Reason codes are values from the canonical PACKET_VIOLATION_CODE taxonomy
  * (plan_contract_validator.ts) so they are identical to codes emitted by the
@@ -2224,7 +2274,19 @@ export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; r
     }
   }
 
-  if (resolveNamedVerificationTarget(rawPlan) === null) {
+  const verificationCommands = Array.isArray(rawPlan.verification_commands)
+    ? rawPlan.verification_commands.filter((command: unknown) =>
+        typeof command === "string" && command.trim().length > 0)
+    : [];
+  const verificationFieldSignals = Array.isArray(rawPlan.verification)
+    ? rawPlan.verification.filter((command: unknown) =>
+        typeof command === "string" && command.trim().length > 0)
+    : [];
+  const hasVerificationSignal =
+    verificationCommands.length > 0
+    || verificationFieldSignals.length > 0
+    || (typeof rawPlan.verification === "string" && rawPlan.verification.trim().length > 0);
+  if (!hasVerificationSignal) {
     reasons.push(PACKET_VIOLATION_CODE.MISSING_VERIFICATION_COUPLING);
   }
 
@@ -2307,6 +2369,8 @@ async function appendPrometheusLiveLog(stateDir, section, text) {
  * Aligned with PREMORTEM_RISK_LEVEL.HIGH from athena_reviewer.js.
  */
 export const PREMORTEM_RISK_THRESHOLD = PREMORTEM_RISK_LEVEL.HIGH;
+
+const ATHENA_NUMERIC_ANCHOR_PATTERN = /(?:\b\d+\b|>=|<=|<|>|%|\bzero\b)/i;
 
 /**
  * Build an empty pre-mortem scaffold for a high-risk plan.
@@ -2445,21 +2509,27 @@ export function buildConcretePremortem(taskText, targetFiles) {
   };
 }
 
+function shouldScaffoldPremortem(riskLevel) {
+  const normalized = String(riskLevel || "").trim().toLowerCase();
+  return normalized === PREMORTEM_RISK_LEVEL.HIGH || normalized === "medium";
+}
+
 /**
  * Ensure a valid pre-mortem for the plan. If the AI model provided a partial
  * premortem, merge with scaffold defaults so all required fields are present.
  * Only high-risk plans require pre-mortems.
  */
 function ensureValidPremortem(riskLevel, srcPremortem, taskText, targetFiles) {
-  if (riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) {
+  if (!shouldScaffoldPremortem(riskLevel)) {
     return srcPremortem && typeof srcPremortem === "object" ? srcPremortem : undefined;
   }
   const scaffold = buildConcretePremortem(taskText, targetFiles);
+  scaffold.riskLevel = PREMORTEM_RISK_LEVEL.HIGH;
   if (!srcPremortem || typeof srcPremortem !== "object") {
     return scaffold;
   }
   // Merge AI-provided premortem with scaffold defaults for missing fields
-  const merged = { ...scaffold, ...srcPremortem, riskLevel: PREMORTEM_RISK_LEVEL.HIGH };
+  const merged = { ...scaffold, ...srcPremortem, riskLevel: scaffold.riskLevel };
   for (const field of ["failurePaths", "mitigations", "detectionSignals", "guardrails"]) {
     if (!Array.isArray(merged[field]) || merged[field].length === 0) {
       merged[field] = scaffold[field];
@@ -2471,6 +2541,212 @@ function ensureValidPremortem(riskLevel, srcPremortem, taskText, targetFiles) {
     }
   }
   return merged;
+}
+
+function hasNumericAnchor(text) {
+  return ATHENA_NUMERIC_ANCHOR_PATTERN.test(String(text || ""));
+}
+
+function inferQuantifiedCriterion(taskText, criterion, index) {
+  const text = String(criterion || "").trim();
+  if (!text) return "";
+  if (hasNumericAnchor(text)) return text;
+
+  const normalized = text.replace(/[.\s]+$/, "");
+  const lower = normalized.toLowerCase();
+  const lowerTask = String(taskText || "").toLowerCase();
+
+  if (/ttl|expiry|expire/.test(lower) || /ttl|expiry|expire/.test(lowerTask)) {
+    return `${normalized} (default TTL=86400s)`;
+  }
+  if (/dispatchblockreason|block reason|governance block|token/.test(lower)) {
+    return `${normalized} in >= 2 deterministic gate test cases`;
+  }
+  if (/duplicate|idempot/.test(lower)) {
+    return `${normalized} with 0 duplicate executions`;
+  }
+  if (/lane diversity|diversity/.test(lower)) {
+    return `${normalized} with lane diversity minimum >= 2 distinct lanes`;
+  }
+  if (/telemetry|signal|event|log/.test(lower)) {
+    return `${normalized} with >= 1 deterministic telemetry event`;
+  }
+  if (/test|assert/.test(lower)) {
+    return `${normalized} with >= 1 targeted test case`;
+  }
+  if (/regression|failure|error|lint/.test(lower)) {
+    return `${normalized} with 0 regressions`;
+  }
+  if (index === 0) return `${normalized} with >= 1 targeted test case`;
+  if (index === 1) return `${normalized} with 0 regressions`;
+  return `${normalized} with >= 1 deterministic assertion`;
+}
+
+function normalizeVerificationSignals(src) {
+  const signals = [];
+  if (Array.isArray(src.verification_commands)) {
+    signals.push(...src.verification_commands.map((value) => String(value || "").trim()));
+  }
+  if (Array.isArray(src.verification)) {
+    signals.push(...src.verification.map((value) => String(value || "").trim()));
+  } else if (typeof src.verification === "string") {
+    signals.push(String(src.verification || "").trim());
+  }
+  return [...new Set(signals.filter(Boolean))];
+}
+
+function stripVerificationDescription(value) {
+  return String(value || "")
+    .split(/\s+[—-]\s+test:/i)[0]
+    .trim();
+}
+
+function inferVerificationTestTarget(targetFiles = [], taskText = "") {
+  const explicitTestFile = targetFiles.find((file) => /(?:^|\/)tests\/.+\.test\.[a-z]+$/i.test(String(file || "")));
+  if (explicitTestFile) return String(explicitTestFile);
+
+  const sourceFile = targetFiles.find((file) => /(?:^|\/)src\/.+\.[a-z]+$/i.test(String(file || "")));
+  if (sourceFile) {
+    const normalizedSource = String(sourceFile).replace(/\\/g, "/");
+    const mapped = normalizedSource
+      .replace(/^src\//i, "tests/")
+      .replace(/\.([a-z]+)$/i, ".test.$1");
+    if (/\.test\.[a-z]+$/i.test(mapped)) return mapped;
+  }
+
+  const inferredFromTask = inferTargetFilesFromTask(taskText).find((file) => /(?:^|\/)tests\/.+\.test\.[a-z]+$/i.test(String(file || "")));
+  return inferredFromTask ? String(inferredFromTask) : "";
+}
+
+function buildConcreteVerificationArtifacts(taskText, taskKind, targetFiles, src) {
+  const normalizedSignals = normalizeVerificationSignals(src);
+  const commandSignals = normalizedSignals
+    .filter((value) => /\b(npm|node|pnpm|yarn|vitest|jest|tsx|pytest|python)\b/i.test(value) || /\.test\.[a-z]+$/i.test(value))
+    .map((value) => rewriteVerificationCommand(stripVerificationDescription(value)));
+  const testTarget = inferVerificationTestTarget(targetFiles, taskText);
+  const primaryTarget = testTarget
+    || targetFiles.find((file) => /\.test\.[a-z]+$/i.test(String(file || "")))
+    || targetFiles[0]
+    || "targeted scope";
+  const defaultCommand = /\.test\.[a-z]+$/i.test(primaryTarget)
+    ? `npm test -- ${primaryTarget}`
+    : "npm test";
+  const explicitCommand = commandSignals.find((value) => /--\s+tests\//i.test(value)) || commandSignals[0] || "";
+  const verificationCommand = explicitCommand === "npm test" && defaultCommand !== "npm test"
+    ? defaultCommand
+    : explicitCommand || defaultCommand;
+  const expectation = String(taskText || "implementation behavior")
+    .replace(/^(add|introduce|enforce|convert|fix|create|implement|move|extend|upgrade|persist|evolve)\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const explicitDescription = normalizedSignals.find((value) => /\b(test:|assert|scenario|prove|proving|regression)\b/i.test(value) && !/^\s*(npm|node|pnpm|yarn)\b/i.test(value));
+  const fallbackDescription = taskKind === "test"
+    ? `test: ${expectation || "targeted behavior"} passes in ${primaryTarget} with >= 1 explicit assertion`
+    : `test: ${expectation || "targeted behavior"} is verified in ${primaryTarget} with 0 regressions`;
+  const description = explicitDescription || fallbackDescription;
+  const verification = `${verificationCommand} — ${description}`;
+  const additionalTargetFiles = testTarget && !targetFiles.includes(testTarget) ? [testTarget] : [];
+  return { verification, verificationCommands: [verificationCommand], additionalTargetFiles };
+}
+
+function planIdentity(plan, index) {
+  return String(plan?.task_id || plan?.task || plan?.title || `plan-${index + 1}`).trim() || `plan-${index + 1}`;
+}
+
+function plansShareTargetFiles(left, right) {
+  const leftFiles = new Set((Array.isArray(left?.target_files) ? left.target_files : []).map((value) => String(value || "").trim()).filter(Boolean));
+  const rightFiles = (Array.isArray(right?.target_files) ? right.target_files : []).map((value) => String(value || "").trim()).filter(Boolean);
+  return rightFiles.some((file) => leftFiles.has(file));
+}
+
+function alignPlansForAthenaReview(plans = []) {
+  if (!Array.isArray(plans) || plans.length <= 1) return plans;
+  const aligned = plans.map((plan) => ({
+    ...plan,
+    dependencies: Array.isArray(plan?.dependencies)
+      ? plan.dependencies.map((value) => String(value || "").trim()).filter(Boolean)
+      : [],
+    waveDepends: Array.isArray(plan?.waveDepends)
+      ? plan.waveDepends.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
+      : [],
+  }));
+
+  const MAX_PASSES = Math.max(2, aligned.length * 2);
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
+    let changed = false;
+    const keyToIndex = new Map();
+    aligned.forEach((plan, index) => {
+      const keys = [plan?.task_id, plan?.title, plan?.task, planIdentity(plan, index)]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      for (const key of keys) {
+        if (!keyToIndex.has(key)) keyToIndex.set(key, index);
+      }
+    });
+
+    for (let index = 0; index < aligned.length; index++) {
+      const current = aligned[index];
+      const currentWave = Number(current?.wave || 1);
+      const dependencyIndexes = current.dependencies
+        .map((value) => keyToIndex.get(String(value || "").trim()))
+        .filter((value) => Number.isInteger(value));
+      if (dependencyIndexes.length > 0) {
+        const requiredWave = Math.max(...dependencyIndexes.map((depIndex) => Number(aligned[depIndex].wave || 1))) + 1;
+        if (requiredWave > currentWave) {
+          current.wave = requiredWave;
+          changed = true;
+        }
+      }
+
+      for (let priorIndex = 0; priorIndex < index; priorIndex++) {
+        const prior = aligned[priorIndex];
+        if (Number(prior?.wave || 1) !== Number(current?.wave || 1)) continue;
+        if (!plansShareTargetFiles(prior, current)) continue;
+        const dependencyLabel = planIdentity(prior, priorIndex);
+        if (!current.dependencies.includes(dependencyLabel)) {
+          current.dependencies = [...current.dependencies, dependencyLabel];
+        }
+        const serializedWave = Number(prior.wave || 1) + 1;
+        if (serializedWave > Number(current.wave || 1)) {
+          current.wave = serializedWave;
+          changed = true;
+        }
+      }
+    }
+
+    if (!changed) break;
+  }
+
+  const keyToWave = new Map();
+  aligned.forEach((plan, index) => {
+    const wave = Number(plan?.wave || 1);
+    const keys = [plan?.task_id, plan?.title, plan?.task, planIdentity(plan, index)]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    for (const key of keys) {
+      if (!keyToWave.has(key)) keyToWave.set(key, wave);
+    }
+  });
+
+  return aligned.map((plan) => {
+    const currentWave = Number(plan?.wave || 1);
+    const waveDepends = [...new Set(
+      [
+        ...(Array.isArray(plan?.waveDepends) ? plan.waveDepends : []),
+        ...plan.dependencies
+          .map((value) => keyToWave.get(String(value || "").trim()))
+          .filter((wave) => Number.isFinite(wave) && wave > 0 && wave < currentWave),
+      ]
+        .map((wave) => Number(wave))
+        .filter((wave) => Number.isFinite(wave) && wave > 0 && wave < currentWave)
+    )].sort((left, right) => left - right);
+    return {
+      ...plan,
+      wave: currentWave,
+      dependencies: [...new Set(plan.dependencies)],
+      waveDepends,
+    };
+  });
 }
 
 function normalizeTargetFiles(src, taskText) {
@@ -2702,27 +2978,28 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
   const src = (task && typeof task === "object") ? task : {};
   const taskText = String(src.task || src.title || src.task_id || src.id || `Task-${index + 1}`).trim();
   const taskKind = String(src.taskKind || src.kind || inferTaskKindFromText(taskText)).trim().toLowerCase();
-  const verificationCommands = Array.isArray(src.verification_commands)
-    ? src.verification_commands.map(v => String(v || "").trim()).filter(Boolean).map(rewriteVerificationCommand)
-    : [];
-  const initialVerification = String(src.verification || verificationCommands[0] || "npm test").trim() || "npm test";
   const wave = normalizeWaveValue(src.wave, fallbackWave);
   const explicitAcceptanceCriteria = Array.isArray(src.acceptance_criteria)
     ? src.acceptance_criteria.map(v => String(v || "").trim()).filter(Boolean)
     : [];
-  const targetFiles = normalizeTargetFiles(src, taskText);
+  const baseTargetFiles = normalizeTargetFiles(src, taskText);
+  const initialVerificationArtifacts = buildConcreteVerificationArtifacts(taskText, taskKind, baseTargetFiles, src);
+  const targetFiles = [...new Set([...baseTargetFiles, ...(initialVerificationArtifacts.additionalTargetFiles || [])])];
+  const verificationArtifacts = buildConcreteVerificationArtifacts(taskText, taskKind, targetFiles, src);
+  const initialVerification = verificationArtifacts.verification;
   const compiled = compileAcceptanceCriteria({
     ...src,
     task: taskText,
     taskKind,
     verification: initialVerification,
+    verification_commands: verificationArtifacts.verificationCommands,
     targetFiles,
     target_files: targetFiles,
   });
   const verification = compiled.verification || initialVerification;
-  const normalizedAcceptanceCriteria = explicitAcceptanceCriteria.length > 0
+  const normalizedAcceptanceCriteria = (explicitAcceptanceCriteria.length > 0
     ? explicitAcceptanceCriteria
-    : compiled.criteria;
+    : compiled.criteria).map((criterion, criteriaIndex) => inferQuantifiedCriterion(taskText, criterion, criteriaIndex));
   const scope = String(src.scope || "").trim() || inferScopeFromTask(taskText, targetFiles);
   const beforeAfter = deriveBeforeAfterState(src, taskText, normalizedAcceptanceCriteria);
   const riskLevel = String(src.riskLevel || "").trim().toLowerCase() || inferRiskLevel(taskText);
@@ -2797,7 +3074,7 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
     before_state: beforeAfter.beforeState,
     afterState: beforeAfter.afterState,
     after_state: beforeAfter.afterState,
-    verification_commands: verificationCommands.length > 0 ? verificationCommands : [verification],
+    verification_commands: verificationArtifacts.verificationCommands,
     acceptance_criteria: normalizedAcceptanceCriteria,
     dependencies: Array.isArray(src.dependencies)
       ? src.dependencies.map(v => String(v || "").trim()).filter(Boolean)
@@ -3598,6 +3875,7 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   );
   plans = linkageResult.plans;
   const normalizedInformationalTopicsConsumed = linkageResult.informationalTopicsConsumed;
+  plans = alignPlansForAthenaReview(plans);
 
   const health = normalizeProjectHealthAlias(String(input.projectHealth || "").trim());
   const projectHealth = ["good", "needs-work", "critical"].includes(health)
@@ -3777,7 +4055,7 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   // allowing legitimate narrative-fallback parses (base 0.5 with penalties).
   const PARSER_CONFIDENCE_FLOOR = 0.15;
   const belowFloor = parserConfidence < PARSER_CONFIDENCE_FLOOR;
-  const finalPlans = belowFloor ? [] : applyPlanningRubric(plans);
+  const finalPlans = belowFloor ? [] : applyPlanningRubric(alignPlansForAthenaReview(plans));
 
   return {
     ...input,

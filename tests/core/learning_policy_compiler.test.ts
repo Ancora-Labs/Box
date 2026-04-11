@@ -85,6 +85,8 @@ describe("learning_policy_compiler", () => {
       assert.equal(policy.detectedAt, "2026-01-01T00:00:00Z");
       assert.equal(typeof (policy as any).interventionKind, "string");
       assert.equal((policy as any).optimizationMode, "impact-attributed-loop");
+      assert.equal((policy as any).impactAttribution?.evidenceType, "postmortem_lesson");
+      assert.equal((policy as any).retirementCriteria?.mode, "measured_uplift_window");
     });
   });
 

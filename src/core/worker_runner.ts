@@ -53,6 +53,7 @@ import { resolveRetryAction, persistRetryMetric, RETRY_ACTION, RETRY_STRATEGY_SC
 import { filterMemoryEntriesByTrust, isPrivilegedMemoryRequester, buildMemoryHitRecord } from "./trust_boundary.js";
 import type { MemoryHitRecord } from "./trust_boundary.js";
 import { emitEvent } from "./logger.js";
+import { parseDispatchBlockReasonContract } from "./cycle_analytics.js";
 import { CancelledError } from "./daemon_control.js";
 import type { CancellationToken } from "./daemon_control.js";
 
@@ -323,6 +324,7 @@ type DispatchVerificationContract = {
   doneWorkerWithVerificationReportEvidence: boolean;
   doneWorkerWithCleanTreeStatusEvidence: boolean;
   dispatchBlockReason: string | null;
+  dispatchBlockReasonContract: { code: string; detail: Record<string, unknown>; raw: string } | null;
   /** True when the worker's done-path output lacks required closure fields. */
   closureBoundaryViolation: boolean;
   replayClosure: {
@@ -1589,6 +1591,7 @@ export function parseWorkerResponse(stdout, stderr) {
     accessHeader,
     blockedAccessScopes: blockedScopes,
     dispatchBlockReason,
+    dispatchBlockReasonContract: parseDispatchBlockReasonContract(dispatchBlockReason),
     summary,
     fullOutput: output,
     verificationReport,
@@ -2033,6 +2036,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       doneWorkerWithVerificationReportEvidence: false,
       doneWorkerWithCleanTreeStatusEvidence: false,
       dispatchBlockReason: `role_capability_check_failed:${capabilityCheck.code}`,
+      dispatchBlockReasonContract: parseDispatchBlockReasonContract(`role_capability_check_failed:${capabilityCheck.code}`),
       closureBoundaryViolation: false,
       replayClosure: {
         contractSatisfied: replayClosure.contractSatisfied === true,
@@ -2369,6 +2373,9 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       && parsed.cleanTreeStatus === true,
     dispatchBlockReason: normalizedWorkerStatus === "blocked"
       ? (parsed.dispatchBlockReason || "worker_reported_blocked_without_reason")
+      : null,
+    dispatchBlockReasonContract: normalizedWorkerStatus === "blocked"
+      ? parseDispatchBlockReasonContract(parsed.dispatchBlockReason || "worker_reported_blocked_without_reason")
       : null,
     closureBoundaryViolation,
     replayClosure: {

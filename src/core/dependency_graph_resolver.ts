@@ -81,7 +81,12 @@ import fs from "node:fs/promises";
 
 /** Schema version for dependency_graph_diagnostics.json entries. */
 export const GRAPH_DIAGNOSTICS_SCHEMA_VERSION = 1;
-export const GRAPH_DIAGNOSTICS_JSONL_SCHEMA = "box.dependency_graph_diagnostics.v2";
+/**
+ * Shared diagnostics-envelope schema used across diagnostics producers/consumers.
+ * Individual artifact streams are differentiated by recordType.
+ */
+export const DIAGNOSTICS_ARTIFACT_JSONL_SCHEMA = "box.diagnostics_artifact.v1";
+export const GRAPH_DIAGNOSTICS_JSONL_SCHEMA = DIAGNOSTICS_ARTIFACT_JSONL_SCHEMA;
 export const GRAPH_DIAGNOSTICS_FRESHNESS_MS = 6 * 60 * 60 * 1000;
 export const GRAPH_DIAGNOSTICS_RECORD_TYPE = "dependency_graph_diagnostic";
 

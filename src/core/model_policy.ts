@@ -2150,3 +2150,14 @@ export function computeProvenanceRoutingDelta(
     return { execute: [], skip: [], provenanceCompleteCount: 0, provenanceSummary: "error" };
   }
 }
+
+/**
+ * Normalize a policy intervention uplift signal from compiled learning metadata.
+ * Returns null when no measurable uplift score is present.
+ */
+export function normalizePolicyInterventionUplift(policy: unknown): number | null {
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) return null;
+  const raw = Number((policy as Record<string, any>)?.impactAttribution?.baselineQualityScore);
+  if (!Number.isFinite(raw)) return null;
+  return Math.max(0, Math.min(10, Math.round(raw * 100) / 100));
+}
