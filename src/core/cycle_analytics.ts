@@ -188,6 +188,60 @@ export const CYCLE_OUTCOME_STATUS = Object.freeze({
   CI_DEBT_UNRESOLVED: "ci_debt_unresolved",
 });
 
+/** Stable machine-readable dispatch block-reason enum shared across components. */
+export const DISPATCH_BLOCK_REASON_CODE = Object.freeze({
+  UNKNOWN: "unknown",
+  BUDGET_EXHAUSTED: "budget_exhausted",
+  GUARDRAIL_PAUSE_WORKERS_ACTIVE: "guardrail_pause_workers_active",
+  GUARDRAIL_FORCE_CHECKPOINT_ACTIVE: "force_checkpoint_validation_active",
+  GOVERNANCE_FREEZE_ACTIVE: "governance_freeze_active",
+  LINEAGE_CYCLE_DETECTED: "lineage_cycle_detected",
+  GOVERNANCE_CANARY_BREACH: "governance_canary_breach",
+  CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION: "cloud_agent_governance_policy_violation",
+  CRITICAL_DEBT_OVERDUE: "critical_debt_overdue",
+  MANDATORY_DRIFT_DEBT_UNRESOLVED: "mandatory_drift_debt_unresolved",
+  PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",
+  CROSS_CYCLE_PREREQUISITE_UNMET: "cross_cycle_prerequisite_unmet",
+  DEPENDENCY_READINESS_INCOMPLETE: "dependency_readiness_incomplete",
+  ROLLING_YIELD_THROTTLE: "rolling_yield_throttle",
+  SPECIALIZATION_ADMISSION_GATE: "specialization_admission_gate_failed",
+  OVERSIZED_PACKET: "packet_exceeds_actionable_steps_cap",
+  LANE_DIVERSITY_GATE_BLOCKED: "lane_diversity_gate_blocked",
+  ROLE_CAPABILITY_CHECK_FAILED: "role_capability_check_failed",
+  ACCESS_BLOCKED: "access_blocked",
+  TOOL_POLICY_DENIED: "tool_policy_denied",
+  HOOK_TELEMETRY_INCONSISTENT: "hook_telemetry_inconsistent",
+  RUNTIME_HOOK_DENIED: "runtime_hook_denied",
+  WORKER_REPORTED_BLOCKED_WITHOUT_REASON: "worker_reported_blocked_without_reason",
+} as const);
+
+const DISPATCH_BLOCK_REASON_CODE_SET = new Set<string>(Object.values(DISPATCH_BLOCK_REASON_CODE));
+
+export function parseDispatchBlockReasonContract(
+  rawReason: unknown,
+): { code: string; detail: Record<string, unknown>; raw: string } | null {
+  const raw = String(rawReason || "").trim();
+  if (!raw) return null;
+  const [prefixRaw, ...rest] = raw.split(":");
+  const prefix = String(prefixRaw || "").trim().toLowerCase();
+  const code = DISPATCH_BLOCK_REASON_CODE_SET.has(prefix)
+    ? prefix
+    : DISPATCH_BLOCK_REASON_CODE.UNKNOWN;
+  const detailText = rest.join(":").trim();
+  const detail: Record<string, unknown> = {};
+  if (detailText) {
+    detail.rawDetail = detailText;
+    // Parse simple key=value,key2=value2 payloads for deterministic machine-readability.
+    for (const token of detailText.split(",")) {
+      const [k, v] = token.split("=");
+      const key = String(k || "").trim();
+      if (!key) continue;
+      detail[key] = String(v ?? "").trim();
+    }
+  }
+  return { code, detail, raw };
+}
+
 /**
  * Confidence level for the analytics record.
  * Uses the existing codebase enum — NOT statistical confidence intervals.
@@ -302,6 +356,10 @@ export const WORKER_CYCLE_ARTIFACTS_SCHEMA = Object.freeze({
  */
 export const WORKER_CYCLE_ARTIFACTS_FRESHNESS_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+/** Shared diagnostics-envelope schema used by freshness-gated prompt consumers. */
+export const DIAGNOSTICS_ARTIFACT_JSONL_SCHEMA = "box.diagnostics_artifact.v1";
+export const WORKER_CYCLE_ARTIFACTS_DIAGNOSTICS_RECORD_TYPE = "worker_cycle_snapshot";
+
 /**
  * Build a DiagnosticsFreshnessRecord-compatible descriptor for worker_cycle_artifacts.json.
  *
@@ -331,6 +389,45 @@ export function buildWorkerCycleArtifactsFreshnessRecord(artifactData: unknown):
     label: "worker_cycle_artifacts",
     recordedAt: updatedAt || null,
     staleAfterMs: WORKER_CYCLE_ARTIFACTS_FRESHNESS_MAX_AGE_MS,
+  };
+}
+
+/**
+ * Project a canonical worker_cycle_artifacts snapshot into the shared diagnostics
+ * envelope so Prometheus can validate freshness/shape before prompt injection.
+ */
+export function buildWorkerCycleArtifactsDiagnosticsRecord(
+  artifactData: unknown,
+): Record<string, unknown> | null {
+  const migrated = migrateWorkerCycleArtifacts(artifactData);
+  if (!migrated.ok || !migrated.data) return null;
+  const payload = migrated.data;
+  const savedAt = String(payload.updatedAt || "").trim();
+  const savedAtMs = Date.parse(savedAt);
+  if (!savedAt || !Number.isFinite(savedAtMs)) return null;
+  const cycleMap =
+    payload.cycles && typeof payload.cycles === "object" && !Array.isArray(payload.cycles)
+      ? payload.cycles as Record<string, unknown>
+      : {};
+  const staleAfterMs = WORKER_CYCLE_ARTIFACTS_FRESHNESS_MAX_AGE_MS;
+  const evaluatedAt = new Date().toISOString();
+  return {
+    jsonlSchema: DIAGNOSTICS_ARTIFACT_JSONL_SCHEMA,
+    recordType: WORKER_CYCLE_ARTIFACTS_DIAGNOSTICS_RECORD_TYPE,
+    schemaVersion: WORKER_CYCLE_ARTIFACTS_SCHEMA.schemaVersion,
+    savedAt,
+    freshness: {
+      status: "fresh",
+      truthStatus: "point_in_time",
+      evaluatedAt,
+      staleAfterMs,
+      expiresAt: new Date(savedAtMs + staleAfterMs).toISOString(),
+    },
+    payload: {
+      latestCycleId: String(payload.latestCycleId || "").trim() || null,
+      cycleCount: Object.keys(cycleMap).length,
+      updatedAt: savedAt,
+    },
   };
 }
 
@@ -776,7 +873,14 @@ function countBlockedWorkersWithReason(workerResults: unknown): number | null {
       || dispatchContract?.dispatchBlockReason
       || "",
     ).trim();
-    if (reason) count += 1;
+    const contract = (
+      (row.dispatchBlockReasonContract && typeof row.dispatchBlockReasonContract === "object")
+        ? row.dispatchBlockReasonContract
+        : (dispatchContract?.dispatchBlockReasonContract && typeof dispatchContract.dispatchBlockReasonContract === "object")
+          ? dispatchContract.dispatchBlockReasonContract
+          : parseDispatchBlockReasonContract(reason)
+    );
+    if (reason || contract) count += 1;
   }
   return count;
 }
@@ -798,7 +902,14 @@ function hasDispatchBlockReasonOutcomes(workerResults: unknown): boolean {
       || dispatchContract?.dispatchBlockReason
       || "",
     ).trim();
-    return reason.length > 0;
+    const contract = (
+      (row.dispatchBlockReasonContract && typeof row.dispatchBlockReasonContract === "object")
+        ? row.dispatchBlockReasonContract
+        : (dispatchContract?.dispatchBlockReasonContract && typeof dispatchContract.dispatchBlockReasonContract === "object")
+          ? dispatchContract.dispatchBlockReasonContract
+          : parseDispatchBlockReasonContract(reason)
+    );
+    return reason.length > 0 || Boolean(contract);
   });
 }
 
@@ -1401,6 +1512,7 @@ export function computeCycleAnalytics(config, {
     dispatchBlockReason: typeof dispatchBlockReason === "string" && dispatchBlockReason.trim()
       ? dispatchBlockReason.trim()
       : null,
+    dispatchBlock: parseDispatchBlockReasonContract(dispatchBlockReason),
   };
 
   // Explicit reason code when outcome status is UNKNOWN (no silent ambiguity).
@@ -1528,8 +1640,14 @@ export function computeCycleAnalytics(config, {
       ? outcomes.dispatchBlockReason.trim()
       : null;
     if (blockReason) {
-      const lower = blockReason.toLowerCase();
-      nullEventsTerminalBlockReason = (lower.includes("governance") || lower.includes("freeze"))
+      const blockContract = parseDispatchBlockReasonContract(blockReason);
+      const code = String(blockContract?.code || "").toLowerCase();
+      nullEventsTerminalBlockReason = (
+        code.includes("governance")
+        || code.includes("freeze")
+        || code === DISPATCH_BLOCK_REASON_CODE.GUARDRAIL_PAUSE_WORKERS_ACTIVE
+        || code === DISPATCH_BLOCK_REASON_CODE.GUARDRAIL_FORCE_CHECKPOINT_ACTIVE
+      )
         ? CYCLE_TRUTH_TERMINAL_BLOCK_REASON.GOVERNANCE_BLOCKED
         : CYCLE_TRUTH_TERMINAL_BLOCK_REASON.DISPATCH_BLOCKED;
     } else if (boundOutcomeStatus === CYCLE_OUTCOME_STATUS.NO_PLANS) {

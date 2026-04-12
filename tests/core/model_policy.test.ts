@@ -38,6 +38,7 @@ import {
   MEMORY_FLOOR_TIGHTEN_AMOUNT,
   QUALITY_FLOOR_DEFAULT,
   computeBenchmarkPlanningPriors,
+  normalizePolicyInterventionUplift,
 } from "../../src/core/model_policy.js";
 
 describe("model_policy — complexity tiers", () => {
@@ -1977,5 +1978,23 @@ describe("computeProvenanceRoutingDelta — skip vs execute routing", () => {
     ]);
     const delta = computeProvenanceRoutingDelta(gt);
     assert.deepEqual(delta.execute, ["rec-valid"], "entry without id is skipped silently");
+  });
+});
+
+describe("normalizePolicyInterventionUplift", () => {
+  it("returns clamped measurable uplift score from impactAttribution baselineQualityScore", () => {
+    assert.equal(
+      normalizePolicyInterventionUplift({ impactAttribution: { baselineQualityScore: 8.456 } }),
+      8.46,
+    );
+    assert.equal(
+      normalizePolicyInterventionUplift({ impactAttribution: { baselineQualityScore: 99 } }),
+      10,
+    );
+  });
+
+  it("negative path: returns null when no measurable baseline score exists", () => {
+    assert.equal(normalizePolicyInterventionUplift(null), null);
+    assert.equal(normalizePolicyInterventionUplift({ impactAttribution: { baselineQualityScore: "n/a" } }), null);
   });
 });

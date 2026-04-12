@@ -118,6 +118,18 @@ export function compileLessonsToPolicies(postmortems, opts: any = {}) {
           interventionKind: template.interventionKind || OPTIMIZATION_INTERVENTION_KIND.POLICY_DELTA,
           optimizationMode: "impact-attributed-loop",
           upliftSignal: "pending_measurement",
+          impactAttribution: {
+            evidenceType: "postmortem_lesson",
+            baselineQualityScore: Number.isFinite(Number(pm?.qualityScore))
+              ? Number(pm.qualityScore)
+              : null,
+            followUpNeeded: pm?.followUpNeeded === true,
+            measuredAt: pm?.reviewedAt || null,
+          },
+          retirementCriteria: {
+            mode: "measured_uplift_window",
+            minEvidenceWindow: POLICY_MUTATION_EVIDENCE_WINDOW,
+          },
         });
       }
     }

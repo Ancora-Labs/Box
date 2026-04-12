@@ -2150,11 +2150,47 @@ export function buildPatchedPlanCorrectionTracking(
     "verificationCommands",
     "dependencies"
   ];
+  const consumedOriginalIndexes = new Set<number>();
+  const originalEntries = Array.isArray(originalPlans)
+    ? originalPlans.map((plan, index) => ({ plan, index }))
+    : [];
+
+  const getPlanIdentityKeys = (plan: unknown): string[] => {
+    if (!plan || typeof plan !== "object") return [];
+    const entry = plan as Record<string, unknown>;
+    return [...new Set([
+      entry.intervention_id,
+      entry.task_id,
+      entry.title,
+      entry.task,
+    ].map((value) => String(value || "").trim()).filter(Boolean))];
+  };
+
+  const originalEntriesByKey = new Map<string, Array<{ plan: unknown; index: number }>>();
+  for (const entry of originalEntries) {
+    for (const key of getPlanIdentityKeys(entry.plan)) {
+      const bucket = originalEntriesByKey.get(key);
+      if (bucket) bucket.push(entry);
+      else originalEntriesByKey.set(key, [entry]);
+    }
+  }
+
+  const findOriginalPlanForPatched = (patched: Record<string, unknown>, patchedIndex: number) => {
+    for (const key of getPlanIdentityKeys(patched)) {
+      const bucket = originalEntriesByKey.get(key) || [];
+      const match = bucket.find((entry) => !consumedOriginalIndexes.has(entry.index));
+      if (match) return match;
+    }
+    const fallback = originalEntries[patchedIndex];
+    if (fallback && !consumedOriginalIndexes.has(fallback.index)) return fallback;
+    return undefined;
+  };
 
   for (let pi = 0; pi < patchedPlans.length; pi++) {
-    const orig = originalPlans?.[pi] as Record<string, unknown> | undefined;
     const patched = patchedPlans[pi] as Record<string, unknown> | undefined;
     if (!patched || typeof patched !== "object") continue;
+    const originalMatch = findOriginalPlanForPatched(patched, pi);
+    const orig = originalMatch?.plan as Record<string, unknown> | undefined;
 
     if (!orig || typeof orig !== "object") {
       legacyCorrections.push(`[PATCHED] plan[${pi}]: reconstructed from absent original plan`);
@@ -2165,6 +2201,7 @@ export function buildPatchedPlanCorrectionTracking(
       });
       continue;
     }
+    consumedOriginalIndexes.add(originalMatch.index);
 
     const repairedFields: string[] = [];
     for (const field of TRACKED_FIELDS) {
@@ -3886,6 +3923,11 @@ ${recurrenceContext}
       qualityScore: 0,
       followUpNeeded: true,
       followUpTask: REPLAY_OR_MANUAL_COMPLETION_FOLLOW_UP,
+      impactAttribution: {
+        evidenceType: "athena_postmortem",
+        baselineQualityScore: 0,
+        followUpNeeded: true,
+      },
       recommendation: POSTMORTEM_RECOMMENDATION.REWORK,
       decisionQualityLabel: dql.label,
       decisionQualityLabelReason: dql.reason,
@@ -3930,6 +3972,11 @@ ${recurrenceContext}
     qualityScore: d.qualityScore || 0,
     followUpNeeded: d.followUpNeeded === true,
     followUpTask: d.followUpTask || "",
+    impactAttribution: {
+      evidenceType: "athena_postmortem",
+      baselineQualityScore: Number.isFinite(Number(d.qualityScore)) ? Number(d.qualityScore) : null,
+      followUpNeeded: d.followUpNeeded === true,
+    },
     recommendation: d.recommendation && VALID_RECOMMENDATIONS.has(d.recommendation)
       ? d.recommendation
       : deriveDeterministicRecommendation(dql.label),

@@ -146,7 +146,8 @@ describe("normalizePrometheusParsedOutput", () => {
     assert.ok(harnessPlan, "expected harness task to be present");
     assert.ok(carryForwardPlan, "expected carry-forward task to be present");
     assert.equal(harnessPlan!.wave, 1);
-    assert.equal(harnessPlan!.verification, "npm test");
+    assert.ok(harnessPlan!.verification.startsWith("npm test"));
+    assert.match(harnessPlan!.verification, /test:/i);
     assert.equal(carryForwardPlan!.wave, 2);
   });
 
@@ -221,7 +222,8 @@ describe("normalizePrometheusParsedOutput", () => {
     assert.equal(normalized.projectHealth, "good");
     assert.equal(normalized.plans.length, 1);
     assert.equal(normalized.plans[0].role, "evolution-worker");
-    assert.equal(normalized.plans[0].verification, "npm test");
+    assert.ok(normalized.plans[0].verification.startsWith("npm test"));
+    assert.match(normalized.plans[0].verification, /test:/i);
     assert.equal(normalized.plans[0].priority, 1);
     assert.ok(normalized.plans[0]._planningRubric, "planning rubric metadata should be attached");
   });
@@ -394,6 +396,94 @@ Wave 2
 
     assert.equal(normalized.plans[2].riskLevel, "high");
     assert.ok(normalized.plans[2].target_files.includes("src/core/model_router.ts"));
+  });
+
+  it("adds medium-risk premortems, quantified acceptance criteria, and concrete verification descriptions", () => {
+    const parsed = {
+      plans: [
+        {
+          title: "Unify lane-diversity pre-dispatch gate",
+          task: "Move lane diversity enforcement into the shared evaluatePreDispatchGovernanceGate path",
+          role: "infrastructure-worker",
+          wave: 1,
+          target_files: ["src/core/orchestrator.ts", "tests/core/orchestrator_pipeline_progress.test.ts"],
+          acceptance_criteria: [
+            "Blocked diversity result sets deterministic dispatchBlockReason"
+          ],
+          verification: [
+            "npm test -- tests/core/orchestrator_pipeline_progress.test.ts",
+            "Resume-path test proving no dispatch when lane diversity minimum is unmet."
+          ],
+        },
+      ],
+    };
+
+    const normalized = normalizePrometheusParsedOutput(parsed, { raw: "" });
+    const plan = normalized.plans[0];
+    assert.equal(plan.riskLevel, "medium");
+    assert.ok(plan.premortem, "medium-risk plan should receive a premortem scaffold");
+    assert.ok(plan.acceptance_criteria.every((criterion: string) => /(?:\b\d+\b|>=|<=|<|>|%|\bzero\b)/i.test(criterion)));
+    assert.match(plan.verification, /test:/i);
+    assert.ok(Array.isArray(plan.verification_commands));
+    assert.ok(plan.verification_commands[0].includes("npm test -- tests/core/orchestrator_pipeline_progress.test.ts"));
+  });
+
+  it("serializes same-wave file conflicts and same-wave dependencies into later waves", () => {
+    const parsed = {
+      plans: [
+        {
+          title: "Close Athena governance-token dispatch parity",
+          task: "Extend pre-dispatch governance token parsing",
+          role: "governance-worker",
+          wave: 1,
+          target_files: ["src/core/orchestrator.ts", "tests/core/orchestrator_pipeline_progress.test.ts"],
+          acceptance_criteria: ["Token mapping covers all known corrections with >= 2 deterministic test cases"],
+          verification: "npm test -- tests/core/orchestrator_pipeline_progress.test.ts — test: token mapping passes with >= 1 assertion",
+          riskLevel: "medium",
+        },
+        {
+          title: "Unify lane-diversity pre-dispatch gate",
+          task: "Move lane diversity enforcement into the shared gate path",
+          role: "infrastructure-worker",
+          wave: 1,
+          target_files: ["src/core/orchestrator.ts", "tests/core/orchestrator_pipeline_progress.test.ts"],
+          acceptance_criteria: ["Lane diversity block emits deterministic reason with >= 2 cases"],
+          verification: "npm test -- tests/core/orchestrator_pipeline_progress.test.ts — test: diversity gate blocks with >= 1 assertion",
+          riskLevel: "medium",
+        },
+        {
+          title: "Upgrade reflection loop to structured failure signatures",
+          task: "Evolve reflection memory to structured failure signatures",
+          role: "evolution-worker",
+          wave: 2,
+          dependencies: ["Persist worker turn-phase resumability"],
+          target_files: ["src/core/worker_runner.ts"],
+          acceptance_criteria: ["Reflection entries include structured fields with >= 1 schema assertion"],
+          verification: "npm test -- tests/core/worker_runner.test.ts — test: reflection schema passes with >= 1 assertion",
+          riskLevel: "medium",
+        },
+        {
+          title: "Persist worker turn-phase resumability",
+          task: "Refactor worker runtime to persist explicit turn phases",
+          role: "infrastructure-worker",
+          wave: 2,
+          target_files: ["src/core/worker_runner.ts"],
+          acceptance_criteria: ["Resume path remains idempotent with 0 duplicate executions"],
+          verification: "npm test -- tests/core/worker_runner.test.ts — test: resume path passes with >= 1 assertion",
+          riskLevel: "high",
+        },
+      ],
+    };
+
+    const normalized = normalizePrometheusParsedOutput(parsed, { raw: "" });
+    const laneGate = normalized.plans.find((plan: any) => plan.title === "Unify lane-diversity pre-dispatch gate");
+    const reflection = normalized.plans.find((plan: any) => plan.title === "Upgrade reflection loop to structured failure signatures");
+    const resumability = normalized.plans.find((plan: any) => plan.title === "Persist worker turn-phase resumability");
+
+    assert.ok(laneGate.wave > 1, "same-wave file conflict should be serialized into a later wave");
+    assert.ok(laneGate.dependencies.includes("Extend pre-dispatch governance token parsing"));
+    assert.ok(reflection.wave > resumability.wave, "same-wave dependency should push dependent plan to a later wave");
+    assert.ok(reflection.waveDepends.includes(resumability.wave));
   });
 });
 
@@ -2043,6 +2133,14 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
     assert.deepEqual(result.reasons, []);
   });
 
+  it("accepts verification as a non-empty command array when verification_commands is absent", () => {
+    const plan = validRawPlan({ verification: ["npm test", "node --import tsx scripts/run_tests.ts"] });
+    delete (plan as any).verification_commands;
+    const result = checkPacketCompleteness(plan);
+    assert.equal(result.recoverable, true);
+    assert.deepEqual(result.reasons, []);
+  });
+
   it("returns recoverable=false when verification_commands is absent and verification is blank", () => {
     const plan = validRawPlan({ verification: "   " });
     delete (plan as any).verification_commands;
@@ -2131,10 +2229,10 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
     assert.equal(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING), true);
   });
 
-  it("returns recoverable=false when verification_commands contain only non-specific CLI commands", () => {
+  it("returns recoverable=true when verification_commands contain non-specific but non-empty CLI commands", () => {
     const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["npm test", "pnpm vitest"] }));
-    assert.equal(result.recoverable, false);
-    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
+    assert.equal(result.recoverable, true);
+    assert.deepEqual(result.reasons, []);
   });
 });
 
@@ -4861,7 +4959,10 @@ describe("buildDiagnosticsFreshnessRecords", () => {
     try {
       const records = await buildDiagnosticsFreshnessRecords(tmpDir);
       assert.ok(Array.isArray(records), "must return an array");
-      assert.ok(records.length >= 2, "must return at least 2 records (intervention_optimizer + dependency_graph)");
+      assert.ok(
+        records.length >= 3,
+        "must return at least 3 records (intervention_optimizer + dependency_graph + worker_cycle_artifacts)",
+      );
       for (const r of records) {
         assert.equal(r.recordedAt, null, `missing file ${r.label} must produce recordedAt=null`);
       }
@@ -4912,6 +5013,64 @@ describe("buildDiagnosticsFreshnessRecords", () => {
       const r = records.find(r => r.label === "intervention_optimizer");
       assert.ok(r, "record must still be returned");
       assert.equal(r!.recordedAt, null, "unparseable artifact must produce recordedAt=null");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns worker_cycle_artifacts recordedAt when canonical snapshot validates", async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const tmpDir = mkdtempSync(path.join(tmpdir(), "diag-freshness-"));
+    try {
+      const updatedAt = new Date(Date.now() - 45_000).toISOString();
+      writeFileSync(
+        path.join(tmpDir, "worker_cycle_artifacts.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          updatedAt,
+          latestCycleId: "cycle-123",
+          cycles: {
+            "cycle-123": {
+              cycleId: "cycle-123",
+              updatedAt,
+              status: "running",
+              workerSessions: {},
+              workerActivity: {},
+              completedTaskIds: [],
+            },
+          },
+        }),
+        "utf8",
+      );
+      const records = await buildDiagnosticsFreshnessRecords(tmpDir);
+      const snapshotRecord = records.find(r => r.label === "worker_cycle_artifacts");
+      assert.ok(snapshotRecord, "worker_cycle_artifacts record must exist");
+      assert.equal(snapshotRecord!.recordedAt, updatedAt);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("negative: worker_cycle_artifacts recordedAt=null when snapshot schema is invalid", async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const tmpDir = mkdtempSync(path.join(tmpdir(), "diag-freshness-"));
+    try {
+      writeFileSync(
+        path.join(tmpDir, "worker_cycle_artifacts.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          updatedAt: new Date().toISOString(),
+          latestCycleId: "cycle-123",
+          // invalid: declares schemaVersion=1 but omits required cycles envelope.
+        }),
+        "utf8",
+      );
+      const records = await buildDiagnosticsFreshnessRecords(tmpDir);
+      const snapshotRecord = records.find(r => r.label === "worker_cycle_artifacts");
+      assert.ok(snapshotRecord, "worker_cycle_artifacts record must be emitted");
+      assert.equal(snapshotRecord!.recordedAt, null);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

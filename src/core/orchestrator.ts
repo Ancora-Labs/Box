@@ -160,9 +160,10 @@ export const ORCHESTRATOR_STATUS = Object.freeze({
  *   8. PLAN_EVIDENCE_COUPLING — validates individual plan completeness
  *   9. CROSS_CYCLE_PREREQUISITE — requires explicit cross-cycle confirmation token
  *  10. DEPENDENCY_READINESS  — validates dependency confidence metadata
- *  11. ROLLING_COMPLETION_YIELD — throttles when recent yield is too low
- *  12. SPECIALIZATION_ADMISSION — specialist share below adaptive lane target
- *  13. OVERSIZED_PACKET      — per-role plan group exceeds actionable-steps cap
+ *  11. LANE_DIVERSITY        — active lanes below required minimum
+ *  12. ROLLING_COMPLETION_YIELD — throttles when recent yield is too low
+ *  13. SPECIALIZATION_ADMISSION — specialist share below adaptive lane target
+ *  14. OVERSIZED_PACKET      — per-role plan group exceeds actionable-steps cap
  */
 export const GATE_PRECEDENCE = Object.freeze({
   BUDGET_ELIGIBILITY:          1,
@@ -179,6 +180,8 @@ export const GATE_PRECEDENCE = Object.freeze({
   CROSS_CYCLE_PREREQUISITE:    9,
   /** Confidence metadata on plans is below the minimum dispatch threshold. */
   DEPENDENCY_READINESS:       10,
+  /** Active plan topology spans fewer lanes than required minimum. */
+  LANE_DIVERSITY:             10.5,
   /** Rolling completion yield is below the throttle threshold — dispatch is paused to prevent waste spirals. */
   ROLLING_COMPLETION_YIELD:   11,
   /** Specialization admission gate — specialist share below adaptive lane target. */
@@ -215,6 +218,8 @@ export const BLOCK_REASON = Object.freeze({
   DEPENDENCY_READINESS_INCOMPLETE:"dependency_readiness_incomplete",
   /** Rolling completion yield fell at or below the throttle threshold. */
   ROLLING_YIELD_THROTTLE:         "rolling_yield_throttle",
+  /** Dispatch topology failed lane diversity minimum. */
+  LANE_DIVERSITY_GATE_BLOCKED:    "lane_diversity_gate_blocked",
   /** Specialist share is below the adaptive lane utilization target. */
   SPECIALIZATION_ADMISSION_GATE:  "specialization_admission_gate_failed",
   /** Per-role plan group exceeds the configured actionable-steps cap — decompose before dispatch. */
@@ -245,6 +250,10 @@ const ATHENA_GOVERNANCE_CORRECTION_TOKEN_MAP = Object.freeze({
   [BLOCK_REASON.CRITICAL_DEBT_OVERDUE]: {
     blockReason: BLOCK_REASON.CRITICAL_DEBT_OVERDUE,
     gateKey: "CARRY_FORWARD_DEBT",
+  },
+  [BLOCK_REASON.ROLLING_YIELD_THROTTLE]: {
+    blockReason: BLOCK_REASON.ROLLING_YIELD_THROTTLE,
+    gateKey: "ROLLING_COMPLETION_YIELD",
   },
 } as const);
 
@@ -1640,6 +1649,43 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
     }
   } catch (readinessErr) {
     warn(`[orchestrator] dependency readiness gate failed (non-fatal): ${String(readinessErr?.message || readinessErr)}`);
+  }
+
+  // ── Lane diversity gate ───────────────────────────────────────────────────
+  // Runs in pre-dispatch governance so both standard and resume dispatch paths
+  // block before wave-1 using a canonical block reason contract.
+  const diversityMinLanesRaw = Number(config?.workerPool?.minLanes);
+  const diversityMinLanes = Number.isFinite(diversityMinLanesRaw) && diversityMinLanesRaw > 1
+    ? Math.floor(diversityMinLanesRaw)
+    : null;
+  if (diversityMinLanes !== null && normalizedPlans.length >= diversityMinLanes) {
+    let diversityMsg = "";
+    let diversityBlocked = false;
+    try {
+      const diversityPool = assignWorkersToPlans(normalizedPlans, config);
+      const diversityResult = enforceLaneDiversity(diversityPool, { minLanes: diversityMinLanes });
+      if (!diversityResult.meetsMinimum) {
+        diversityBlocked = true;
+        diversityMsg = String(diversityResult.warning || "insufficient lane diversity");
+      }
+    } catch (diversityErr) {
+      diversityBlocked = true;
+      diversityMsg = `lane_diversity_gate_error:${String(diversityErr?.message || diversityErr)}`;
+    }
+    if (diversityBlocked) {
+      const blockReason = `${BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED}:${diversityMsg}`;
+      return {
+        blocked: true,
+        reason: blockReason,
+        action: undefined,
+        dispatchBlockReason: blockReason,
+        graphResult,
+        cycleId,
+        budgetEligibility,
+        gateKey: "LANE_DIVERSITY",
+        gateIndex: GATE_PRECEDENCE.LANE_DIVERSITY,
+      };
+    }
   }
 
   // ── Gate 10: Rolling completion yield throttle ────────────────────────
@@ -4938,63 +4984,6 @@ async function runSingleCycle(config, _token?: CancellationToken | null) {
     }
   } catch (err) {
     warn(`[orchestrator] Plan quality gate failed (non-fatal): ${String(err?.message || err)}`);
-  }
-
-  // ── Lane diversity gate (Packet 6) — hard admission control ──
-  // Blocks dispatch when the active plan set spans fewer lanes than the
-  // configured minimum. Only enforced when plans.length >= minLanes so
-  // single-plan batches are not penalised for inherent monoculture.
-  // Errors in the gate itself are fail-closed: they block dispatch.
-  {
-    const diversityMinLanes: number = config?.workerPool?.minLanes || 2;
-    if (plans.length >= diversityMinLanes) {
-      let diversityBlocked = false;
-      let diversityMsg = "";
-      try {
-        const diversityPool = capabilityPoolResult || { activeLaneCount: plans.length, assignments: [] };
-        const diversityResult = enforceLaneDiversity(diversityPool, { minLanes: diversityMinLanes });
-        if (!diversityResult.meetsMinimum) {
-          diversityBlocked = true;
-          diversityMsg = diversityResult.warning;
-        }
-      } catch (err) {
-        diversityBlocked = true;
-        diversityMsg = `Lane diversity gate threw: ${String(err?.message || err)}`;
-      }
-      if (diversityBlocked) {
-        await appendProgress(config, `[LANE_DIVERSITY] Hard gate: dispatch blocked — ${diversityMsg}`);
-        await appendAlert(config, {
-          severity: ALERT_SEVERITY.HIGH,
-          source: "orchestrator",
-          title: "Lane diversity gate blocked dispatch",
-          message: diversityMsg,
-        });
-        warn(`[orchestrator] Lane diversity gate blocked dispatch: ${diversityMsg}`);
-        try {
-          const blockedAnalytics = computeCycleAnalytics(config, {
-            phase: CYCLE_PHASE.INCOMPLETE,
-            dispatchBlockReason: `lane_diversity_gate_blocked:${diversityMsg}`,
-            pipelineProgress: null,
-            workerResults: null,
-          });
-          await persistCycleAnalytics(config, blockedAnalytics);
-          await appendGovernanceBlockEvent(config, {
-            cycleId: String(cycleStartedAt || new Date().toISOString()),
-            blockReason: `lane_diversity_gate_blocked:${diversityMsg}`,
-            blockedAt: new Date().toISOString(),
-            gateSource: "lane_diversity_gate",
-          });
-          await recordCapabilityExecution(
-            config,
-            "dispatch-block-reason-reporting",
-            `gateSource=lane_diversity_gate reason=${diversityMsg.slice(0, 120)}`,
-          );
-        } catch (analyticsErr) {
-          warn(`[orchestrator] Blocked-cycle analytics write failed (non-fatal): ${String(analyticsErr?.message || analyticsErr)}`);
-        }
-        return;
-      }
-    }
   }
 
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
