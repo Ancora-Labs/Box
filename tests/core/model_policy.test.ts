@@ -1027,13 +1027,13 @@ describe("rankModelsByTaskKindExpectedValue — threshold enforcement", () => {
       "higher expected-value model must be ranked first");
   });
 
-  it("falls back when telemetry sampleCount is high but lineage-linked sample count is zero", () => {
+  it("falls back when lineage-linked sample count is below threshold", () => {
     const cycleAnalytics = {
       modelRoutingTelemetry: {
         byTaskKind: {
           "ci-fix": {
             sampleCount: Math.max(MIN_TELEMETRY_SAMPLE_THRESHOLD, 5),
-            lineageLinkedSampleCount: 0,
+            lineageLinkedSampleCount: Math.max(1, MIN_TELEMETRY_SAMPLE_THRESHOLD - 1),
             default: { successProbability: 0.9, capacityImpact: 0.9, requestCost: 1 },
             models: {
               "GPT-5.3-Codex": { successProbability: 0.95, capacityImpact: 0.9, requestCost: 1 },
@@ -1049,7 +1049,7 @@ describe("rankModelsByTaskKindExpectedValue — threshold enforcement", () => {
       cycleAnalytics,
     );
     assert.equal(result.usedTelemetry, false);
-    assert.equal(result.reason, "telemetry-unlinked");
+    assert.equal(result.reason, "telemetry-below-threshold");
     assert.deepEqual(result.rankedModels, ["Claude Sonnet 4.6", "GPT-5.3-Codex"]);
   });
 

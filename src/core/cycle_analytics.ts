@@ -1828,12 +1828,13 @@ export function buildModelRoutingTelemetry(premiumUsageLog: unknown[], _lineageL
   }
 
   type EcoPoint = { successProbability: number; capacityImpact: number; requestCost: number };
-  type Accumulator = { done: number; total: number };
+  type Accumulator = { done: number; total: number; linked: number };
 
   // Grouped tallies: taskKind → model → { done, total }
   const byTaskKindModel: Record<string, Record<string, Accumulator>> = {};
   let usableEntries = 0;
   let droppedUnlinkedCount = 0;
+  let linkedEntries = 0;
 
   for (const entry of premiumUsageLog) {
     if (
@@ -1846,16 +1847,16 @@ export function buildModelRoutingTelemetry(premiumUsageLog: unknown[], _lineageL
     const row = entry as Record<string, unknown>;
     const { taskKind, model, outcome } = row as Record<string, string>;
     const lineageId = typeof row.lineageId === "string" ? row.lineageId.trim() : "";
-    if (!lineageId) {
-      droppedUnlinkedCount++;
-      continue;
-    }
+    const hasLineageId = Boolean(lineageId);
+    if (!hasLineageId) droppedUnlinkedCount++;
+    else linkedEntries++;
     const normalizedModel = normalizeModelLabel(model);
     if (!taskKind || !normalizedModel) continue;
 
     byTaskKindModel[taskKind] ??= {};
-    byTaskKindModel[taskKind][normalizedModel] ??= { done: 0, total: 0 };
+    byTaskKindModel[taskKind][normalizedModel] ??= { done: 0, total: 0, linked: 0 };
     byTaskKindModel[taskKind][normalizedModel].total++;
+    if (hasLineageId) byTaskKindModel[taskKind][normalizedModel].linked++;
     if (outcome === "done") byTaskKindModel[taskKind][normalizedModel].done++;
     usableEntries++;
   }
@@ -1877,18 +1878,19 @@ export function buildModelRoutingTelemetry(premiumUsageLog: unknown[], _lineageL
   }> = {};
 
   for (const [taskKind, modelMap] of Object.entries(byTaskKindModel)) {
-    const allAcc: Accumulator = { done: 0, total: 0 };
+    const allAcc: Accumulator = { done: 0, total: 0, linked: 0 };
     const modelPoints: Record<string, EcoPoint> = {};
 
     for (const [modelName, acc] of Object.entries(modelMap)) {
       allAcc.done += acc.done;
       allAcc.total += acc.total;
+      allAcc.linked += acc.linked;
       modelPoints[modelName] = toEcoPoint(acc);
     }
 
     resultByTaskKind[taskKind] = {
       sampleCount: allAcc.total,
-      lineageLinkedSampleCount: allAcc.total,
+      lineageLinkedSampleCount: allAcc.linked,
       default: toEcoPoint(allAcc),
       models: modelPoints,
     };
@@ -1897,7 +1899,7 @@ export function buildModelRoutingTelemetry(premiumUsageLog: unknown[], _lineageL
   return {
     byTaskKind: resultByTaskKind,
     sampleCount: usableEntries,
-    linkedSampleCount: usableEntries,
+    linkedSampleCount: linkedEntries,
     droppedUnlinkedCount,
   };
 }

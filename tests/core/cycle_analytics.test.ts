@@ -1866,10 +1866,10 @@ describe("modelRoutingTelemetry schema contract", () => {
       { model: "Claude Sonnet 4.6", taskKind: "implementation", outcome: "done", lineageId: "" },
     ];
     const result = buildModelRoutingTelemetry(log);
-    assert.equal(result.sampleCount, 2, "only lineage-linked rows should be counted");
+    assert.equal(result.sampleCount, 4, "sampleCount tracks all structurally valid rows");
     assert.equal(result.linkedSampleCount, 2);
     assert.equal(result.droppedUnlinkedCount, 2);
-    assert.equal(result.byTaskKind.implementation.sampleCount, 2);
+    assert.equal(result.byTaskKind.implementation.sampleCount, 4);
     assert.equal(result.byTaskKind.implementation.lineageLinkedSampleCount, 2);
   });
 
