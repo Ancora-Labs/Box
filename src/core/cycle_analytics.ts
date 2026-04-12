@@ -217,18 +217,9 @@ export const DISPATCH_BLOCK_REASON_CODE = Object.freeze({
 
 const DISPATCH_BLOCK_REASON_CODE_SET = new Set<string>(Object.values(DISPATCH_BLOCK_REASON_CODE));
 
-export type DispatchBlockReasonCode =
-  typeof DISPATCH_BLOCK_REASON_CODE[keyof typeof DISPATCH_BLOCK_REASON_CODE];
-
-export interface DispatchBlockReasonContract {
-  code: DispatchBlockReasonCode;
-  detail: Record<string, unknown>;
-  raw: string;
-}
-
 export function parseDispatchBlockReasonContract(
   rawReason: unknown,
-): DispatchBlockReasonContract | null {
+): { code: string; detail: Record<string, unknown>; raw: string } | null {
   const raw = String(rawReason || "").trim();
   if (!raw) return null;
   const [prefixRaw, ...rest] = raw.split(":");
