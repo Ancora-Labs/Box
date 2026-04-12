@@ -2556,9 +2556,9 @@ describe("computeCycleAnalytics — modelRoutingTelemetry integration", () => {
 
 describe("rankModelsByTaskKindExpectedValue — usedTelemetry flag from real telemetry", () => {
   const sampleLog = [
-    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 12000 },
-    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 11000 },
-    { model: "gpt-4o",          taskKind: "ci-fix", outcome: "error",   durationMs:  8000 },
+    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 12000, lineageId: "ci-1" },
+    { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done",    durationMs: 11000, lineageId: "ci-2" },
+    { model: "gpt-4o",          taskKind: "ci-fix", outcome: "error",   durationMs:  8000, lineageId: "ci-3" },
   ];
 
   it("returns usedTelemetry=true when real byTaskKind data is provided", () => {
@@ -2594,8 +2594,8 @@ describe("rankModelsByTaskKindExpectedValue — sample threshold enforcement", (
   it("returns telemetry-below-threshold when task kind has fewer samples than threshold", () => {
     // 2 entries for ci-fix — below the threshold of 3
     const sparseLog = [
-      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done" },
-      { model: "gpt-4o",          taskKind: "ci-fix", outcome: "error" },
+      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done", lineageId: "ci-sparse-1" },
+      { model: "gpt-4o",          taskKind: "ci-fix", outcome: "error", lineageId: "ci-sparse-2" },
     ];
     const telemetry = buildModelRoutingTelemetry(sparseLog)!;
     assert.strictEqual(telemetry.byTaskKind["ci-fix"].sampleCount, 2);
@@ -2617,6 +2617,7 @@ describe("rankModelsByTaskKindExpectedValue — sample threshold enforcement", (
       model: i % 2 === 0 ? "claude-sonnet-4" : "gpt-4o",
       taskKind: "ci-fix",
       outcome: i === 0 ? "done" : "error",
+      lineageId: `ci-threshold-${i}`,
     }));
     const telemetry = buildModelRoutingTelemetry(thresholdLog)!;
     assert.strictEqual(telemetry.byTaskKind["ci-fix"].sampleCount, MIN_TELEMETRY_SAMPLE_THRESHOLD);
@@ -2633,12 +2634,12 @@ describe("rankModelsByTaskKindExpectedValue — sample threshold enforcement", (
   it("negative: threshold check is per-task-kind — abundant samples for one kind do not unlock another", () => {
     // ci-fix has 5 samples, but feature has only 1
     const mixedLog = [
-      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done" },
-      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done" },
-      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done" },
-      { model: "gpt-4o",          taskKind: "ci-fix", outcome: "done" },
-      { model: "gpt-4o",          taskKind: "ci-fix", outcome: "done" },
-      { model: "gpt-4o",          taskKind: "feature", outcome: "done" },
+      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done", lineageId: "ci-mixed-1" },
+      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done", lineageId: "ci-mixed-2" },
+      { model: "claude-sonnet-4", taskKind: "ci-fix", outcome: "done", lineageId: "ci-mixed-3" },
+      { model: "gpt-4o",          taskKind: "ci-fix", outcome: "done", lineageId: "ci-mixed-4" },
+      { model: "gpt-4o",          taskKind: "ci-fix", outcome: "done", lineageId: "ci-mixed-5" },
+      { model: "gpt-4o",          taskKind: "feature", outcome: "done", lineageId: "feature-1" },
     ];
     const telemetry = buildModelRoutingTelemetry(mixedLog)!;
     const cycleAnalytics = { modelRoutingTelemetry: telemetry };
