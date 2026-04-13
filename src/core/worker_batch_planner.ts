@@ -1350,6 +1350,9 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
           baseCap: packetSizePolicy.maxPlansPerPacket,
           taskKindTelemetry: taskKindPacketTelemetry,
         });
+        const explicitPacketCap = Number((config as any)?.planner?.maxPlansPerPacket);
+        const enforceAdaptivePacketCap = Number.isFinite(explicitPacketCap) && explicitPacketCap > 0
+          || adaptivePacketLimit.reasonCodes.length > 0;
 
         // When nucleus/frontier mode is active, replace the standard sequential
         // batches with nucleus-first / frontier-fill batches.  This reduces the
@@ -1371,9 +1374,12 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
         for (const batch of activeBatches) {
           const batchPlans = batch.plans as any[];
           const hasDeps = batchPlans.some((p) => hasExplicitDependencies(p));
+          const packetPlanLimit = enforceAdaptivePacketCap
+            ? adaptivePacketLimit.maxPlansPerPacket
+            : Math.max(1, batchPlans.length);
           const chunkSize = hasDeps
-            ? Math.max(1, Math.min(maxDepBatch, adaptivePacketLimit.maxPlansPerPacket))
-            : adaptivePacketLimit.maxPlansPerPacket;
+            ? Math.max(1, Math.min(maxDepBatch, packetPlanLimit))
+            : packetPlanLimit;
           if (batchPlans.length > chunkSize) {
             // Chunk into groups of maxDepBatch; distribute estimated tokens proportionally
             for (let offset = 0; offset < batchPlans.length; offset += chunkSize) {
@@ -1409,7 +1415,7 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
             const mergedHasDeps = mergedPlans.some((p) => hasExplicitDependencies(p));
             const withinDepLimit = !mergedHasDeps || mergedPlans.length <= maxDepBatch;
             const withinContextLimit = mergedTokens <= selection.usableContextTokens;
-            const withinPacketPlanLimit = mergedPlans.length <= adaptivePacketLimit.maxPlansPerPacket;
+            const withinPacketPlanLimit = !enforceAdaptivePacketCap || mergedPlans.length <= adaptivePacketLimit.maxPlansPerPacket;
 
             if (withinDepLimit && withinContextLimit && withinPacketPlanLimit) {
               const remaining = selection.usableContextTokens - mergedTokens;
