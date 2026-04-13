@@ -20,7 +20,7 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync, writeJson } from "./fs_utils.js";
 import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
 import { getRoleRegistry, assertRoleCapabilityForTask, isAthenaReviewOrPostmortemTask, normalizeTaskKindLabel } from "./role_registry.js";
-import { appendProgress, appendLineageEntry, appendFailureClassification } from "./state_tracker.js";
+import { appendProgress, appendLineageEntry, appendFailureClassification, readPromptCacheTelemetry } from "./state_tracker.js";
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist, CANONICAL_VERIFICATION_REPORT_TEMPLATE } from "./verification_profiles.js";
 import { getVerificationCommands, classifyNodeTestGlobWindowsArtifact } from "./verification_command_registry.js";
@@ -277,6 +277,16 @@ function deriveOutcomeQualityScore(status: string, verificationEvidence: unknown
   if (normalized === "partial") return hasEvidence ? 0.68 : 0.52;
   if (normalized === "blocked") return 0.18;
   return 0;
+}
+
+export function resolvePostVerificationTelemetryOutcome(
+  status: unknown,
+  reworkDecision?: { shouldRework?: boolean; shouldEscalate?: boolean } | null,
+): string {
+  const normalizedStatus = String(status || "unknown").trim().toLowerCase();
+  if (reworkDecision?.shouldRework) return TERMINATION_CAUSE.VERIFICATION_FAILED;
+  if (reworkDecision?.shouldEscalate && normalizedStatus === "done") return "blocked";
+  return normalizedStatus || "unknown";
 }
 
 type SpawnAsyncResult = {
@@ -644,6 +654,56 @@ function computeOutcomeMetrics(config, taskKind: string) {
   }
 }
 
+async function computePromptCacheRoutingSignal(
+  config: WorkerRunnerConfig,
+  taskKind: string,
+  roleName: string,
+): Promise<{ sampleCount: number; hitRate: number; avgSavedTokens: number }> {
+  try {
+    const records = await readPromptCacheTelemetry(config);
+    if (!Array.isArray(records) || records.length === 0) {
+      return { sampleCount: 0, hitRate: 0, avgSavedTokens: 0 };
+    }
+    const normalizedTaskKind = String(taskKind || "").trim().toLowerCase();
+    const normalizedRoleName = String(roleName || "").trim().toLowerCase();
+    const matching = records.filter((record: any) => {
+      const recordTaskKind = String(record?.taskKind || "").trim().toLowerCase();
+      const recordAgent = String(record?.agent || "").trim().toLowerCase();
+      return (
+        (normalizedTaskKind && recordTaskKind === normalizedTaskKind)
+        || (normalizedRoleName && recordAgent === normalizedRoleName)
+      );
+    });
+    const recent = (matching.length > 0 ? matching : records).slice(-20);
+    if (recent.length === 0) {
+      return { sampleCount: 0, hitRate: 0, avgSavedTokens: 0 };
+    }
+    let hitRateSum = 0;
+    let savedTokenSum = 0;
+    let usableCount = 0;
+    for (const record of recent) {
+      const totalSegments = Number(record?.totalSegments || 0);
+      const cachedSegments = Number(record?.cachedSegments || 0);
+      const ratio = totalSegments > 0
+        ? Math.max(0, Math.min(1, cachedSegments / totalSegments))
+        : Math.max(0, Math.min(1, Number(record?.hitRate || 0)));
+      hitRateSum += ratio;
+      savedTokenSum += Math.max(0, Number(record?.estimatedSavedTokens || 0));
+      usableCount += 1;
+    }
+    if (usableCount === 0) {
+      return { sampleCount: 0, hitRate: 0, avgSavedTokens: 0 };
+    }
+    return {
+      sampleCount: usableCount,
+      hitRate: Math.round((hitRateSum / usableCount) * 1000) / 1000,
+      avgSavedTokens: Math.round(savedTokenSum / usableCount),
+    };
+  } catch {
+    return { sampleCount: 0, hitRate: 0, avgSavedTokens: 0 };
+  }
+}
+
 function loadBenchmarkGroundTruthSignal(config) {
   try {
     const stateDir = config.paths?.stateDir || "state";
@@ -749,6 +809,160 @@ function getLiveLogPath(config, roleName) {
   const stateDir = config.paths?.stateDir || "state";
   const safeRole = String(roleName || "worker").replace(/[^a-z0-9_-]+/gi, "_");
   return path.join(stateDir, `live_worker_${safeRole}.log`);
+}
+
+export async function captureRerereState(repoPath: string): Promise<string[]> {
+  const rrCacheDir = path.join(repoPath, ".git", "rr-cache");
+  const seen: string[] = [];
+
+  async function walk(dirPath: string) {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(
+        dirPath,
+        { withFileTypes: true },
+      ) as Array<{ name: string; isDirectory: () => boolean }>;
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      const relative = path.relative(rrCacheDir, fullPath).replace(/\\/g, "/");
+      seen.push(relative);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      }
+    }
+  }
+
+  await walk(rrCacheDir);
+  return seen.sort();
+}
+
+export function buildConflictReplayWorktreeName(conflictHash: string): string {
+  const normalized = String(conflictHash || "replay")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return `replay-${normalized || "default"}`;
+}
+
+export async function validateWorktreeCleanup(repoPath: string, worktreePath: string): Promise<{ cleaned: boolean; leakedState: string[] }> {
+  const worktreeName = path.basename(String(worktreePath || "").replace(/[\\/]+$/, ""));
+  const leakedState: string[] = [];
+  try {
+    await fs.access(worktreePath);
+    leakedState.push(`worktree:${worktreePath}`);
+  } catch {
+    // cleaned from filesystem
+  }
+  const metadataDir = path.join(repoPath, ".git", "worktrees", worktreeName);
+  try {
+    await fs.access(metadataDir);
+    leakedState.push(`git-metadata:${metadataDir}`);
+  } catch {
+    // cleaned from git metadata
+  }
+  return { cleaned: leakedState.length === 0, leakedState };
+}
+
+export async function runDeterministicConflictReplayRuntime(
+  config: WorkerRunnerConfig,
+  opts: { repoPath: string; baseRef?: string; commits?: string[]; conflictHash?: string },
+): Promise<{
+  ok: boolean;
+  worktreePath: string | null;
+  replayedCommits: string[];
+  rerereEntriesBefore: string[];
+  rerereEntriesAfter: string[];
+  cleanup: { cleaned: boolean; leakedState: string[] };
+  blockReason?: string;
+}> {
+  const repoPath = String(opts?.repoPath || "").trim();
+  if (!repoPath) {
+    return {
+      ok: false,
+      worktreePath: null,
+      replayedCommits: [],
+      rerereEntriesBefore: [],
+      rerereEntriesAfter: [],
+      cleanup: { cleaned: true, leakedState: [] },
+      blockReason: "conflict_replay_missing_repo_path",
+    };
+  }
+
+  const normalizedCommits = Array.isArray(opts?.commits)
+    ? opts.commits.map((commit) => String(commit || "").trim()).filter(Boolean)
+    : [];
+  const replayHashSource = JSON.stringify({
+    baseRef: String(opts?.baseRef || "HEAD"),
+    commits: normalizedCommits,
+    conflictHash: String(opts?.conflictHash || ""),
+  });
+  const replayHash = createHash("sha1").update(replayHashSource).digest("hex").slice(0, 12);
+  const stateDir = String(config?.paths?.stateDir || path.join(repoPath, "state"));
+  const worktreeRoot = path.join(stateDir, "conflict_replays");
+  const worktreePath = path.join(worktreeRoot, buildConflictReplayWorktreeName(String(opts?.conflictHash || replayHash)));
+  const rerereEntriesBefore = await captureRerereState(repoPath);
+  const replayedCommits: string[] = [];
+
+  await fs.mkdir(worktreeRoot, { recursive: true });
+
+  try {
+    await spawnAsync("git", ["worktree", "add", "--detach", worktreePath, String(opts?.baseRef || "HEAD")], { cwd: repoPath });
+    await spawnAsync("git", ["config", "rerere.enabled", "true"], { cwd: worktreePath });
+
+    for (const commit of normalizedCommits) {
+      const result = await spawnAsync("git", ["cherry-pick", "--allow-empty", commit], { cwd: worktreePath }) as any;
+      if (Number(result?.status || 0) !== 0) {
+        await spawnAsync("git", ["cherry-pick", "--abort"], { cwd: worktreePath }).catch(() => {});
+        const cleanup = await (async () => {
+          await spawnAsync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath }).catch(() => {});
+          await fs.rm(worktreePath, { recursive: true, force: true }).catch(() => {});
+          return validateWorktreeCleanup(repoPath, worktreePath);
+        })();
+        const rerereEntriesAfter = await captureRerereState(repoPath);
+        return {
+          ok: false,
+          worktreePath,
+          replayedCommits,
+          rerereEntriesBefore,
+          rerereEntriesAfter,
+          cleanup,
+          blockReason: `conflict_replay_failed:${commit}`,
+        };
+      }
+      replayedCommits.push(commit);
+    }
+
+    const rerereEntriesAfter = await captureRerereState(repoPath);
+    await spawnAsync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath }).catch(() => {});
+    await fs.rm(worktreePath, { recursive: true, force: true }).catch(() => {});
+    const cleanup = await validateWorktreeCleanup(repoPath, worktreePath);
+    return {
+      ok: true,
+      worktreePath,
+      replayedCommits,
+      rerereEntriesBefore,
+      rerereEntriesAfter,
+      cleanup,
+    };
+  } catch (err) {
+    await spawnAsync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath }).catch(() => {});
+    await fs.rm(worktreePath, { recursive: true, force: true }).catch(() => {});
+    const cleanup = await validateWorktreeCleanup(repoPath, worktreePath);
+    const rerereEntriesAfter = await captureRerereState(repoPath);
+    return {
+      ok: false,
+      worktreePath,
+      replayedCommits,
+      rerereEntriesBefore,
+      rerereEntriesAfter,
+      cleanup,
+      blockReason: String((err as any)?.message || err),
+    };
+  }
 }
 
 function roleToWorkerStateFile(roleName: unknown): string {
@@ -1066,13 +1280,18 @@ async function resolveModel(config, roleName, taskKind, taskHints: TaskHints = {
   if (!candidate) {
     const recentROI = computeRecentROI(config, taskKind);
     const outcomeMetrics = computeOutcomeMetrics(config, taskKind);
+    const promptCacheSignal = await computePromptCacheRoutingSignal(config, taskKind, roleName);
     const benchmarkSignal = analyzeBenchmarkReadiness(config, taskHints);
     const dynamicQualityFloor = computeDynamicQualityFloor(config, taskHints);
     const qualityFloorRoute = await routeModelWithRealizedROI(
       config,
       taskHints,
       { defaultModel, strongModel, efficientModel, qualityByModel: config?.copilot?.qualityByModel || {} },
-      { qualityFloor: dynamicQualityFloor },
+      {
+        qualityFloor: dynamicQualityFloor,
+        promptCacheHitRate: promptCacheSignal.hitRate,
+        promptCacheSavedTokens: promptCacheSignal.avgSavedTokens,
+      },
     );
     candidate = qualityFloorRoute.model;
     if (
@@ -1091,7 +1310,7 @@ async function resolveModel(config, roleName, taskKind, taskHints: TaskHints = {
     if (qualityFloorRoute.uncertainty !== "low" || !qualityFloorRoute.meetsQualityFloor) {
       try {
         appendProgress(config,
-          `[QUALITY_FLOOR_ROUTE] ${roleName}: tier=${qualityFloorRoute.tier} uncertainty=${qualityFloorRoute.uncertainty} meetsFloor=${qualityFloorRoute.meetsQualityFloor} realizedROI=${qualityFloorRoute.realizedROI.toFixed(2)} dynamicFloor=${dynamicQualityFloor.toFixed(2)} recentROI=${recentROI.toFixed(2)} → ${candidate}`
+          `[QUALITY_FLOOR_ROUTE] ${roleName}: tier=${qualityFloorRoute.tier} uncertainty=${qualityFloorRoute.uncertainty} meetsFloor=${qualityFloorRoute.meetsQualityFloor} realizedROI=${qualityFloorRoute.realizedROI.toFixed(2)} dynamicFloor=${dynamicQualityFloor.toFixed(2)} recentROI=${recentROI.toFixed(2)} cacheHitRate=${promptCacheSignal.hitRate.toFixed(2)} cacheSavedTokens=${promptCacheSignal.avgSavedTokens} → ${candidate}`
         );
       } catch { /* non-critical */ }
     }
@@ -1457,6 +1676,13 @@ export function buildConversationContext(history, instruction: WorkerInstruction
     parts.push("  ✓ BOX_DEVIATION=none|minor|major  ← 'none' if on-plan, 'minor'/'major' if off-plan");
     parts.push("If ANY item is missing, unfilled, or uses an old format → write BOX_STATUS=partial and list what could not be completed.");
     parts.push("⚠️ Do NOT use POST_MERGE_TEST_OUTPUT — that format is rejected. Use ===NPM TEST OUTPUT START/END=== instead.");
+    parts.push("Before you send your final answer, do one last literal self-check on your draft.");
+    parts.push("If your final answer still contains any placeholder/example text below, you MUST replace it with real evidence or downgrade to BOX_STATUS=partial:");
+    parts.push("  - <pass|fail|n/a>");
+    parts.push("  - BOX_MERGED_SHA=<sha>");
+    parts.push("  - <paste full raw npm test stdout here>");
+    parts.push("  - POST_MERGE_TEST_OUTPUT");
+    parts.push("Do NOT copy instructional examples verbatim into your final evidence block.");
   }
 
   parts.push(String(instruction.task || ""));
@@ -2642,21 +2868,6 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     }).catch(() => { /* non-fatal */ });
   }
 
-  // Track premium request usage per worker (always log, even for failed verification attempts)
-  // Reuse the exact dispatch lineage key so analytics can deterministically join
-  // routing decisions ↔ premium usage ↔ lineage graph outcomes.
-  const _premiumLineageId: string | null = _dispatchLineageId;
-  logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
-    outcome: parsed.status,
-    taskId: instruction.taskId || instruction.task || null,
-    lineageId: _premiumLineageId,
-  });
-
-  // ── Outcome mapping: tie memory-hit record to final worker outcome ─────────
-  // Updates the pre-dispatch hit record (outcome=null) with the actual result so
-  // cycle analytics can compute memory ROI (hitRate × successRateOnHits).
-  updateMemoryHitOutcome(config, _memoryHitTaskId || null, parsed.status);
-
   // ── Rework budget — pre-computed so both gates share the same values ─────────
   // Declared here (before the artifact gate) so the artifact gate can decide
   // whether to hard-block or to defer to the rework loop.
@@ -2836,6 +3047,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     } catch { /* non-critical */ }
 
     const reworkDecision = decideRework(validationResult, instruction.task, currentAttempt, maxReworkAttempts);
+    const telemetryOutcome = resolvePostVerificationTelemetryOutcome(parsed.status, reworkDecision);
 
     if (reworkDecision.shouldEscalate) {
       // Max rework attempts exhausted — block the task instead of looping
@@ -2866,12 +3078,36 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       await appendProgress(config,
         `[WORKER:${roleName}] Verification failed (attempt ${currentAttempt + 1}/${maxReworkAttempts}) — gaps: ${validationResult.gaps.slice(0, 2).join("; ")}`
       );
+      logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
+        outcome: telemetryOutcome,
+        taskId: instruction.taskId || instruction.task || null,
+        lineageId: _dispatchLineageId,
+      });
+      updateMemoryHitOutcome(config, _memoryHitTaskId || null, telemetryOutcome);
+      try {
+        await realizeRouteROIEntry(
+          config,
+          routingTaskId,
+          deriveOutcomeQualityScore(telemetryOutcome, verificationEvidence, dispatchContract),
+          telemetryOutcome,
+        );
+      } catch {
+        // non-critical routing telemetry
+      }
       // Re-dispatch with rework instruction; recursive depth is bounded by maxReworkAttempts
       return runWorkerConversation(config, roleName, reworkDecision.instruction, updatedHistory, sessionState);
     }
 
     parsed.verificationEvidence = verificationEvidence;
   }
+
+  const finalTelemetryOutcome = resolvePostVerificationTelemetryOutcome(parsed.status);
+  logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
+    outcome: finalTelemetryOutcome,
+    taskId: instruction.taskId || instruction.task || null,
+    lineageId: _dispatchLineageId,
+  });
+  updateMemoryHitOutcome(config, _memoryHitTaskId || null, finalTelemetryOutcome);
 
   await appendLiveWorkerLog(
     liveLogPath,
@@ -3042,8 +3278,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     await realizeRouteROIEntry(
       config,
       routingTaskId,
-      deriveOutcomeQualityScore(parsed.status, parsed.verificationEvidence || null, dispatchContract),
-      parsed.status,
+      deriveOutcomeQualityScore(finalTelemetryOutcome, parsed.verificationEvidence || null, dispatchContract),
+      finalTelemetryOutcome,
     );
   } catch {
     // non-critical routing telemetry
