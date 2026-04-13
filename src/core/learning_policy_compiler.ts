@@ -9,7 +9,11 @@
  *
  * Integration: called by orchestrator after postmortem, before next cycle start.
  */
-import { computeDecayedPolicyEffectiveness } from "./lesson_halflife.js";
+import {
+  computeDecayedPolicyEffectiveness,
+  IMPACT_ATTRIBUTION_OUTCOME,
+  summarizeImpactAttributionWindow,
+} from "./lesson_halflife.js";
 import { EQUAL_DIMENSION_SET } from "./plan_contract_validator.js";
 import { OPTIMIZATION_INTERVENTION_KIND } from "./model_policy.js";
 
@@ -822,7 +826,19 @@ export interface PolicyImpactAttribution {
   inactiveCycles: number;
   halfLifeWeight: number;
   decayedEffectiveness: number;
+  evidenceCount: number;
+  improvedCount: number;
+  noSignalCount: number;
+  ineffectiveCount: number;
+  averageOutcomeScore: number;
+  outcomeStatus: string;
   shouldRetire: boolean;
+  reversible: boolean;
+  retirementReason: string;
+  reactivateWhen: string;
+  reactivationThreshold: number;
+  reactivationEvidenceWindow: number;
+  reactivationSatisfied: boolean;
 }
 
 export function computePolicyOutcomeDelta(
@@ -1005,6 +1021,27 @@ export function buildPolicyImpactAttribution(
   const minEffectiveness = Number.isFinite(Number(opts.minEffectiveness)) ? Number(opts.minEffectiveness) : 0.2;
   const minInactiveCycles = Number.isFinite(Number(opts.minInactiveCycles)) ? Number(opts.minInactiveCycles) : 2;
   const shouldRetire = inactiveCycles >= minInactiveCycles && decayedEffectiveness <= minEffectiveness;
+  const evidenceCount = Math.max(1, Number.isFinite(Number(trend?.totalMeasurements)) ? Number(trend?.totalMeasurements) : inactiveCycles);
+  const improvedCount = Number.isFinite(Number(trend?.improvedCount))
+    ? Math.max(0, Number(trend?.improvedCount))
+    : (improved ? 1 : 0);
+  const noSignalCount = improved || shouldRetire ? 0 : Math.max(1, evidenceCount - improvedCount);
+  const ineffectiveCount = Math.max(0, evidenceCount - improvedCount - noSignalCount);
+  const outcomeStatus = shouldRetire
+    ? IMPACT_ATTRIBUTION_OUTCOME.SHOULD_RETIRE
+    : improved
+      ? IMPACT_ATTRIBUTION_OUTCOME.IMPROVED
+      : IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+  const averageOutcomeScore = round3(
+    improved
+      ? Math.max(decayedEffectiveness, opts.minImprovementDelta ?? 0.01)
+      : decayedEffectiveness,
+  );
+  const retirementReason = shouldRetire
+    ? `measured_uplift_low_yield:${round3(decayedEffectiveness)}<=${round3(minEffectiveness)}`
+    : outcomeStatus === IMPACT_ATTRIBUTION_OUTCOME.IMPROVED
+      ? `measured_uplift_improved:${round3(delta)}`
+      : "measured_uplift_no_signal";
 
   return {
     policyId,
@@ -1017,12 +1054,25 @@ export function buildPolicyImpactAttribution(
     inactiveCycles,
     halfLifeWeight,
     decayedEffectiveness,
+    evidenceCount,
+    improvedCount,
+    noSignalCount,
+    ineffectiveCount,
+    averageOutcomeScore,
+    outcomeStatus,
     shouldRetire,
+    reversible: true,
+    retirementReason,
+    reactivateWhen: `record ${minInactiveCycles} improved measured-uplift cycle(s) with delta >= ${round3(minImprovementDelta)}`,
+    reactivationThreshold: round3(minImprovementDelta),
+    reactivationEvidenceWindow: minInactiveCycles,
+    reactivationSatisfied: improved && inactiveCycles === 0,
   };
 }
 
 export const POLICY_MUTATION_EVIDENCE_WINDOW = 3;
 export const POLICY_MUTATION_MIN_COMBINED_SCORE = 0.55;
+export const POLICY_MUTATION_RETIRE_COMBINED_SCORE = 0.25;
 
 export interface InterventionRubricScore {
   interventionId: string;
@@ -1033,6 +1083,12 @@ export interface InterventionRubricScore {
   outcomeScore: number;
   combinedScore: number;
   scoredAt: string;
+  outcomeStatus?: string;
+  noSignalOutcome?: boolean;
+  decisionMode?: string | null;
+  closureMode?: string | null;
+  lineageId?: string | null;
+  interventionType?: string | null;
 }
 
 export interface PolicyMutationDecision {
@@ -1042,6 +1098,14 @@ export interface PolicyMutationDecision {
   outcomeScore: number;
   combinedScore: number;
   mutate: boolean;
+  outcomeStatus: string;
+  shouldRetire: boolean;
+  improvedCount: number;
+  noSignalCount: number;
+  ineffectiveCount: number;
+  averageOutcomeScore: number;
+  reversible: boolean;
+  reactivateWhen: string;
   reason: string;
 }
 
@@ -1126,24 +1190,55 @@ export function retireLowYieldPolicyFamilies(
 
     const records = effectivenessByPolicyId.get(policyId);
     if (!records || records.length < minRecords) {
-      active.push(policy);
+      active.push({
+        ...policy,
+        _impactOutcomeStatus: IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL,
+        _retirementReversible: true,
+      });
       continue;
     }
 
+    const summary = summarizeImpactAttributionWindow(
+      records.map((score) => ({ outcomeScore: score })),
+      {
+        minEvidenceWindow: minRecords,
+        improvedThreshold: POLICY_MUTATION_MIN_COMBINED_SCORE,
+        retireThreshold: threshold,
+        reactivationEvidenceWindow: Math.min(2, minRecords),
+      },
+    );
     const avgEffectiveness = records.reduce((s, v) => s + v, 0) / records.length;
-    if (avgEffectiveness <= threshold) {
+    const retirementLedger = {
+      evidenceCount: summary.evidenceCount,
+      improvedCount: summary.improvedCount,
+      noSignalCount: summary.noSignalCount,
+      ineffectiveCount: summary.ineffectiveCount,
+      averageOutcomeScore: summary.averageOutcomeScore,
+      reversible: summary.reversible,
+      reactivateWhen: summary.reactivateWhen,
+      reactivationThreshold: summary.reactivationThreshold,
+    };
+    if (summary.shouldRetire) {
       retired.push({
         ...policy,
         _retiredAt: new Date().toISOString(),
         _retirementReason: `Low-yield policy family: avg effectiveness ${Math.round(avgEffectiveness * 1000) / 1000} <= threshold ${threshold} over ${records.length} attribution records`,
         _avgDecayedEffectiveness: Math.round(avgEffectiveness * 1000) / 1000,
         _evidenceRecordCount: records.length,
+        _impactOutcomeStatus: summary.outcomeStatus,
+        _retirementReversible: summary.reversible,
+        _reactivateWhen: summary.reactivateWhen,
+        _retirementLedger: retirementLedger,
       });
     } else {
       active.push({
         ...policy,
         _avgDecayedEffectiveness: Math.round(avgEffectiveness * 1000) / 1000,
         _evidenceRecordCount: records.length,
+        _impactOutcomeStatus: summary.outcomeStatus,
+        _retirementReversible: summary.reversible,
+        _reactivateWhen: summary.reactivateWhen,
+        _retirementLedger: retirementLedger,
       });
     }
   }
@@ -1177,11 +1272,27 @@ export function buildInterventionRubricScore(
   policyId: string,
   dimensionScores: Record<string, number>,
   outcomeScore: number,
+  opts: {
+    outcomeStatus?: string;
+    noSignalOutcome?: boolean;
+    decisionMode?: string;
+    closureMode?: string;
+    lineageId?: string;
+    interventionType?: string;
+  } = {},
 ): InterventionRubricScore {
   const normalized = normalizeDimensionScores(dimensionScores);
   const rubricAverage = EQUAL_DIMENSION_SET.reduce((sum, dim) => sum + normalized[dim], 0) / EQUAL_DIMENSION_SET.length;
   const boundedOutcome = Math.max(0, Math.min(1, Number.isFinite(Number(outcomeScore)) ? Number(outcomeScore) : 0));
   const combined = (rubricAverage * 0.6) + (boundedOutcome * 0.4);
+  const noSignalOutcome = opts.noSignalOutcome === true || String(opts.closureMode || "").trim().toLowerCase() === "no_signal";
+  const outcomeStatus = (() => {
+    const explicit = String(opts.outcomeStatus || "").trim().toLowerCase();
+    if (explicit) return explicit;
+    if (noSignalOutcome) return IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+    if (boundedOutcome >= POLICY_MUTATION_MIN_COMBINED_SCORE) return IMPACT_ATTRIBUTION_OUTCOME.IMPROVED;
+    return "";
+  })();
   return {
     interventionId: String(interventionId || "").trim(),
     cycleId: String(cycleId || "").trim(),
@@ -1191,13 +1302,19 @@ export function buildInterventionRubricScore(
     outcomeScore: round3(boundedOutcome),
     combinedScore: round3(combined),
     scoredAt: new Date().toISOString(),
+    outcomeStatus,
+    noSignalOutcome,
+    decisionMode: opts.decisionMode ? String(opts.decisionMode) : null,
+    closureMode: opts.closureMode ? String(opts.closureMode) : null,
+    lineageId: opts.lineageId ? String(opts.lineageId) : null,
+    interventionType: opts.interventionType ? String(opts.interventionType) : null,
   };
 }
 
 export function decidePolicyMutationsFromEvidenceWindow(
   activePolicies: any[],
   scoredInterventions: InterventionRubricScore[],
-  opts: { evidenceWindowCycles?: number; minCombinedScore?: number } = {},
+  opts: { evidenceWindowCycles?: number; minCombinedScore?: number; retireCombinedScore?: number } = {},
 ): PolicyMutationResult {
   const policies = Array.isArray(activePolicies) ? activePolicies : [];
   const evidence = Array.isArray(scoredInterventions) ? scoredInterventions : [];
@@ -1205,6 +1322,9 @@ export function decidePolicyMutationsFromEvidenceWindow(
   const minCombinedScore = Number.isFinite(Number(opts.minCombinedScore))
     ? Number(opts.minCombinedScore)
     : POLICY_MUTATION_MIN_COMBINED_SCORE;
+  const retireCombinedScore = Number.isFinite(Number(opts.retireCombinedScore))
+    ? Number(opts.retireCombinedScore)
+    : POLICY_MUTATION_RETIRE_COMBINED_SCORE;
 
   const decisions: PolicyMutationDecision[] = [];
   const deferred: Array<{ policyId: string; reason: string }> = [];
@@ -1228,6 +1348,14 @@ export function decidePolicyMutationsFromEvidenceWindow(
         outcomeScore: 0,
         combinedScore: 0,
         mutate: false,
+        outcomeStatus: IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL,
+        shouldRetire: false,
+        improvedCount: 0,
+        noSignalCount: 0,
+        ineffectiveCount: 0,
+        averageOutcomeScore: 0,
+        reversible: true,
+        reactivateWhen: `record ${Math.min(2, evidenceWindowCycles)} improved evidence point(s) with average >= ${round3(minCombinedScore)}`,
         reason: "insufficient_evidence_window",
       });
       continue;
@@ -1235,7 +1363,20 @@ export function decidePolicyMutationsFromEvidenceWindow(
     const rubricScore = round3(forPolicy.reduce((sum, entry) => sum + Number(entry.rubricScore || 0), 0) / forPolicy.length);
     const outcomeScore = round3(forPolicy.reduce((sum, entry) => sum + Number(entry.outcomeScore || 0), 0) / forPolicy.length);
     const combinedScore = round3(forPolicy.reduce((sum, entry) => sum + Number(entry.combinedScore || 0), 0) / forPolicy.length);
-    const mutate = combinedScore >= minCombinedScore;
+    const summary = summarizeImpactAttributionWindow(
+      forPolicy.map((entry) => ({
+        outcomeScore: entry?.outcomeScore,
+        noSignalOutcome: entry?.noSignalOutcome,
+        outcomeStatus: entry?.outcomeStatus,
+      })),
+      {
+        minEvidenceWindow: evidenceWindowCycles,
+        improvedThreshold: minCombinedScore,
+        retireThreshold: retireCombinedScore,
+        reactivationEvidenceWindow: Math.min(2, evidenceWindowCycles),
+      },
+    );
+    const mutate = summary.outcomeStatus === IMPACT_ATTRIBUTION_OUTCOME.IMPROVED && combinedScore >= minCombinedScore;
     decisions.push({
       policyId,
       evidenceCount: forPolicy.length,
@@ -1243,7 +1384,19 @@ export function decidePolicyMutationsFromEvidenceWindow(
       outcomeScore,
       combinedScore,
       mutate,
-      reason: mutate ? "window_passed" : "combined_score_below_threshold",
+      outcomeStatus: summary.outcomeStatus,
+      shouldRetire: summary.shouldRetire,
+      improvedCount: summary.improvedCount,
+      noSignalCount: summary.noSignalCount,
+      ineffectiveCount: summary.ineffectiveCount,
+      averageOutcomeScore: summary.averageOutcomeScore,
+      reversible: summary.reversible,
+      reactivateWhen: summary.reactivateWhen,
+      reason: summary.shouldRetire
+        ? summary.retirementReason
+        : mutate
+          ? "window_passed"
+          : "no_signal_window",
     });
     if (mutate) mutablePolicies.push(policy);
   }

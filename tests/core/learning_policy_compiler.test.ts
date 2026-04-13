@@ -14,6 +14,7 @@ import {
   buildInterventionRubricScore,
   decidePolicyMutationsFromEvidenceWindow,
   POLICY_MUTATION_EVIDENCE_WINDOW,
+  POLICY_MUTATION_RETIRE_COMBINED_SCORE,
   retireLowYieldPolicyFamilies,
   LOW_YIELD_IMPACT_THRESHOLD,
   LOW_YIELD_MIN_EVIDENCE_RECORDS,
@@ -966,5 +967,75 @@ describe("decidePolicyMutationsFromEvidenceWindow — uplift binding", () => {
     assert.ok(typeof score.rubricScore === "number", "rubricScore must be a number");
     assert.ok(typeof score.combinedScore === "number", "combinedScore must be a number");
     assert.ok(typeof score.scoredAt === "string", "scoredAt must be an ISO string");
+  });
+
+  it("records explicit no-signal intervention evidence for later retirement windows", () => {
+    const score = buildInterventionRubricScore("inv-no-signal", "cycle-y", "policy-y", {
+      architecture: 0.7,
+      speed: 0.7,
+    }, 0.35, {
+      closureMode: "no_signal",
+      decisionMode: "retry_review",
+      lineageId: "lineage-1",
+      interventionType: "retry_intervention",
+    });
+    assert.equal(score.outcomeStatus, "no_signal");
+    assert.equal(score.noSignalOutcome, true);
+    assert.equal(score.decisionMode, "retry_review");
+    assert.equal(score.lineageId, "lineage-1");
+    assert.equal(score.interventionType, "retry_intervention");
+  });
+});
+
+describe("impact-attributed policy loop", () => {
+  it("records improved policy evidence with reversible metadata", () => {
+    const attribution = buildPolicyImpactAttribution(
+      { id: "glob-false-fail", _inactiveCycles: 0 },
+      { policyId: "glob-false-fail", totalMeasurements: 3, improvedCount: 2, ineffectiveCount: 1, improvementRate: 0.667, lastDelta: 0.08, lastMeasuredAt: "2026-04-01T00:00:00.000Z" } as any,
+      0.4,
+      0.62,
+      { cycleId: "cycle-impact-1", minImprovementDelta: 0.05 },
+    );
+    assert.equal(attribution.outcomeStatus, "improved");
+    assert.equal(attribution.shouldRetire, false);
+    assert.equal(attribution.reversible, true);
+    assert.ok(attribution.reactivateWhen.includes("delta >="));
+  });
+
+  it("marks a policy as should_retire after a full low-signal evidence window", () => {
+    const policies = [{ id: "lint-failure", severity: "warning" }];
+    const evidence = [
+      buildInterventionRubricScore("inv-1", "cycle-1", "lint-failure", { architecture: 0.3 }, 0.1, { outcomeStatus: "should_retire" }),
+      buildInterventionRubricScore("inv-2", "cycle-2", "lint-failure", { architecture: 0.2 }, 0.15, { outcomeStatus: "should_retire" }),
+      buildInterventionRubricScore("inv-3", "cycle-3", "lint-failure", { architecture: 0.2 }, 0.2, { outcomeStatus: "should_retire" }),
+    ];
+    const result = decidePolicyMutationsFromEvidenceWindow(policies, evidence, {
+      evidenceWindowCycles: 3,
+      retireCombinedScore: POLICY_MUTATION_RETIRE_COMBINED_SCORE,
+    });
+    assert.equal(result.decisions.length, 1);
+    assert.equal(result.decisions[0].outcomeStatus, "should_retire");
+    assert.equal(result.decisions[0].shouldRetire, true);
+    assert.equal(result.decisions[0].mutate, false);
+    assert.equal(result.decisions[0].reversible, true);
+    assert.ok(result.decisions[0].reactivateWhen.includes("improved evidence point"));
+  });
+
+  it("attaches reversible retirement ledger metadata to low-yield retired policies", () => {
+    const policies = [{ id: "policy-z", severity: "warning" }];
+    const attributions = [
+      { policyId: "policy-z", decayedEffectiveness: 0.05 },
+      { policyId: "policy-z", decayedEffectiveness: 0.04 },
+      { policyId: "policy-z", decayedEffectiveness: 0.03 },
+    ];
+    const result = retireLowYieldPolicyFamilies(policies, attributions as any, {
+      minEvidenceRecords: 3,
+      lowYieldThreshold: 0.1,
+    });
+    assert.equal(result.retired.length, 1);
+    assert.equal(result.retired[0]._impactOutcomeStatus, "should_retire");
+    assert.equal(result.retired[0]._retirementReversible, true);
+    assert.ok(result.retired[0]._retirementLedger);
+    assert.ok(result.retired[0]._reactivateWhen.includes("improved evidence point"));
   });
 });
