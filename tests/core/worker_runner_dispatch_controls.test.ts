@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import { auditReplayPolicySignals } from "../../src/core/parser_replay_harness.js";
 
 // We test the exported/internal logic by exercising the module via exported symbols
 // and by monkey-patching state-file reads using a temp stateDir.
@@ -435,6 +436,84 @@ describe("worker_runner — realized ROI dispatch controls", () => {
   });
 });
 
+describe("worker_runner — replay signal contracts", () => {
+  it("phase-aware retry artifacts remain replay-auditable", () => {
+    const audit = auditReplayPolicySignals({
+      expectedDomains: ["phase_retry"],
+      attemptCheckpoints: [
+        {
+          retryStateKind: "phase_aware_retry_v1",
+          phaseOrder: ["plan", "edit", "test", "push"],
+          currentPhase: "test",
+          failedPhase: "test",
+          resumeFromPhase: "test",
+          lastCompletedPhase: "edit",
+          phaseStates: {
+            plan: { status: "done", evidence: [] },
+            edit: { status: "done", evidence: [] },
+            test: { status: "failed", evidence: [{ code: "tests_failed", detail: "unit test failed", source: "worker_output" }] },
+            push: { status: "pending", evidence: [] },
+          },
+          evidence: [{ code: "tests_failed", detail: "unit test failed", source: "worker_output" }],
+          mutation: {
+            strategy: "resume_from_failed_phase",
+            instructions: ["Re-run tests before more edits."],
+          },
+        },
+      ],
+    });
+
+    assert.equal(audit.passed, true);
+    assert.equal(audit.regressionCount, 0);
+  });
+
+  it("hard-task escalation telemetry remains replay-auditable", () => {
+    const audit = auditReplayPolicySignals({
+      expectedDomains: ["hard_task_routing"],
+      routingTelemetry: [
+        {
+          taskId: "T-hard-1",
+          lineageId: "chain-1",
+          taskKind: "integration",
+          outcome: "done",
+          expectedQuality: 0.92,
+          estimatedTokens: 1400,
+          routingReasonCode: "hard-task-escalation",
+          hardChainSuccessRate: 1,
+          hardChainSampleCount: 1,
+          laneReliability: 0.91,
+        },
+      ],
+    });
+
+    assert.equal(audit.passed, true);
+    assert.equal(audit.regressionCount, 0);
+  });
+
+  it("negative path: malformed hard-task telemetry is rejected by the replay audit", () => {
+    const audit = auditReplayPolicySignals({
+      expectedDomains: ["hard_task_routing"],
+      routingTelemetry: [
+        {
+          taskId: "T-hard-1",
+          lineageId: "",
+          taskKind: "integration",
+          outcome: "done",
+          expectedQuality: 0.92,
+          estimatedTokens: 1400,
+          routingReasonCode: "hard-task-escalation",
+          hardChainSuccessRate: 1.5,
+          hardChainSampleCount: 1,
+          laneReliability: 2,
+        },
+      ],
+    });
+
+    assert.equal(audit.passed, false);
+    assert.equal(audit.regressionCount, 1);
+  });
+});
+
 describe("worker_runner — non-retryable policy block classification", () => {
   it("classifies cloud-agent governance policy violation as non-retryable", async () => {
     const { isNonRetryablePolicyBlockReason } = await import("../../src/core/worker_runner.js");
@@ -555,6 +634,148 @@ describe("generateRuntimeHookDecisions", () => {
     const decisions = generateRuntimeHookDecisions(policy, "worker", envelopes);
     assert.equal(decisions[0].decision.decision, "deny");
     assert.equal(decisions[0].decision.reasonCode, "TOOL_INTENT_BLOCKED_COMMAND");
+  });
+});
+
+describe("worker_runner conflict replay helpers", () => {
+  it("builds deterministic worktree names from conflict hashes", async () => {
+    const { buildConflictReplayWorktreeName } = await import("../../src/core/worker_runner.js");
+    assert.equal(
+      buildConflictReplayWorktreeName("ABC_123/conflict"),
+      buildConflictReplayWorktreeName("ABC_123/conflict"),
+    );
+    assert.ok(buildConflictReplayWorktreeName("ABC_123/conflict").startsWith("replay-"));
+  });
+
+  it("detects leaked worktree metadata during cleanup validation", async () => {
+    const { validateWorktreeCleanup } = await import("../../src/core/worker_runner.js");
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "box-replay-cleanup-"));
+    try {
+      const worktreePath = path.join(repoDir, "state", "conflict_replays", "replay-test");
+      fs.mkdirSync(worktreePath, { recursive: true });
+      fs.mkdirSync(path.join(repoDir, ".git", "worktrees", "replay-test"), { recursive: true });
+      const result = await validateWorktreeCleanup(repoDir, worktreePath);
+      assert.equal(result.cleaned, false);
+      assert.ok(result.leakedState.length >= 1);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("worker_runner verification telemetry outcome hardening", () => {
+  it("maps rework-queued done results to verification_failed telemetry", async () => {
+    const { resolvePostVerificationTelemetryOutcome } = await import("../../src/core/worker_runner.js");
+    assert.equal(
+      resolvePostVerificationTelemetryOutcome("done", { shouldRework: true, shouldEscalate: false }),
+      "verification_failed",
+    );
+  });
+
+  it("negative path: preserves clean done outcomes when no rework is queued", async () => {
+    const { resolvePostVerificationTelemetryOutcome } = await import("../../src/core/worker_runner.js");
+    assert.equal(resolvePostVerificationTelemetryOutcome("done"), "done");
+  });
+});
+
+describe("worker_runner verification closure pipeline", () => {
+  it("keeps non-portable or non-specific verification evidence out of worker closure and Athena fast-paths", async () => {
+    const { parseWorkerResponse, resolvePostVerificationTelemetryOutcome } = await import("../../src/core/worker_runner.js");
+    const {
+      validateWorkerContract,
+      decideRework,
+      buildReplayClosureEvidence,
+      hasVerificationReportEvidence,
+    } = await import("../../src/core/verification_gate.js");
+    const {
+      runAthenaPostmortem,
+      POSTMORTEM_REVIEW_STATUS,
+    } = await import("../../src/core/athena_reviewer.js");
+
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "box-verification-closure-"));
+    try {
+      fs.writeFileSync(path.join(stateDir, "policy.json"), JSON.stringify({ blockedCommands: [] }), "utf8");
+
+      const stdout = [
+        "BOX_STATUS=done",
+        "BOX_MERGED_SHA=abc1234f",
+        "CLEAN_TREE_STATUS=clean",
+        "===NPM TEST OUTPUT START===",
+        "node --test tests/**/*.test.ts",
+        "glob patterns are not expanded on Windows",
+        "npm test",
+        "# Subtest: verification_gate.test.ts",
+        "ok 1 - rejects generic verification",
+        "# pass 1",
+        "===NPM TEST OUTPUT END===",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=pass; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/123",
+        "BOX_EXPECTED_OUTCOME=reject generic verification evidence",
+        "BOX_ACTUAL_OUTCOME=worker claimed done with generic verification target",
+        "BOX_DEVIATION=minor",
+      ].join("\n");
+
+      const parsed = parseWorkerResponse(stdout, "");
+      assert.equal(parsed.status, "done");
+
+      const validation = validateWorkerContract("backend", parsed, {
+        taskKind: "backend",
+        verificationText: "npm test",
+      });
+      assert.equal(validation.passed, false);
+      assert.ok(validation.gaps.some((gap) => gap.includes("Verification target is non-specific")));
+
+      const reworkDecision = decideRework(validation, "Harden verification closure", 0, 2);
+      assert.equal(reworkDecision.shouldRework, true);
+      assert.equal(
+        resolvePostVerificationTelemetryOutcome(parsed.status, reworkDecision),
+        "verification_failed",
+      );
+
+      const replayClosure = buildReplayClosureEvidence(parsed.fullOutput);
+      const athenaResult: any = await runAthenaPostmortem({
+        paths: {
+          stateDir,
+          progressFile: path.join(stateDir, "progress.log"),
+          policyFile: path.join(stateDir, "policy.json"),
+        },
+        env: {
+          targetRepo: "Ancora-Labs/Box",
+          copilotCliCommand: "__missing_copilot_binary__",
+        },
+        roleRegistry: {
+          qualityReviewer: { name: "Athena", model: "test-model" },
+        },
+        athena: { forceAiPostmortem: true },
+      } as any, {
+        roleName: "quality-worker",
+        status: "blocked",
+        summary: `Verification rejected: ${validation.gaps.join("; ")}`,
+        verificationPassed: false,
+        verificationEvidence: { build: "pass", tests: "fail", lint: "n/a" },
+        dispatchContract: {
+          doneWorkerWithVerificationReportEvidence: hasVerificationReportEvidence(parsed.fullOutput),
+          doneWorkerWithCleanTreeStatusEvidence: true,
+          dispatchBlockReason: "verification_failed:nonspecific-target",
+          closureBoundaryViolation: false,
+          replayClosure: {
+            contractSatisfied: replayClosure.contractSatisfied,
+            canonicalCommands: replayClosure.canonicalCommands,
+            executedCommands: replayClosure.executedCommands,
+            rawArtifactEvidenceLinks: replayClosure.rawArtifactEvidenceLinks,
+          },
+        },
+      } as any, {
+        task: "Reject generic verification evidence",
+        riskLevel: "low",
+        verification: "npm test",
+      } as any);
+
+      assert.equal(athenaResult.reviewStatus, POSTMORTEM_REVIEW_STATUS.DEGRADED_REVIEW_REQUIRED);
+      assert.equal(athenaResult.closureEvidenceEnvelope, null);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 });
 
