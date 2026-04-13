@@ -807,11 +807,15 @@ export async function appendInterventionApplicationEntries(config, entries) {
       recordedAt: String(entry?.recordedAt || now),
       interventionId: String(entry?.interventionId || "").trim(),
       lineageId: entry?.lineageId ? String(entry.lineageId).trim() : null,
+      lineageJoinKey: entry?.lineageJoinKey ? String(entry.lineageJoinKey).trim() : null,
       policyId: entry?.policyId ? String(entry.policyId).trim() : null,
       cycleId: entry?.cycleId ? String(entry.cycleId).trim() : null,
       role: String(entry?.role || "evolution-worker").trim() || "evolution-worker",
+      interventionCategory: entry?.interventionCategory ? String(entry.interventionCategory).trim() : null,
+      interventionType: entry?.interventionType ? String(entry.interventionType).trim() : null,
       selectedAt: String(entry?.selectedAt || now),
       status: String(entry?.status || "selected").trim() || "selected",
+      outcomeStatus: entry?.outcomeStatus ? String(entry.outcomeStatus).trim().toLowerCase() : null,
       noSignalOutcome: Boolean(entry?.noSignalOutcome),
       decisionReason: entry?.decisionReason ? String(entry.decisionReason).trim() : null,
     }));
@@ -839,16 +843,38 @@ export async function appendInterventionRetirementEvidence(config, entries) {
       cycleId: entry?.cycleId ? String(entry.cycleId).trim() : null,
       interventionId: String(entry?.interventionId || "").trim(),
       lineageId: entry?.lineageId ? String(entry.lineageId).trim() : null,
+      lineageJoinKey: entry?.lineageJoinKey ? String(entry.lineageJoinKey).trim() : null,
       policyId: entry?.policyId ? String(entry.policyId).trim() : null,
       role: entry?.role ? String(entry.role).trim() : null,
+      interventionCategory: entry?.interventionCategory ? String(entry.interventionCategory).trim() : null,
+      interventionType: entry?.interventionType ? String(entry.interventionType).trim() : null,
       decision: String(entry?.decision || "hold").trim().toLowerCase() || "hold",
       decisionMode: entry?.decisionMode ? String(entry.decisionMode).trim() : null,
       closureMode: String(entry?.closureMode || "observed").trim().toLowerCase() || "observed",
+      outcomeStatus: entry?.outcomeStatus ? String(entry.outcomeStatus).trim().toLowerCase() : null,
       noSignalOutcome: Boolean(entry?.noSignalOutcome),
       reason: entry?.reason ? String(entry.reason).trim() : null,
       outcomeScore: Number.isFinite(Number(entry?.outcomeScore))
         ? Math.max(0, Math.min(1, Number(entry.outcomeScore)))
         : null,
+      evidenceCount: Number.isFinite(Number(entry?.evidenceCount))
+        ? Math.max(0, Math.floor(Number(entry.evidenceCount)))
+        : null,
+      improvedCount: Number.isFinite(Number(entry?.improvedCount))
+        ? Math.max(0, Math.floor(Number(entry.improvedCount)))
+        : null,
+      noSignalCount: Number.isFinite(Number(entry?.noSignalCount))
+        ? Math.max(0, Math.floor(Number(entry.noSignalCount)))
+        : null,
+      ineffectiveCount: Number.isFinite(Number(entry?.ineffectiveCount))
+        ? Math.max(0, Math.floor(Number(entry.ineffectiveCount)))
+        : null,
+      averageOutcomeScore: Number.isFinite(Number(entry?.averageOutcomeScore))
+        ? Math.max(0, Math.min(1, Number(entry.averageOutcomeScore)))
+        : null,
+      shouldRetire: Boolean(entry?.shouldRetire),
+      reversible: entry?.reversible === false ? false : true,
+      reactivateWhen: entry?.reactivateWhen ? String(entry.reactivateWhen).trim() : null,
       aiConfidence: Number.isFinite(Number(entry?.aiConfidence))
         ? Math.max(0, Math.min(1, Number(entry.aiConfidence)))
         : null,
@@ -1331,14 +1357,31 @@ export async function aggregateTierCounts(config, cycleId: string | null = null)
  */
 export async function appendPolicyClosureEvidence(
   config,
-  record: { policyId: string; resolvedAt: string; resolvedBy: string; evidence: string; cycleId?: string },
+  record: {
+    policyId: string;
+    resolvedAt: string;
+    resolvedBy: string;
+    evidence: string;
+    cycleId?: string;
+    outcomeStatus?: string;
+    evidenceCount?: number;
+    reversible?: boolean;
+    reactivateWhen?: string;
+  },
 ): Promise<{ ok: boolean; reason?: string }> {
   try {
     if (!record || !record.policyId) {
       return { ok: false, reason: "record.policyId is required" };
     }
     const filePath = path.join(config?.paths?.stateDir || "state", "policy_closure_evidence.jsonl");
-    const entry = JSON.stringify({ ...record, appendedAt: new Date().toISOString() });
+    const entry = JSON.stringify({
+      ...record,
+      outcomeStatus: record?.outcomeStatus ? String(record.outcomeStatus).trim().toLowerCase() : null,
+      evidenceCount: Number.isFinite(Number(record?.evidenceCount)) ? Math.max(0, Math.floor(Number(record.evidenceCount))) : null,
+      reversible: record?.reversible === false ? false : true,
+      reactivateWhen: record?.reactivateWhen ? String(record.reactivateWhen).trim() : null,
+      appendedAt: new Date().toISOString(),
+    });
     await ensureParent(filePath);
     await fs.appendFile(filePath, entry + "\n", "utf8");
     return { ok: true };
