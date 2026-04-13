@@ -1243,10 +1243,18 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
  * @param {string[]} gaps — array of gap descriptions
  * @param {number} attempt — current rework attempt number (1-based)
  * @param {number} maxAttempts — maximum rework attempts allowed
+ * @param {{ canonicalTask?: string | null }} [options] — canonical original task metadata
  * @returns {object} — instruction object for Athena to re-dispatch
  */
-export function buildReworkInstruction(originalTask, gaps, attempt, maxAttempts) {
+export function buildReworkInstruction(
+  originalTask,
+  gaps,
+  attempt,
+  maxAttempts,
+  options: { canonicalTask?: string | null } = {},
+) {
   const gapList = gaps.map((g, i) => `  ${i + 1}. ${g}`).join("\n");
+  const canonicalOriginalTask = String(options?.canonicalTask || originalTask || "").trim();
 
   const task = `## AUTO-REWORK — VERIFICATION GAPS DETECTED (attempt ${attempt}/${maxAttempts})
 
@@ -1274,7 +1282,7 @@ ${CANONICAL_VERIFICATION_REPORT_TEMPLATE}
 5. Do NOT repeat the same approach if it already failed — try a different strategy.
 
 ## ORIGINAL TASK (for reference)
-${originalTask}
+${canonicalOriginalTask}
 
 ${attempt >= maxAttempts ? "⚠️ THIS IS YOUR FINAL ATTEMPT. If you cannot resolve all gaps, report BOX_STATUS=blocked with a root-cause analysis of why each gap cannot be resolved." : ""}`;
 
@@ -1285,7 +1293,8 @@ ${attempt >= maxAttempts ? "⚠️ THIS IS YOUR FINAL ATTEMPT. If you cannot res
     isRework: true,
     reworkAttempt: attempt,
     maxReworkAttempts: maxAttempts,
-    taskKind: "rework"
+    taskKind: "rework",
+    originalTask: canonicalOriginalTask,
   };
 }
 
@@ -1295,9 +1304,10 @@ ${attempt >= maxAttempts ? "⚠️ THIS IS YOUR FINAL ATTEMPT. If you cannot res
  * @param {object} validationResult — output from validateWorkerContract()
  * @param {number} currentAttempt — how many times this worker has been re-dispatched for this task
  * @param {number} maxAttempts — configurable max rework attempts (default from config)
+ * @param {{ canonicalTask?: string | null }} [options] — canonical original task metadata
  * @returns {{ shouldRework: boolean, instruction: object|null, shouldEscalate: boolean }}
  */
-export function decideRework(validationResult, originalTask, currentAttempt, maxAttempts = 2) {
+export function decideRework(validationResult, originalTask, currentAttempt, maxAttempts = 2, options = {}) {
   if (validationResult.passed) {
     return { shouldRework: false, instruction: null, shouldEscalate: false };
   }
@@ -1318,7 +1328,8 @@ export function decideRework(validationResult, originalTask, currentAttempt, max
     originalTask,
     validationResult.gaps,
     nextAttempt,
-    maxAttempts
+    maxAttempts,
+    options,
   );
 
   return {
