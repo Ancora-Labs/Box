@@ -6845,7 +6845,7 @@ describe("validatePlanContract — verification prose handling", () => {
       task: "Restore deterministic Windows verification",
       role: "quality-worker",
       wave: 1,
-      verification: "tests/core/verification_gate.test.ts — test: Replace ambiguous `node --test tests/**/*.test.js`-style verification with exact-target commands.",
+      verification: "tests/core/verification_gate.test.ts — test: Replace ambiguous node-test glob style verification with exact-target commands.",
       verification_commands: ["npm test -- tests/core/verification_gate.test.ts"],
       acceptance_criteria: ["Named verification target remains exact and platform-safe"],
       dependencies: [],
