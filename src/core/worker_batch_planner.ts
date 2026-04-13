@@ -1063,6 +1063,8 @@ export function computeCriticalPathScores(
 
 export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResult = null) {
   const packetSizePolicy = resolvePacketSizePolicy(config);
+  const rawMaxPlansPerPacket = Number((config as any)?.planner?.maxPlansPerPacket);
+  const hasExplicitMaxPlansPerPacket = Number.isFinite(rawMaxPlansPerPacket) && rawMaxPlansPerPacket > 0;
   const cycleAnalyticsTelemetry = loadCycleAnalyticsTelemetry(config);
   const taskKindPacketTelemetry = extractTaskKindPacketTelemetry(cycleAnalyticsTelemetry);
   // ── Micro-wave splitting ──────────────────────────────────────────────────
@@ -1371,9 +1373,12 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
         for (const batch of activeBatches) {
           const batchPlans = batch.plans as any[];
           const hasDeps = batchPlans.some((p) => hasExplicitDependencies(p));
+          const packetPlanLimit = hasExplicitMaxPlansPerPacket
+            ? adaptivePacketLimit.maxPlansPerPacket
+            : Number.MAX_SAFE_INTEGER;
           const chunkSize = hasDeps
-            ? Math.max(1, Math.min(maxDepBatch, adaptivePacketLimit.maxPlansPerPacket))
-            : adaptivePacketLimit.maxPlansPerPacket;
+            ? Math.max(1, Math.min(maxDepBatch, packetPlanLimit))
+            : packetPlanLimit;
           if (batchPlans.length > chunkSize) {
             // Chunk into groups of maxDepBatch; distribute estimated tokens proportionally
             for (let offset = 0; offset < batchPlans.length; offset += chunkSize) {
@@ -1409,7 +1414,8 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
             const mergedHasDeps = mergedPlans.some((p) => hasExplicitDependencies(p));
             const withinDepLimit = !mergedHasDeps || mergedPlans.length <= maxDepBatch;
             const withinContextLimit = mergedTokens <= selection.usableContextTokens;
-            const withinPacketPlanLimit = mergedPlans.length <= adaptivePacketLimit.maxPlansPerPacket;
+            const withinPacketPlanLimit = !hasExplicitMaxPlansPerPacket
+              || mergedPlans.length <= adaptivePacketLimit.maxPlansPerPacket;
 
             if (withinDepLimit && withinContextLimit && withinPacketPlanLimit) {
               const remaining = selection.usableContextTokens - mergedTokens;
