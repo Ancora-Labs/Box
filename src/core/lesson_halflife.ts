@@ -345,3 +345,171 @@ export function computeDecayedPolicyEffectiveness(
   ) / 1000;
   return { halfLifeWeight, decayedEffectiveness };
 }
+
+export const IMPACT_ATTRIBUTION_OUTCOME = Object.freeze({
+  IMPROVED: "improved",
+  NO_SIGNAL: "no_signal",
+  SHOULD_RETIRE: "should_retire",
+});
+
+export interface ImpactAttributionWindowSignal {
+  outcomeScore?: number | null;
+  noSignalOutcome?: boolean | null;
+  outcomeStatus?: string | null;
+}
+
+export interface ImpactAttributionWindowSummary {
+  outcomeStatus: string;
+  evidenceCount: number;
+  improvedCount: number;
+  noSignalCount: number;
+  ineffectiveCount: number;
+  averageOutcomeScore: number;
+  evidenceWindowSatisfied: boolean;
+  shouldRetire: boolean;
+  reversible: boolean;
+  retirementReason: string;
+  reactivateWhen: string;
+  reactivationThreshold: number;
+  reactivationEvidenceWindow: number;
+  reactivationSatisfied: boolean;
+}
+
+export function normalizeImpactAttributionOutcome(value: unknown): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+  if (
+    normalized === IMPACT_ATTRIBUTION_OUTCOME.IMPROVED
+    || normalized === "improve"
+    || normalized === "success"
+    || normalized === "successful"
+  ) {
+    return IMPACT_ATTRIBUTION_OUTCOME.IMPROVED;
+  }
+  if (
+    normalized === IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL
+    || normalized === "no-signal"
+    || normalized === "unknown"
+    || normalized === "hold"
+    || normalized === "observed"
+    || normalized === "noop"
+    || normalized === "no-op"
+  ) {
+    return IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+  }
+  if (
+    normalized === IMPACT_ATTRIBUTION_OUTCOME.SHOULD_RETIRE
+    || normalized === "should-retire"
+    || normalized === "retire"
+    || normalized === "retired"
+    || normalized === "low_yield"
+    || normalized === "low-yield"
+  ) {
+    return IMPACT_ATTRIBUTION_OUTCOME.SHOULD_RETIRE;
+  }
+  return "";
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+export function summarizeImpactAttributionWindow(
+  records: ImpactAttributionWindowSignal[],
+  opts: {
+    minEvidenceWindow?: number;
+    improvedThreshold?: number;
+    retireThreshold?: number;
+    reactivationEvidenceWindow?: number;
+  } = {},
+): ImpactAttributionWindowSummary {
+  const minEvidenceWindow = Math.max(1, Math.floor(Number(opts.minEvidenceWindow) || 3));
+  const improvedThreshold = clamp01(
+    Number.isFinite(Number(opts.improvedThreshold)) ? Number(opts.improvedThreshold) : 0.55,
+  );
+  const retireThreshold = clamp01(
+    Number.isFinite(Number(opts.retireThreshold))
+      ? Number(opts.retireThreshold)
+      : Math.max(0, improvedThreshold - 0.25),
+  );
+  const reactivationEvidenceWindow = Math.max(
+    1,
+    Math.floor(Number(opts.reactivationEvidenceWindow) || Math.min(2, minEvidenceWindow)),
+  );
+  const signals = Array.isArray(records)
+    ? records.filter((record) => record && typeof record === "object")
+    : [];
+  const evidence = signals.slice(-Math.max(minEvidenceWindow, reactivationEvidenceWindow));
+
+  let improvedCount = 0;
+  let noSignalCount = 0;
+  let ineffectiveCount = 0;
+  let scoredCount = 0;
+  let scoreTotal = 0;
+
+  const classifiedSignals = evidence.map((record) => {
+    const explicitStatus = normalizeImpactAttributionOutcome(record?.outcomeStatus);
+    const boundedScore = Number.isFinite(Number(record?.outcomeScore))
+      ? clamp01(Number(record?.outcomeScore))
+      : null;
+    const noSignalOutcome = record?.noSignalOutcome === true || explicitStatus === IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+    let outcomeStatus = explicitStatus;
+    if (!outcomeStatus) {
+      if (noSignalOutcome) outcomeStatus = IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+      else if (boundedScore !== null && boundedScore >= improvedThreshold) outcomeStatus = IMPACT_ATTRIBUTION_OUTCOME.IMPROVED;
+      else if (boundedScore !== null && boundedScore <= retireThreshold) outcomeStatus = IMPACT_ATTRIBUTION_OUTCOME.SHOULD_RETIRE;
+      else outcomeStatus = IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+    }
+    if (outcomeStatus === IMPACT_ATTRIBUTION_OUTCOME.IMPROVED) improvedCount += 1;
+    else if (outcomeStatus === IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL) noSignalCount += 1;
+    else ineffectiveCount += 1;
+    if (boundedScore !== null) {
+      scoredCount += 1;
+      scoreTotal += boundedScore;
+    }
+    return {
+      outcomeStatus,
+      outcomeScore: boundedScore,
+    };
+  });
+
+  const evidenceCount = classifiedSignals.length;
+  const averageOutcomeScore = scoredCount > 0 ? round3(scoreTotal / scoredCount) : 0;
+  const evidenceWindowSatisfied = evidenceCount >= minEvidenceWindow;
+  const shouldRetire = (
+    evidenceWindowSatisfied
+    && improvedCount === 0
+    && ineffectiveCount > 0
+    && averageOutcomeScore <= retireThreshold
+  );
+  const recentSignals = classifiedSignals.slice(-reactivationEvidenceWindow);
+  const reactivationSatisfied = recentSignals.length >= reactivationEvidenceWindow
+    && recentSignals.every((record) => record.outcomeStatus === IMPACT_ATTRIBUTION_OUTCOME.IMPROVED);
+  const outcomeStatus = shouldRetire
+    ? IMPACT_ATTRIBUTION_OUTCOME.SHOULD_RETIRE
+    : improvedCount > 0
+      ? IMPACT_ATTRIBUTION_OUTCOME.IMPROVED
+      : IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+  const retirementReason = shouldRetire
+    ? `evidence_window_low_yield:${ineffectiveCount}/${evidenceCount}:avg=${averageOutcomeScore}`
+    : outcomeStatus === IMPACT_ATTRIBUTION_OUTCOME.IMPROVED
+      ? `observed_improvement:${improvedCount}/${evidenceCount}:avg=${averageOutcomeScore}`
+      : `no_signal_window:${noSignalCount}/${evidenceCount}:avg=${averageOutcomeScore}`;
+
+  return {
+    outcomeStatus,
+    evidenceCount,
+    improvedCount,
+    noSignalCount,
+    ineffectiveCount,
+    averageOutcomeScore,
+    evidenceWindowSatisfied,
+    shouldRetire,
+    reversible: true,
+    retirementReason,
+    reactivateWhen: `record ${reactivationEvidenceWindow} improved evidence point(s) with average >= ${round3(improvedThreshold)}`,
+    reactivationThreshold: round3(improvedThreshold),
+    reactivationEvidenceWindow,
+    reactivationSatisfied,
+  };
+}

@@ -45,10 +45,12 @@ import {
   buildInterventionsFromPlan,
   buildPolicyImpactByInterventionId,
   scoreInterventionsAgainstRubric,
+  buildInterventionImpactAttributionRecords,
   buildBudgetFromConfig,
   persistOptimizerLog,
   checkOverbundleHardAdmission,
   OVERBUNDLE_STEPS_THRESHOLD,
+  INTERVENTION_ACCOUNTING_CATEGORY,
 } from "../../src/core/intervention_optimizer.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -541,7 +543,7 @@ describe("runInterventionOptimizer — happy path", () => {
       "schemaVersion", "generatedAt", "status", "reasonCode",
       "budgetUnit", "totalBudgetLimit", "totalBudgetUsed",
       "byWaveBudgetLimit", "byWaveUsed", "byRoleBudgetLimits",
-      "byRoleUsed", "selected", "rejected",
+      "byRoleUsed", "selected", "rejected", "duplicateFamilySuppressionsApplied",
     ];
     for (const field of requiredFields) {
       assert.ok(field in result, `Result must include field '${field}'`);
@@ -622,6 +624,53 @@ describe("runInterventionOptimizer — happy path", () => {
     assert.equal(result.benchmarkTelemetryCount, 0);
     assert.equal(result.benchmarkBoostsApplied, 0);
   });
+
+  it("suppresses duplicate continuation families and prefers partially implemented continuation work", () => {
+    const result = runInterventionOptimizer([
+      makeIntervention({
+        id: "partial-keep",
+        role: "infrastructure-worker",
+        impact: 0.5,
+        implementationStatus: "implemented_partially",
+        continuationFamilyKey: "infra:prompt-cache",
+      }),
+      makeIntervention({
+        id: "fresh-drop",
+        role: "infrastructure-worker",
+        impact: 0.9,
+        implementationStatus: "not_implemented",
+        continuationFamilyKey: "infra:prompt-cache",
+      }),
+    ], makeBudget());
+
+    assert.equal(result.duplicateFamilySuppressionsApplied, 1);
+    assert.equal(result.selected.length, 1);
+    assert.equal(result.selected[0].id, "partial-keep");
+    assert.equal(result.rejected.length, 1);
+    assert.equal(result.rejected[0].id, "fresh-drop");
+    assert.equal(result.rejected[0].reasonCode, INTERVENTION_REJECTION_CODE.DUPLICATE_FAMILY_CONTINUATION);
+  });
+
+  it("does not suppress interventions from different continuation families", () => {
+    const result = runInterventionOptimizer([
+      makeIntervention({
+        id: "infra-a",
+        role: "infrastructure-worker",
+        continuationFamilyKey: "infra:prompt-cache",
+        implementationStatus: "implemented_partially",
+      }),
+      makeIntervention({
+        id: "infra-b",
+        role: "infrastructure-worker",
+        continuationFamilyKey: "infra:conflict-replay",
+        implementationStatus: "implemented_partially",
+      }),
+    ], makeBudget());
+
+    assert.equal(result.duplicateFamilySuppressionsApplied, 0);
+    assert.equal(result.selected.length, 2);
+    assert.equal(result.rejected.length, 0);
+  });
 });
 
 describe("buildPolicyImpactByInterventionId", () => {
@@ -670,6 +719,29 @@ describe("scoreInterventionsAgainstRubric", () => {
     assert.ok(rows[0].combinedScore >= rows[1].combinedScore);
   });
 
+  it("preserves explicit no-signal outcome metadata from outcome envelopes", () => {
+    const rows = scoreInterventionsAgainstRubric(
+      [makeIntervention({ id: "inv-no-signal" })] as any,
+      { "inv-no-signal": { architecture: 0.7, security: 0.7 } },
+      {
+        outcomeByInterventionId: {
+          "inv-no-signal": {
+            outcomeScore: 0.35,
+            noSignalOutcome: true,
+            closureMode: "no_signal",
+            decisionMode: "retry_review",
+          },
+        },
+        policyByInterventionId: { "inv-no-signal": "policy-no-signal" },
+      },
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcomeStatus, "no_signal");
+    assert.equal(rows[0].noSignalOutcome, true);
+    assert.equal(rows[0].decisionMode, "retry_review");
+    assert.equal(rows[0].closureMode, "no_signal");
+  });
+
   it("negative: skips interventions without policy attribution", () => {
     const rows = scoreInterventionsAgainstRubric(
       [makeIntervention({ id: "inv-z" })] as any,
@@ -677,6 +749,86 @@ describe("scoreInterventionsAgainstRubric", () => {
       { outcomeByInterventionId: { "inv-z": 0.9 }, policyByInterventionId: {} },
     );
     assert.equal(rows.length, 0);
+  });
+});
+
+describe("buildInterventionImpactAttributionRecords", () => {
+  it("records improved planning interventions with lineage and reversible evidence", () => {
+    const interventions = [
+      makeIntervention({ id: "plan-1", type: INTERVENTION_TYPE.TASK, lineageId: "lineage-plan-1" }),
+    ];
+    const rows = buildInterventionImpactAttributionRecords(
+      interventions as any,
+      { "plan-1": { architecture: 0.8, speed: 0.8, security: 0.8 } },
+      {
+        cycleId: "cycle-plan-1",
+        outcomeByInterventionId: { "plan-1": { outcomeScore: 0.9 } },
+        policyByInterventionId: { "plan-1": "policy-plan-1" },
+      },
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].interventionCategory, INTERVENTION_ACCOUNTING_CATEGORY.PLANNING);
+    assert.equal(rows[0].lineageId, "lineage-plan-1");
+    assert.equal(rows[0].outcomeStatus, "improved");
+    assert.equal(rows[0].shouldRetire, false);
+    assert.equal(rows[0].reversible, true);
+  });
+
+  it("records retry interventions as should_retire after repeated low-yield evidence", () => {
+    const interventions = [
+      makeIntervention({ id: "retry-1", type: INTERVENTION_TYPE.FOLLOWUP, lineageId: "lineage-retry-1" }),
+    ];
+    const rows = buildInterventionImpactAttributionRecords(
+      interventions as any,
+      { "retry-1": { architecture: 0.2, speed: 0.2, security: 0.2 } },
+      {
+        cycleId: "cycle-retry-3",
+        outcomeByInterventionId: {
+          "retry-1": {
+            outcomeScore: 0.1,
+            outcomeStatus: "should_retire",
+            decisionMode: "retry_review",
+          },
+        },
+        policyByInterventionId: { "retry-1": "policy-retry-1" },
+        history: [
+          { interventionId: "retry-1", lineageId: "lineage-retry-1", outcomeScore: 0.1, outcomeStatus: "should_retire" },
+          { interventionId: "retry-1", lineageId: "lineage-retry-1", outcomeScore: 0.2, outcomeStatus: "should_retire" },
+        ],
+        evidenceWindowCycles: 3,
+      },
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].interventionCategory, INTERVENTION_ACCOUNTING_CATEGORY.RETRY);
+    assert.equal(rows[0].outcomeStatus, "should_retire");
+    assert.equal(rows[0].shouldRetire, true);
+    assert.equal(rows[0].evidenceCount, 3);
+    assert.ok(rows[0].retirementReason.includes("low_yield"));
+  });
+
+  it("keeps low-signal planning interventions reversible when the evidence window is not yet full", () => {
+    const interventions = [
+      makeIntervention({ id: "plan-hold", type: INTERVENTION_TYPE.TASK }),
+    ];
+    const rows = buildInterventionImpactAttributionRecords(
+      interventions as any,
+      { "plan-hold": { architecture: 0.5 } },
+      {
+        outcomeByInterventionId: {
+          "plan-hold": {
+            outcomeScore: 0.35,
+            noSignalOutcome: true,
+            closureMode: "no_signal",
+          },
+        },
+        policyByInterventionId: { "plan-hold": "policy-plan-hold" },
+        evidenceWindowCycles: 3,
+      },
+    );
+    assert.equal(rows[0].outcomeStatus, "no_signal");
+    assert.equal(rows[0].shouldRetire, false);
+    assert.equal(rows[0].evidenceCount, 1);
+    assert.equal(rows[0].reversible, true);
   });
 });
 
