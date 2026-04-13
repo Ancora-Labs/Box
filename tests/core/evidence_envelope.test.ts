@@ -15,10 +15,15 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildWorkerExecutionReportArtifact,
   validateEvidenceEnvelope,
   validatePlanEvidenceCoupling,
   envelopeFieldHasPlaceholderResidue,
 } from "../../src/core/evidence_envelope.js";
+import {
+  buildAthenaReviewFindingArtifact,
+  buildPrometheusPlanArtifact,
+} from "../../src/core/plan_lifecycle_contract.js";
 
 const VALID_EVIDENCE = { build: "pass", tests: "pass", lint: "n/a" };
 
@@ -29,6 +34,56 @@ function validEnvelope() {
     summary: "Task completed successfully.",
     verificationEvidence: { build: "pass", tests: "pass", lint: "n/a" },
   };
+}
+
+function validPlanArtifact() {
+  return buildPrometheusPlanArtifact({
+    task: "Introduce typed artifacts across the leadership chain",
+    task_id: "T-typed-artifacts",
+    role: "evolution-worker",
+    wave: 1,
+    scope: "Persist structured artifacts for Jesus, Prometheus, Athena, and worker handoff",
+    target_files: ["src/core/jesus_supervisor.ts", "src/core/evidence_envelope.ts"],
+    acceptance_criteria: ["Athena consumes typed plan and execution artifacts directly"],
+    verification_commands: ["npm test -- tests/core/evidence_envelope.test.ts"],
+    riskLevel: "medium",
+    _provenance: {
+      source: "prometheus-normalization",
+      reason: "aggregate-parser-confidence",
+      confidence: 0.91,
+      tag: "direct",
+      attachedAt: "2026-04-13T18:05:02.838Z",
+    },
+  }, {
+    emittedAt: "2026-04-13T18:05:02.838Z",
+  });
+}
+
+function validReviewArtifact() {
+  return buildAthenaReviewFindingArtifact({
+    approved: true,
+    overallScore: 9,
+    summary: "Plan is concrete and low risk.",
+    planReviews: [{
+      planIndex: 0,
+      role: "evolution-worker",
+      measurable: true,
+      successCriteriaClear: true,
+      verificationConcrete: true,
+      scopeDefined: true,
+      preMortemComplete: true,
+      issues: [],
+      suggestion: "No changes required.",
+    }],
+  }, [validPlanArtifact()], {
+    emittedAt: "2026-04-13T18:05:02.838Z",
+    gateRisk: {
+      gateBlockRisk: "low",
+      reason: "No active governance gate blockers",
+      activeGateSignals: [],
+      requiresCorrection: false,
+    },
+  });
 }
 
 describe("validateEvidenceEnvelope", () => {
@@ -48,9 +103,31 @@ describe("validateEvidenceEnvelope", () => {
       prChecks: { ok: true, passed: true, failed: [], pending: [], total: 3 },
       preReviewAssessment: "Looks good",
       preReviewIssues: [],
+      planArtifact: validPlanArtifact(),
+      reviewArtifact: validReviewArtifact(),
+      executionReport: buildWorkerExecutionReportArtifact(validEnvelope(), {
+        emittedAt: "2026-04-13T18:05:02.838Z",
+      }),
     };
     const result = validateEvidenceEnvelope(envelope);
     assert.equal(result.valid, true);
+  });
+
+  it("builds a typed worker execution report from the evidence envelope", () => {
+    const executionReport = buildWorkerExecutionReportArtifact({
+      ...validEnvelope(),
+      filesTouched: ["src/core/evidence_envelope.ts"],
+      verificationPassed: true,
+      preReviewAssessment: "Looks good",
+      preReviewIssues: ["None"],
+      dispatchContract: { dispatchBlockReason: null },
+    }, {
+      emittedAt: "2026-04-13T18:05:02.838Z",
+    });
+    assert.equal(executionReport.source, "worker_execution_report");
+    assert.equal(executionReport.roleName, "evolution-worker");
+    assert.equal(executionReport.verificationEvidence.build, "pass");
+    assert.deepEqual(executionReport.filesTouched, ["src/core/evidence_envelope.ts"]);
   });
 
   it("rejects null", () => {
@@ -158,6 +235,24 @@ describe("validateEvidenceEnvelope", () => {
         }
       }
     }
+  });
+
+  it("rejects malformed executionReport artifacts", () => {
+    const result = validateEvidenceEnvelope({
+      ...validEnvelope(),
+      executionReport: {
+        source: "wrong",
+        roleName: "",
+        status: "done",
+        summary: "",
+        filesTouched: "src/core/evidence_envelope.ts",
+        verificationEvidence: { build: "pass", tests: "pass", lint: "n/a" },
+      },
+    });
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("executionReport.source")));
+    assert.ok(result.errors.some(e => e.includes("executionReport.roleName")));
+    assert.ok(result.errors.some(e => e.includes("executionReport.filesTouched")));
   });
 });
 
@@ -377,6 +472,40 @@ describe("runAthenaPostmortem — Athena consumption boundary validation", () =>
         `valid envelope must not trigger validation error; got: ${err.message}`
       );
     }
+  });
+
+  it("consumes typed plan and execution artifacts on the deterministic fast-path", async () => {
+    const config = makeConfig(tmpDir);
+    const planArtifact = validPlanArtifact();
+    const reviewArtifact = validReviewArtifact();
+    const workerEnvelope = {
+      ...validEnvelopeForAthena(),
+      planArtifact,
+      reviewArtifact,
+      executionReport: buildWorkerExecutionReportArtifact({
+        ...validEnvelopeForAthena(),
+        filesTouched: ["src/core/evidence_envelope.ts"],
+        verificationPassed: true,
+      }, {
+        emittedAt: "2026-04-13T18:05:02.838Z",
+      }),
+      dispatchContract: {
+        doneWorkerWithVerificationReportEvidence: true,
+        doneWorkerWithCleanTreeStatusEvidence: true,
+        replayClosure: {
+          contractSatisfied: true,
+        },
+      },
+    };
+    const postmortem = await runAthenaPostmortem(config, workerEnvelope as any, {
+      planArtifact,
+      task: "this should not be used when planArtifact is present",
+      verification: "placeholder",
+      context: "placeholder",
+    });
+    assert.equal(postmortem.expectedOutcome, planArtifact.task);
+    assert.equal(postmortem.recommendation, "proceed");
+    assert.equal(postmortem.closureEvidenceEnvelope?.task, planArtifact.task);
   });
 });
 

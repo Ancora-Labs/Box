@@ -20,6 +20,7 @@ import {
   validateDirectivePayload,
   validateExpectedOutcomeMeasurable,
   sanitizeDirectiveFieldForPersistence,
+  buildDirectiveStrategyBrief,
   shouldWarnJesusDecisionLatency,
   hasReachedJesusSoftTimeout,
   formatJesusTierEscalationMessage,
@@ -226,6 +227,32 @@ describe("jesus_supervisor — validateDirectivePayload", () => {
         `decision type "${decision}" must produce valid:true; gaps: [${result.gaps.join("; ")}]`
       );
     }
+  });
+});
+
+describe("jesus_supervisor — buildDirectiveStrategyBrief", () => {
+  it("emits a typed strategy brief artifact from the directive payload", () => {
+    const artifact = buildDirectiveStrategyBrief(VALID_DIRECTIVE, VALID_EXPECTED_OUTCOME, {
+      repo: "Ancora-Labs/Box",
+      emittedAt: "2026-04-13T18:05:02.838Z",
+    });
+    assert.equal(artifact.source, "jesus_strategy_brief");
+    assert.equal(artifact.decision, "tactical");
+    assert.equal(artifact.systemHealth, "good");
+    assert.equal(artifact.callPrometheus, false);
+    assert.equal(artifact.wakeAthena, true);
+    assert.deepEqual(artifact.capacityDelta.topBottleneckAreas, []);
+    assert.equal(artifact.expectedOutcome?.expectedNextDecision, "tactical");
+    assert.equal(artifact.repo, "Ancora-Labs/Box");
+  });
+
+  it("negative path: preserves nulls for missing measurable outcome fields", () => {
+    const artifact = buildDirectiveStrategyBrief(VALID_DIRECTIVE, { expectedNextDecision: "tactical" }, {
+      emittedAt: "2026-04-13T18:05:02.838Z",
+    });
+    assert.equal(artifact.expectedOutcome?.expectedSystemHealthAfter, null);
+    assert.equal(artifact.expectedOutcome?.expectedAthenaActivated, null);
+    assert.equal(artifact.expectedOutcome?.expectedWorkItemCount, null);
   });
 });
 
@@ -513,6 +540,128 @@ describe("jesus_supervisor — runSystemHealthAudit", () => {
       assert.ok(capGap, "capability-gap finding should exist");
       assert.equal(capGap.severity, "warning");
       assert.equal(capGap.note, undefined);
+    });
+  });
+
+  it("downgrades important capability gaps when alias execution evidence proves the implementation is live", async () => {
+    await withTempRepo(async ({ stateDir, repoDir }) => {
+      writeFileSync(
+        path.join(repoDir, "src", "core", "athena_reviewer.ts"),
+        "function areTrackedFieldValuesEqual(a: unknown, b: unknown){ return a === b; } const legacyCorrections: string[] = []; const repairedFields = ['verification'];",
+        "utf8",
+      );
+
+      writeFileSync(
+        path.join(repoDir, "src", "core", "orchestrator.ts"),
+        "export function resolveAthenaCorrectionDispatchBlockReason(){ return 'rolling_yield_throttle:athena_correction_token=rolling_yield_throttle'; } export async function evaluatePreDispatchGovernanceGate(){} const signals = ['athena_correction_token', 'rolling_yield_throttle', 'autonomy_execution_gate_not_ready', 'lane_diversity_gate_blocked']; const label = 'pre-dispatch governance gate';",
+        "utf8",
+      );
+
+      await recordCapabilityExecution(
+        { paths: { stateDir } },
+        "athena-review-exit",
+        "approved=true autoApproved=true overallScore=55",
+      );
+      await recordCapabilityExecution(
+        { paths: { stateDir } },
+        "dispatch-block-reason-reporting",
+        "gateSource=athena_correction_token reason=rolling_yield_throttle:athena_correction_token=rolling_yield_throttle",
+      );
+      await recordCapabilityExecution(
+        { paths: { stateDir } },
+        "dispatch-block-reason-reporting",
+        "gateSource=pre_dispatch_gate reason=lane_diversity_gate_blocked:Only 1 lane(s) active, minimum is 2.",
+      );
+
+      writeFileSync(
+        path.join(stateDir, "knowledge_memory.json"),
+        JSON.stringify({
+          lessons: [],
+          capabilityGaps: [
+            {
+              gap: "Athena TRACKED_FIELDS change detection uses empty-check instead of deep-equality",
+              severity: "important",
+              capability: "athena-correction-fidelity-tracking",
+              proposedFix: "Track legacy corrections with deep equality",
+            },
+            {
+              gap: "Governance gate tokens in Athena corrections[] are advisory-only",
+              severity: "important",
+              capability: "governance-gate-token-enforcement",
+              proposedFix: "Parse correction tokens into dispatchBlockReason",
+            },
+            {
+              gap: "Lane diversity gate fires after waves have already dispatched",
+              severity: "important",
+              capability: "pre-wave-diversity-validation",
+              proposedFix: "Move lane diversity gate before wave 1",
+            },
+          ],
+        }),
+        "utf8",
+      );
+
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        { latestMainCi: null, failedCiRuns: [], pullRequests: [] },
+        {},
+        {},
+      );
+
+      for (const capability of [
+        "athena-correction-fidelity-tracking",
+        "governance-gate-token-enforcement",
+        "pre-wave-diversity-validation",
+      ]) {
+        const capGap = findings.find((f: any) => f.capabilityNeeded === capability);
+        assert.ok(capGap, `${capability} finding should exist`);
+        assert.equal(capGap.severity, "info");
+        assert.equal(capGap.note, "verified_present_in_source_and_executed");
+      }
+    });
+  });
+
+  it("keeps governance-gate-token-enforcement actionable when neither Athena review nor token-specific dispatch evidence exists", async () => {
+    await withTempRepo(async ({ stateDir, repoDir }) => {
+      writeFileSync(
+        path.join(repoDir, "src", "core", "orchestrator.ts"),
+        "export function resolveAthenaCorrectionDispatchBlockReason(){ return 'rolling_yield_throttle:athena_correction_token=rolling_yield_throttle'; } const signals = ['athena_correction_token', 'rolling_yield_throttle', 'autonomy_execution_gate_not_ready'];",
+        "utf8",
+      );
+
+      await recordCapabilityExecution(
+        { paths: { stateDir } },
+        "dispatch-block-reason-reporting",
+        "gateSource=pre_dispatch_gate reason=lane_diversity_gate_blocked:Only 1 lane(s) active, minimum is 2.",
+      );
+
+      writeFileSync(
+        path.join(stateDir, "knowledge_memory.json"),
+        JSON.stringify({
+          lessons: [],
+          capabilityGaps: [
+            {
+              gap: "Governance gate tokens in Athena corrections[] are advisory-only",
+              severity: "important",
+              capability: "governance-gate-token-enforcement",
+              proposedFix: "Parse correction tokens into dispatchBlockReason",
+            },
+          ],
+        }),
+        "utf8",
+      );
+
+      const findings = await runSystemHealthAudit(
+        { paths: { stateDir } } as any,
+        { latestMainCi: null, failedCiRuns: [], pullRequests: [] },
+        {},
+        {},
+      );
+
+      const capGap = findings.find((f: any) => f.capabilityNeeded === "governance-gate-token-enforcement");
+      assert.ok(capGap, "governance token enforcement finding should exist");
+      assert.equal(capGap.severity, "important");
+      assert.notEqual(capGap.note, "verified_present_in_source_and_executed");
     });
   });
 
