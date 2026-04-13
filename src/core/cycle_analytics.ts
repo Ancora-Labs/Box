@@ -3515,10 +3515,11 @@ export function buildRoutingROISummary(
     const outcome = typeof row.outcome === "string" ? row.outcome : "unknown";
     const isDone = outcome === "done";
     const linked = Boolean(
-      joinKey
+      contract.lineageId
+      && joinKey
       && (
         (enforceLineageReference && linkageReference.has(joinKey))
-        || (!enforceLineageReference && contract.lineageId)
+        || !enforceLineageReference
       )
     );
 

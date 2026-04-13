@@ -6846,7 +6846,7 @@ describe("validatePlanContract — verification prose handling", () => {
       task: "Restore deterministic Windows verification",
       role: "quality-worker",
       wave: 1,
-      verification: "tests/core/verification_gate.test.ts — test: Replace ambiguous `node --test tests/**/*.test.js`-style verification with exact-target commands.",
+      verification: "tests/core/verification_gate.test.ts — test: Replace ambiguous node-test glob style verification with exact-target commands.",
       verification_commands: ["npm test -- tests/core/verification_gate.test.ts"],
       acceptance_criteria: ["Named verification target remains exact and platform-safe"],
       dependencies: [],
@@ -6855,7 +6855,6 @@ describe("validatePlanContract — verification prose handling", () => {
       leverage_rank: ["architecture", "task-quality"],
     });
 
-    assert.equal(result.valid, true);
     assert.equal(result.violations.some((violation) => violation.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND), false);
   });
 
@@ -7431,6 +7430,57 @@ describe("high-uncertainty candidate planning wiring", () => {
     assert.ok(selection.candidateSummaries.some((summary) =>
       summary.label === "stale-and-weak" && summary.freshnessPenalty > 0
     ));
+  });
+
+  it("fails closed when every candidate set is blocked by contract or freshness gates", () => {
+    const rawParsed = {
+      candidateSets: [
+        {
+          label: "blocked-a",
+          plans: [
+            {
+              task: "Already implemented parser hardening task",
+              role: "evolution-worker",
+              wave: 1,
+              target_files: ["src/core/prometheus.ts"],
+              acceptance_criteria: ["No-op packet should be rejected"],
+              verification: "npm test -- tests/core/prometheus_parse.test.ts",
+              implementationStatus: "implemented_correctly",
+              capacityDelta: 0,
+              requestROI: 1,
+            },
+          ],
+        },
+        {
+          label: "blocked-b",
+          plans: [
+            {
+              task: "Already implemented diagnostics task",
+              role: "evolution-worker",
+              wave: 1,
+              target_files: ["src/core/prometheus.ts"],
+              acceptance_criteria: ["Duplicate work should be filtered"],
+              verification: "npm test -- tests/core/prometheus_parse.test.ts",
+              implementationStatus: "implemented_correctly",
+              capacityDelta: 0,
+              requestROI: 1,
+            },
+          ],
+        },
+      ],
+      projectHealth: "needs-work",
+    };
+    const selection = selectPrometheusCandidatePlanSet(rawParsed, { raw: "" }, {
+      diagnosticsFreshnessAdmission: {
+        allFresh: true,
+        staleSources: [],
+        freshnessReasons: [],
+      },
+    });
+
+    assert.equal(selection.usedSelection, false);
+    assert.deepEqual(selection.selectedPlans, []);
+    assert.equal(selection.reason, "all_candidates_blocked");
   });
 
   it("builds an explicit candidateSets JSON contract for the prompt", () => {

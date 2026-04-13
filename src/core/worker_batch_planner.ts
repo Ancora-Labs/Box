@@ -1063,6 +1063,8 @@ export function computeCriticalPathScores(
 
 export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResult = null) {
   const packetSizePolicy = resolvePacketSizePolicy(config);
+  const rawMaxPlansPerPacket = Number((config as any)?.planner?.maxPlansPerPacket);
+  const hasExplicitMaxPlansPerPacket = Number.isFinite(rawMaxPlansPerPacket) && rawMaxPlansPerPacket > 0;
   const cycleAnalyticsTelemetry = loadCycleAnalyticsTelemetry(config);
   const taskKindPacketTelemetry = extractTaskKindPacketTelemetry(cycleAnalyticsTelemetry);
   // ── Micro-wave splitting ──────────────────────────────────────────────────
@@ -1374,7 +1376,7 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
         for (const batch of activeBatches) {
           const batchPlans = batch.plans as any[];
           const hasDeps = batchPlans.some((p) => hasExplicitDependencies(p));
-          const packetPlanLimit = enforceAdaptivePacketCap
+          const packetPlanLimit = (hasExplicitMaxPlansPerPacket || enforceAdaptivePacketCap)
             ? adaptivePacketLimit.maxPlansPerPacket
             : Math.max(1, batchPlans.length);
           const chunkSize = hasDeps
@@ -1415,7 +1417,8 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
             const mergedHasDeps = mergedPlans.some((p) => hasExplicitDependencies(p));
             const withinDepLimit = !mergedHasDeps || mergedPlans.length <= maxDepBatch;
             const withinContextLimit = mergedTokens <= selection.usableContextTokens;
-            const withinPacketPlanLimit = !enforceAdaptivePacketCap || mergedPlans.length <= adaptivePacketLimit.maxPlansPerPacket;
+            const withinPacketPlanLimit = (!hasExplicitMaxPlansPerPacket && !enforceAdaptivePacketCap)
+              || mergedPlans.length <= adaptivePacketLimit.maxPlansPerPacket;
 
             if (withinDepLimit && withinContextLimit && withinPacketPlanLimit) {
               const remaining = selection.usableContextTokens - mergedTokens;
