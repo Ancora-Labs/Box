@@ -6,6 +6,13 @@
  * would result from evolution_executor.ts ↔ athena_reviewer.ts cross-importing.
  */
 
+import type {
+  AthenaReviewFindingArtifact,
+  JesusStrategyBriefArtifact,
+  PrometheusPlanArtifact,
+} from "./plan_lifecycle_contract.js";
+import { getPrometheusPlanArtifact } from "./plan_lifecycle_contract.js";
+
 // ── Verification evidence ──────────────────────────────────────────────────────
 
 /**
@@ -27,6 +34,37 @@ export type PrChecksSnapshot = {
   pending: string[];
   total: number;
   error?: string;
+};
+
+export type DispatchReplayClosureSnapshot = {
+  contractSatisfied?: boolean;
+  canonicalCommands?: string[];
+  executedCommands?: string[];
+  rawArtifactEvidenceLinks?: string[];
+};
+
+export type DispatchContractSnapshot = {
+  doneWorkerWithVerificationReportEvidence?: boolean;
+  doneWorkerWithCleanTreeStatusEvidence?: boolean;
+  dispatchBlockReason?: string | null;
+  closureBoundaryViolation?: boolean;
+  replayClosure?: DispatchReplayClosureSnapshot;
+};
+
+export type WorkerExecutionReportArtifact = {
+  schemaVersion: 1;
+  source: "worker_execution_report";
+  roleName: string;
+  status: string;
+  summary: string;
+  prUrl: string | null;
+  filesTouched: string[];
+  verificationPassed: boolean | null;
+  verificationEvidence: VerificationEvidence;
+  preReviewAssessment: string | null;
+  preReviewIssues: string[];
+  dispatchBlockReason: string | null;
+  emittedAt: string;
 };
 
 // ── Canonical evidence envelope ───────────────────────────────────────────────
@@ -71,11 +109,152 @@ export type EvidenceEnvelope = {
   preReviewAssessment?: string | null;
   /** Issues Athena flagged in the pre-review that the worker was asked to address. */
   preReviewIssues?: string[];
+  /** Worker runner verification contract used by lifecycle admission gates. */
+  dispatchContract?: DispatchContractSnapshot;
+  /** Optional typed leadership artifact emitted by Jesus. */
+  strategyBrief?: JesusStrategyBriefArtifact | null;
+  /** Optional typed plan artifact emitted by Prometheus. */
+  planArtifact?: PrometheusPlanArtifact | null;
+  /** Optional typed review findings emitted by Athena plan review. */
+  reviewArtifact?: AthenaReviewFindingArtifact | null;
+  /** Canonical worker execution report consumed by Athena postmortem. */
+  executionReport?: WorkerExecutionReportArtifact | null;
 };
 
 // ── Envelope structure validation ─────────────────────────────────────────────
 
 const VALID_EVIDENCE_VALUES = new Set(["pass", "fail", "n/a"]);
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+  return [];
+}
+
+function validateNestedVerificationEvidence(
+  evidence: unknown,
+  fieldPrefix: string,
+): string[] {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return [`${fieldPrefix} must be a non-null object`];
+  }
+  const errors: string[] = [];
+  const slots = evidence as Record<string, unknown>;
+  for (const slot of ["build", "tests", "lint"] as const) {
+    if (!VALID_EVIDENCE_VALUES.has(slots[slot] as string)) {
+      errors.push(`${fieldPrefix}.${slot} must be "pass", "fail", or "n/a"; got ${JSON.stringify(slots[slot])}`);
+    }
+  }
+  return errors;
+}
+
+function validatePlanArtifact(planArtifact: unknown): string[] {
+  if (!planArtifact || typeof planArtifact !== "object" || Array.isArray(planArtifact)) {
+    return ["planArtifact must be a non-null object"];
+  }
+  const artifact = planArtifact as Record<string, unknown>;
+  const errors: string[] = [];
+  if (artifact.source !== "prometheus_plan") {
+    errors.push(`planArtifact.source must be "prometheus_plan"; got ${JSON.stringify(artifact.source)}`);
+  }
+  if (typeof artifact.task !== "string" || artifact.task.trim() === "") {
+    errors.push("planArtifact.task must be a non-empty string");
+  }
+  if (typeof artifact.taskIdentity !== "string" || artifact.taskIdentity.trim() === "") {
+    errors.push("planArtifact.taskIdentity must be a non-empty string");
+  }
+  if (!Array.isArray(artifact.targetFiles)) {
+    errors.push("planArtifact.targetFiles must be an array");
+  }
+  return errors;
+}
+
+function validateReviewArtifact(reviewArtifact: unknown): string[] {
+  if (!reviewArtifact || typeof reviewArtifact !== "object" || Array.isArray(reviewArtifact)) {
+    return ["reviewArtifact must be a non-null object"];
+  }
+  const artifact = reviewArtifact as Record<string, unknown>;
+  const errors: string[] = [];
+  if (artifact.source !== "athena_review_findings") {
+    errors.push(`reviewArtifact.source must be "athena_review_findings"; got ${JSON.stringify(artifact.source)}`);
+  }
+  if (typeof artifact.approved !== "boolean") {
+    errors.push("reviewArtifact.approved must be a boolean");
+  }
+  if (!Array.isArray(artifact.findings)) {
+    errors.push("reviewArtifact.findings must be an array");
+  }
+  return errors;
+}
+
+function validateExecutionReportArtifact(executionReport: unknown): string[] {
+  if (!executionReport || typeof executionReport !== "object" || Array.isArray(executionReport)) {
+    return ["executionReport must be a non-null object"];
+  }
+  const report = executionReport as Record<string, unknown>;
+  const errors: string[] = [];
+  if (report.source !== "worker_execution_report") {
+    errors.push(`executionReport.source must be "worker_execution_report"; got ${JSON.stringify(report.source)}`);
+  }
+  if (typeof report.roleName !== "string" || report.roleName.trim() === "") {
+    errors.push("executionReport.roleName must be a non-empty string");
+  }
+  if (typeof report.status !== "string" || report.status.trim() === "") {
+    errors.push("executionReport.status must be a non-empty string");
+  }
+  if (typeof report.summary !== "string" || report.summary.trim() === "") {
+    errors.push("executionReport.summary must be a non-empty string");
+  }
+  if (!Array.isArray(report.filesTouched)) {
+    errors.push("executionReport.filesTouched must be an array");
+  }
+  errors.push(...validateNestedVerificationEvidence(report.verificationEvidence, "executionReport.verificationEvidence"));
+  return errors;
+}
+
+export function buildWorkerExecutionReportArtifact(
+  envelope: Partial<EvidenceEnvelope> & Record<string, unknown>,
+  opts: { emittedAt?: string } = {},
+): WorkerExecutionReportArtifact {
+  const verificationEvidence: VerificationEvidence = envelope.verificationEvidence && typeof envelope.verificationEvidence === "object"
+    ? envelope.verificationEvidence as VerificationEvidence
+    : { build: "n/a", tests: "n/a", lint: "n/a" };
+  const dispatchContract = envelope.dispatchContract && typeof envelope.dispatchContract === "object"
+    ? envelope.dispatchContract as DispatchContractSnapshot
+    : {};
+  return {
+    schemaVersion: 1,
+    source: "worker_execution_report",
+    roleName: String(envelope.roleName || "").trim(),
+    status: String(envelope.status || "").trim(),
+    summary: String(envelope.summary || "").trim(),
+    prUrl: typeof envelope.prUrl === "string" && envelope.prUrl.trim() ? envelope.prUrl.trim() : null,
+    filesTouched: normalizeStringList(envelope.filesTouched),
+    verificationPassed: typeof envelope.verificationPassed === "boolean" ? envelope.verificationPassed : null,
+    verificationEvidence,
+    preReviewAssessment: typeof envelope.preReviewAssessment === "string" && envelope.preReviewAssessment.trim()
+      ? envelope.preReviewAssessment.trim()
+      : null,
+    preReviewIssues: normalizeStringList(envelope.preReviewIssues),
+    dispatchBlockReason: typeof dispatchContract.dispatchBlockReason === "string" && dispatchContract.dispatchBlockReason.trim()
+      ? dispatchContract.dispatchBlockReason.trim()
+      : null,
+    emittedAt: String(opts.emittedAt || new Date().toISOString()),
+  };
+}
+
+export function resolvePlanArtifactFromEnvelope(
+  envelope: Partial<EvidenceEnvelope> & Record<string, unknown>,
+): PrometheusPlanArtifact | null {
+  if (envelope.planArtifact) {
+    return getPrometheusPlanArtifact({ planArtifact: envelope.planArtifact });
+  }
+  return null;
+}
 
 /**
  * Known template placeholder literals that constitute unfilled post-merge artifact residue.
@@ -140,15 +319,16 @@ export function validateEvidenceEnvelope(envelope: unknown): { valid: boolean; e
   }
 
   const ev = e.verificationEvidence;
-  if (!ev || typeof ev !== "object") {
-    errors.push("verificationEvidence must be a non-null object");
-  } else {
-    const evObj = ev as Record<string, unknown>;
-    for (const slot of ["build", "tests", "lint"] as const) {
-      if (!VALID_EVIDENCE_VALUES.has(evObj[slot] as string)) {
-        errors.push(`verificationEvidence.${slot} must be "pass", "fail", or "n/a"; got ${JSON.stringify(evObj[slot])}`);
-      }
-    }
+  errors.push(...validateNestedVerificationEvidence(ev, "verificationEvidence"));
+
+  if (e.planArtifact != null) {
+    errors.push(...validatePlanArtifact(e.planArtifact));
+  }
+  if (e.reviewArtifact != null) {
+    errors.push(...validateReviewArtifact(e.reviewArtifact));
+  }
+  if (e.executionReport != null) {
+    errors.push(...validateExecutionReportArtifact(e.executionReport));
   }
 
   return { valid: errors.length === 0, errors };

@@ -18,7 +18,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
-import { getRoleRegistry } from "./role_registry.js";
+import { getRoleRegistry, getLaneForWorkerName } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { rankLessonsByRelevance } from "./lesson_halflife.js";
@@ -38,9 +38,18 @@ import {
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
 import { checkForbiddenCommands, normalizeCommandBatch } from "./verification_command_registry.js";
-import { validateEvidenceEnvelope } from "./evidence_envelope.js";
-import type { EvidenceEnvelope } from "./evidence_envelope.js";
+import { buildWorkerExecutionReportArtifact, validateEvidenceEnvelope } from "./evidence_envelope.js";
+import type { DispatchContractSnapshot, EvidenceEnvelope } from "./evidence_envelope.js";
 import { isEnvelopeUnambiguous } from "./evidence_envelope.js";
+import {
+  buildAthenaReviewFindingArtifact,
+  derivePlanContinuationFamilyKey,
+  extractImplementationEvidencePaths,
+  getPrometheusPlanArtifact,
+  normalizePlanIdentity,
+  POSTMORTEM_LIFECYCLE_STATE,
+} from "./plan_lifecycle_contract.js";
+import type { PostmortemLifecycleEvidenceEnvelope } from "./plan_lifecycle_contract.js";
 import {
   loadLedgerMeta,
   autoCloseVerifiedDebt,
@@ -1482,6 +1491,25 @@ function normalizePlanReviewEntry(entry, plan, index) {
   };
 }
 
+function attachReviewArtifact<T extends Record<string, unknown>>(
+  reviewResult: T,
+  plans: any[],
+  gateRisk: {
+    gateBlockRisk?: string;
+    reason?: string | null;
+    activeGateSignals?: string[];
+    gateBlockSignals?: string[];
+    requiresCorrection?: boolean;
+  } | null = null,
+): T & { reviewArtifact: ReturnType<typeof buildAthenaReviewFindingArtifact> } {
+  return {
+    ...reviewResult,
+    reviewArtifact: buildAthenaReviewFindingArtifact(reviewResult, plans, {
+      gateRisk: gateRisk || undefined,
+    }),
+  };
+}
+
 /**
  * Mandatory fields that MUST be present (as explicit values, not synthesized) in every
  * actionable packet returned by the AI reviewer. If any of these are absent, `runAthenaPlanReview`
@@ -2598,6 +2626,60 @@ export const AUTO_APPROVE_HIGH_QUALITY_THRESHOLD = 60;
  */
 export const AUTO_APPROVE_DELTA_REVIEW_THRESHOLD = 55;
 
+const ATHENA_FRAGILE_LANE_NAMES = Object.freeze([
+  "quality",
+  "governance",
+  "integration",
+  "infrastructure",
+  "observation",
+]);
+const ATHENA_FRAGILE_LANE_COMPLETION_THRESHOLD = 0.67;
+const ATHENA_FRAGILE_LANE_ROI_THRESHOLD = 1.0;
+const ATHENA_FRAGILE_FAST_PATH_THRESHOLD_BOOST = 20;
+
+async function assessFragileLaneFastPathSignal(config: any, plans: any[]): Promise<{
+  active: boolean;
+  affectedLanes: string[];
+  thresholdBoost: number;
+  summary: string;
+}> {
+  try {
+    const stateDir = config?.paths?.stateDir || "state";
+    const analytics = await readJson(path.join(stateDir, "cycle_analytics.json"), null);
+    const laneTelemetry = analytics?.lastCycle?.laneTelemetry ?? analytics?.laneTelemetry;
+    if (!laneTelemetry || typeof laneTelemetry !== "object") {
+      return { active: false, affectedLanes: [], thresholdBoost: 0, summary: "no lane telemetry" };
+    }
+    const planLanes = [...new Set(
+      (Array.isArray(plans) ? plans : [])
+        .map((plan) => getLaneForWorkerName(plan?.role, "implementation"))
+        .filter((lane) => ATHENA_FRAGILE_LANE_NAMES.includes(lane))
+    )];
+    if (planLanes.length === 0) {
+      return { active: false, affectedLanes: [], thresholdBoost: 0, summary: "no fragile lanes in batch" };
+    }
+    const weakLanes = planLanes.filter((lane) => {
+      const telemetry = (laneTelemetry as any)?.[lane];
+      const completionRate = Number(telemetry?.completionRate);
+      const roi = Number(telemetry?.roi);
+      return (
+        (Number.isFinite(completionRate) && completionRate < ATHENA_FRAGILE_LANE_COMPLETION_THRESHOLD)
+        || (Number.isFinite(roi) && roi < ATHENA_FRAGILE_LANE_ROI_THRESHOLD)
+      );
+    });
+    return {
+      active: weakLanes.length > 0,
+      affectedLanes: weakLanes,
+      thresholdBoost: weakLanes.length > 0 ? ATHENA_FRAGILE_FAST_PATH_THRESHOLD_BOOST : 0,
+      summary: weakLanes.length > 0
+        ? `weak fragile lanes: ${weakLanes.join(", ")}`
+        : "fragile lane telemetry healthy",
+    };
+  } catch {
+    return { active: false, affectedLanes: [], thresholdBoost: 0, summary: "lane telemetry unreadable" };
+  }
+}
+
 // ── Plan Review (pre-work gate) ─────────────────────────────────────────────
 
 function buildPlanReviewBlocker(code: string, source = "athena_reviewer") {
@@ -2701,7 +2783,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
     };
     const blocker = buildPlanReviewBlocker(reason.code);
     await appendProgress(config, `[ATHENA][BLOCKER] code=${blocker.code} stage=${blocker.stage} retryable=${String(blocker.retryable)}`);
-    return { approved: false, reason, blocker, corrections: [] };
+    return attachReviewArtifact({ approved: false, reason, blocker, corrections: [] }, [], null);
   }
 
   const plans = Array.isArray(prometheusAnalysis.plans) ? prometheusAnalysis.plans : [];
@@ -2726,12 +2808,12 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
     await appendProgress(config, `[ATHENA] Plan quality pre-gate FAILED — ${message}`);
     await appendProgress(config, `[ATHENA][BLOCKER] code=${blocker.code} stage=${blocker.stage} retryable=${String(blocker.retryable)}`);
     chatLog(stateDir, athenaName, `Plan quality pre-gate failed: ${message}`);
-    return {
+    return attachReviewArtifact({
       approved: false,
       reason,
       blocker,
       corrections: qualityFailures
-    };
+    }, plans, gateRisk);
   }
 
   // ── Deterministic pre-mortem gate (runs before AI, always enforced) ────────
@@ -2751,13 +2833,13 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
       title: "High-risk plan missing pre-mortem — dispatch blocked",
       message: `code=${reason.code} violations=${JSON.stringify(preMortemViolations)}`
     });
-    return {
+    return attachReviewArtifact({
       approved: false,
       reason,
       blocker,
       corrections: preMortemViolations,
       preMortemViolations
-    };
+    }, plans, gateRisk);
   }
 
   // ── Deterministic mandatory coverage gate (runs before AI and auto-approve) ──
@@ -2780,12 +2862,12 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
       await appendProgress(config, `[ATHENA] Mandatory coverage gate FAILED — ${message}`);
       await appendProgress(config, `[ATHENA][BLOCKER] code=${blocker.code} stage=${blocker.stage} retryable=${String(blocker.retryable)}`);
       chatLog(stateDir, athenaName, `Mandatory coverage gate failed: ${message}`);
-      return {
+      return attachReviewArtifact({
         approved: false,
         reason,
         blocker,
         corrections: [...missing.map(id => `finding ${id} not covered`), ...invalid.map(id => `invalid coverage for ${id}`)],
-      };
+      }, plans, gateRisk);
     }
   }
 
@@ -2797,6 +2879,13 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   const allPlansLowRisk = plans.every(
     p => String(p.riskLevel || "low").trim().toLowerCase() !== "high"
   );
+  const fragileLaneSignal = await assessFragileLaneFastPathSignal(config, plans);
+  if (fragileLaneSignal.active) {
+    await appendProgress(
+      config,
+      `[ATHENA] Fragile-lane fast-path tightened — ${fragileLaneSignal.summary} thresholdBoost=${fragileLaneSignal.thresholdBoost}`,
+    );
+  }
   if (allPlansLowRisk && !gateRisk.requiresCorrection && config?.runtime?.disablePlanReviewCache !== true) {
     const batchFingerprint = computePlanBatchFingerprint(plans);
     let cachedReviewExists = false;
@@ -2812,7 +2901,8 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
         lastReview !== null &&
         lastReview.approved === true &&
         typeof lastReview.planBatchFingerprint === "string" &&
-        lastReview.planBatchFingerprint === batchFingerprint
+        lastReview.planBatchFingerprint === batchFingerprint &&
+        !fragileLaneSignal.active
       ) {
         const shortFp = batchFingerprint.slice(0, 8);
         await appendProgress(
@@ -2824,7 +2914,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
           athenaName,
           `Plan auto-approved (unchanged low-risk batch, fingerprint=${shortFp})`
         );
-        return {
+        return attachReviewArtifact({
           ...lastReview,
           autoApproved: true,
           autoApproveReason: {
@@ -2835,7 +2925,8 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
           gateBlockRiskAtApproval: gateRisk.gateBlockRisk,
           gateBlockSignals: gateRisk.activeGateSignals,
           reviewedAt: new Date().toISOString(),
-        };
+          gateRiskRequiresCorrection: gateRisk.requiresCorrection,
+        }, plans, gateRisk);
       }
     } catch {
       // Cache read is best-effort; fall through to AI review on any error.
@@ -2853,22 +2944,26 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
       const highQualityThreshold = typeof config?.runtime?.autoApproveHighQualityThreshold === "number"
         ? config.runtime.autoApproveHighQualityThreshold
         : AUTO_APPROVE_HIGH_QUALITY_THRESHOLD;
+      const adaptiveHighQualityThreshold = Math.min(
+        95,
+        highQualityThreshold + fragileLaneSignal.thresholdBoost,
+      );
       const allHighQuality = plans.length > 0 &&
-        plans.every(p => scorePlanQuality(p).score >= highQualityThreshold);
+        plans.every(p => scorePlanQuality(p).score >= adaptiveHighQualityThreshold);
       if (allHighQuality) {
         await appendProgress(
           config,
-          `[ATHENA] Plan review AUTO-APPROVED — all ${plans.length} low-risk plan(s) score ≥ ${highQualityThreshold}`
+          `[ATHENA] Plan review AUTO-APPROVED — all ${plans.length} low-risk plan(s) score ≥ ${adaptiveHighQualityThreshold}`
         );
         chatLog(
           stateDir,
           athenaName,
-          `Plan auto-approved (high-quality low-risk batch, threshold=${highQualityThreshold})`
+          `Plan auto-approved (high-quality low-risk batch, threshold=${adaptiveHighQualityThreshold})`
         );
-        return {
+        return attachReviewArtifact({
           approved: true,
-          overallScore: highQualityThreshold,
-          summary: `All ${plans.length} plan(s) are low-risk and scored at or above the high-quality threshold (${highQualityThreshold})`,
+          overallScore: adaptiveHighQualityThreshold,
+          summary: `All ${plans.length} plan(s) are low-risk and scored at or above the high-quality threshold (${adaptiveHighQualityThreshold})`,
           planReviews: plans.map((p, i) => buildFallbackPlanReview(p, i)),
           corrections: [],
           appliedFixes: [],
@@ -2876,13 +2971,14 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
           autoApproved: true,
           autoApproveReason: {
             code: ATHENA_FAST_PATH_REASON.HIGH_QUALITY_LOW_RISK,
-            message: `All plans are low-risk and cleared the high-quality threshold (≥ ${highQualityThreshold})`,
+            message: `All plans are low-risk and cleared the high-quality threshold (≥ ${adaptiveHighQualityThreshold})`,
           },
           gateBlockRisk: gateRisk.gateBlockRisk,
           gateBlockRiskAtApproval: gateRisk.gateBlockRisk,
           gateBlockSignals: gateRisk.activeGateSignals,
           reviewedAt: new Date().toISOString(),
-        };
+          gateRiskRequiresCorrection: gateRisk.requiresCorrection,
+        }, plans, gateRisk);
       }
     }
 
@@ -2898,7 +2994,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
         : AUTO_APPROVE_DELTA_REVIEW_THRESHOLD;
       const allDeltaQuality = plans.length > 0 &&
         plans.every(p => scorePlanQuality(p).score >= deltaThreshold);
-      if (allDeltaQuality) {
+      if (allDeltaQuality && !fragileLaneSignal.active) {
         await appendProgress(
           config,
           `[ATHENA] Plan review DELTA-APPROVED — all ${plans.length} changed low-risk plan(s) score ≥ ${deltaThreshold}`
@@ -2908,7 +3004,7 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
           athenaName,
           `Plan delta-approved (changed low-risk batch, threshold=${deltaThreshold})`
         );
-        return {
+        return attachReviewArtifact({
           approved: true,
           overallScore: deltaThreshold,
           summary: `All ${plans.length} plan(s) are low-risk with changed fingerprint and scored at or above the delta-review threshold (${deltaThreshold})`,
@@ -2925,7 +3021,8 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
           gateBlockRiskAtApproval: gateRisk.gateBlockRisk,
           gateBlockSignals: gateRisk.activeGateSignals,
           reviewedAt: new Date().toISOString(),
-        };
+          gateRiskRequiresCorrection: gateRisk.requiresCorrection,
+        }, plans, gateRisk);
       }
     }
   }
@@ -3136,7 +3233,7 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
       title: "Plan review AI call failed — plan blocked",
       message: `code=${reason.code} message=${reason.message}`
     });
-    return { approved: false, reason, blocker, corrections: [] };
+    return attachReviewArtifact({ approved: false, reason, blocker, corrections: [] }, plans, gateRisk);
   }
 
   const initialContractCheck = evaluateDecisionPacketContract(aiResult.parsed);
@@ -3161,7 +3258,7 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
         title: "Decision packet retry failed — plan blocked",
         message: `code=${reason.code} message=${reason.message}`
       });
-      return { approved: false, reason, blocker, corrections: [] };
+      return attachReviewArtifact({ approved: false, reason, blocker, corrections: [] }, plans, gateRisk);
     }
     aiResult = retryResult;
     const retryContractCheck = evaluateDecisionPacketContract(aiResult.parsed);
@@ -3183,7 +3280,7 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
         title: "Decision packet contract violation after retry — plan blocked",
         message: `code=${reason.code} violations=${retryContractCheck.violations.join(" | ")}`
       });
-      return { approved: false, reason, blocker, corrections: [] };
+      return attachReviewArtifact({ approved: false, reason, blocker, corrections: [] }, plans, gateRisk);
     }
   }
 
@@ -3229,7 +3326,7 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
         title: "Reviewer response missing mandatory actionable-packet fields — plan blocked",
         message: `code=${reason.code} fields=${uncorrectableMissing.join(",")}`
       });
-      return { approved: false, reason, blocker, corrections: [] };
+      return attachReviewArtifact({ approved: false, reason, blocker, corrections: [] }, plans, gateRisk);
     }
 
     // All missing mandatory fields were corrected — update the payload and continue.
@@ -3258,7 +3355,7 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
       title: "Reviewer output failed trust-boundary validation — plan blocked",
       message: `code=${reason.code} errors=${tbErrors}`
     });
-    return { approved: false, reason, blocker, corrections: [] };
+    return attachReviewArtifact({ approved: false, reason, blocker, corrections: [] }, plans, gateRisk);
   }
   if (trustCheck.errors.length > 0 && tbMode === "warn") {
     const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
@@ -3285,6 +3382,7 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
     gateBlockRisk: gateRisk.gateBlockRisk,
     gateBlockRiskReason: gateRisk.reason,
     gateBlockSignals: gateRisk.activeGateSignals,
+    gateRiskRequiresCorrection: gateRisk.requiresCorrection,
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
@@ -3336,13 +3434,13 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
         title: "Patched plans contain unresolved placeholders or missing mandatory fields",
         message: `code=${blockReason.code} issues=${patchedPlanIssues.slice(0, 3).join(" | ")}`
       });
-      return {
+      return attachReviewArtifact({
         ...result,
         approved: false,
         corrections: [...corrections, ...patchedPlanIssues],
         reason: blockReason,
         blocker,
-      };
+      }, plans, gateRisk);
     }
   }
 
@@ -3373,13 +3471,13 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
         title: "Patched plans failed contract re-validation after normalization",
         message: `code=${blockReason.code} violations=${handoff.violations.slice(0, 3).join(" | ")}`
       });
-      return {
+      return attachReviewArtifact({
         ...result,
         approved: false,
         corrections: [...corrections, ...handoff.violations],
         reason: blockReason,
         blocker,
-      };
+      }, plans, gateRisk);
     }
 
     // ── AI batch-metadata contract gate ─────────────────────────────────────
@@ -3420,13 +3518,13 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
         title: "Patched plans missing AI batch metadata",
         message: `code=${blockReason.code} violations=${aiBatchCheck.violations.slice(0, 3).join(" | ")}`
       });
-      return {
+      return attachReviewArtifact({
         ...result,
         approved: false,
         corrections: [...corrections, ...aiBatchCheck.violations],
         reason: blockReason,
         blocker,
-      };
+      }, plans, gateRisk);
     }
 
     const batchCount = handoff.plans.length > 0
@@ -3472,23 +3570,24 @@ IMPORTANT: Every patched plan MUST include AI-assigned batch metadata fields: _b
     );
   }
 
+  const enrichedResult = attachReviewArtifact(result, plans, gateRisk);
   await writeJson(path.join(stateDir, "athena_plan_review.json"), {
-    ...result,
-    summary: sanitizeAthenaReviewFieldForPersistence(String(result.summary || "")),
+    ...enrichedResult,
+    summary: sanitizeAthenaReviewFieldForPersistence(String(enrichedResult.summary || "")),
     planBatchFingerprint: computePlanBatchFingerprint(plans),
   });
 
-  if (result.approved) {
-    const fixCount = result.appliedFixes.length;
+  if (enrichedResult.approved) {
+    const fixCount = enrichedResult.appliedFixes.length;
     const fixMsg = fixCount > 0 ? ` (${fixCount} fix(es) applied in-place)` : "";
-    await appendProgress(config, `[ATHENA] Plan APPROVED (score=${result.overallScore}/10)${fixMsg} — ${result.summary}`);
-    chatLog(stateDir, athenaName, `Plan approved: score=${result.overallScore}/10${fixMsg}`);
+    await appendProgress(config, `[ATHENA] Plan APPROVED (score=${enrichedResult.overallScore}/10)${fixMsg} — ${enrichedResult.summary}`);
+    chatLog(stateDir, athenaName, `Plan approved: score=${enrichedResult.overallScore}/10${fixMsg}`);
   } else {
     await appendProgress(config, `[ATHENA] Plan REJECTED — corrections needed: ${corrections.join("; ")}`);
     chatLog(stateDir, athenaName, `Plan rejected: ${corrections.join("; ")}`);
   }
 
-  return result;
+  return enrichedResult;
 }
 
 // ── Deterministic postmortem fast-path ───────────────────────────────────────
@@ -3558,12 +3657,16 @@ export function classifyDefectChannel(opts: any = {}) {
  * @returns {object} postmortem record matching the AI postmortem schema
  */
 function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
-  const workerName = workerResult?.roleName || workerResult?.role || "unknown";
+  const executionReport = workerResult?.executionReport && typeof workerResult.executionReport === "object"
+    ? workerResult.executionReport
+    : buildWorkerExecutionReportArtifact(workerResult);
+  const planArtifact = getPrometheusPlanArtifact(originalPlan);
+  const workerName = executionReport.roleName || workerResult?.roleName || workerResult?.role || "unknown";
   return {
     workerName,
     taskCompleted: true,
-    expectedOutcome: originalPlan?.task || "task completion",
-    actualOutcome: `Worker completed successfully. BUILD=pass; TESTS=pass.`,
+    expectedOutcome: planArtifact?.task || originalPlan?.task || "task completion",
+    actualOutcome: `Worker completed successfully. BUILD=${executionReport.verificationEvidence.build}; TESTS=${executionReport.verificationEvidence.tests}.`,
     deviation: "none",
     successCriteriaMet: true,
     lessonLearned: "Clean pass — no issues detected by verification gate.",
@@ -3580,6 +3683,70 @@ function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
     learningGradeEligible: true,
     reviewedAt: new Date().toISOString(),
     model: "deterministic"
+  };
+}
+
+function buildPostmortemLifecycleEvidenceEnvelope(
+  workerResult: EvidenceEnvelope,
+  originalPlan: any,
+  postmortem: Record<string, unknown>,
+): PostmortemLifecycleEvidenceEnvelope | null {
+  const planArtifact = getPrometheusPlanArtifact(originalPlan);
+  const task = String(planArtifact?.task || originalPlan?.task || "").trim();
+  if (!task) return null;
+
+  const dispatchContract = workerResult?.dispatchContract && typeof workerResult.dispatchContract === "object"
+    ? workerResult.dispatchContract as DispatchContractSnapshot
+    : {};
+  const replayClosure = dispatchContract?.replayClosure && typeof dispatchContract.replayClosure === "object"
+    ? dispatchContract.replayClosure
+    : {};
+  const implementationEvidence = extractImplementationEvidencePaths(workerResult?.filesTouched);
+  const verifiedClosure =
+    String(workerResult?.status || "").toLowerCase() === "done"
+    && postmortem?.taskCompleted === true
+    && dispatchContract?.doneWorkerWithVerificationReportEvidence === true
+    && replayClosure?.contractSatisfied === true
+    && dispatchContract?.closureBoundaryViolation !== true;
+  const verifiedContinuation =
+    String(workerResult?.status || "").toLowerCase() === "partial"
+    && implementationEvidence.length > 0;
+
+  let lifecycleState: PostmortemLifecycleEvidenceEnvelope["lifecycleState"] | null = null;
+  if (verifiedClosure) {
+    lifecycleState = POSTMORTEM_LIFECYCLE_STATE.CLOSED;
+  } else if (verifiedContinuation) {
+    lifecycleState = POSTMORTEM_LIFECYCLE_STATE.CONTINUING;
+  } else if (postmortem?.taskCompleted === true) {
+    lifecycleState = POSTMORTEM_LIFECYCLE_STATE.UNVERIFIED_COMPLETION_CLAIM;
+  }
+  if (!lifecycleState) return null;
+
+  return {
+    schemaVersion: 1,
+    source: "athena_postmortem",
+    task,
+    taskIdentity: normalizePlanIdentity(task),
+    continuationFamilyKey: derivePlanContinuationFamilyKey({
+      ...planArtifact,
+      ...originalPlan,
+      task,
+      targetFiles: planArtifact?.targetFiles ?? originalPlan?.targetFiles ?? originalPlan?.target_files,
+    }),
+    lifecycleState,
+    advisoryOnly: !verifiedClosure && !verifiedContinuation,
+    verified: verifiedClosure || verifiedContinuation,
+    implementationEvidence,
+    verification: {
+      verificationPassed: typeof workerResult?.verificationPassed === "boolean"
+        ? workerResult.verificationPassed
+        : null,
+      doneWorkerWithVerificationReportEvidence: dispatchContract?.doneWorkerWithVerificationReportEvidence === true,
+      doneWorkerWithCleanTreeStatusEvidence: dispatchContract?.doneWorkerWithCleanTreeStatusEvidence === true,
+      replayClosureSatisfied: replayClosure?.contractSatisfied === true,
+      closureBoundaryViolation: dispatchContract?.closureBoundaryViolation === true,
+    },
+    emittedAt: new Date().toISOString(),
   };
 }
 
@@ -3685,11 +3852,20 @@ export async function runAthenaPostmortem(
   await appendProgress(config, `[ATHENA] Postmortem starting — reviewing worker result`);
   chatLog(stateDir, athenaName, "Postmortem review starting...");
 
-  const workerName = workerResult?.roleName || workerResult?.role || "unknown";
-  const workerStatus = workerResult?.status || "unknown";
-  const workerPr = workerResult?.pr || workerResult?.prUrl || "none";
-  const workerSummary = workerResult?.summary || workerResult?.raw?.slice(0, 2000) || "no summary";
-  const filesChanged = workerResult?.filesChanged || workerResult?.filesTouched || "unknown";
+  const executionReport = workerResult?.executionReport && typeof workerResult.executionReport === "object"
+    ? workerResult.executionReport
+    : buildWorkerExecutionReportArtifact(workerResult);
+  const planArtifact = getPrometheusPlanArtifact(originalPlan);
+  const reviewArtifact = workerResult?.reviewArtifact && typeof workerResult.reviewArtifact === "object"
+    ? workerResult.reviewArtifact
+    : null;
+  const workerName = executionReport.roleName || workerResult?.roleName || workerResult?.role || "unknown";
+  const workerStatus = executionReport.status || workerResult?.status || "unknown";
+  const workerPr = executionReport.prUrl || workerResult?.pr || workerResult?.prUrl || "none";
+  const workerSummary = executionReport.summary || workerResult?.summary || workerResult?.raw?.slice(0, 2000) || "no summary";
+  const filesChanged = executionReport.filesTouched.length > 0
+    ? executionReport.filesTouched.join(", ")
+    : workerResult?.filesChanged || workerResult?.filesTouched || "unknown";
 
   // Derive task outcome for decision quality labeling.
   // Explicit outcome values (merged, reopen, rollback, timeout) map deterministically.
@@ -3714,7 +3890,7 @@ export async function runAthenaPostmortem(
   // the evidence envelope is complete AND unambiguous per isEnvelopeUnambiguous.
   const forceAi = config?.athena?.forceAiPostmortem === true;
   const envelopeCheck = isEnvelopeUnambiguous(workerResult, {
-    planRiskLevel: String(originalPlan?.riskLevel || "").toLowerCase(),
+    planRiskLevel: String(planArtifact?.riskLevel || originalPlan?.riskLevel || "").toLowerCase(),
   });
   const isCleanPass = envelopeCheck.unambiguous;
 
@@ -3735,8 +3911,10 @@ export async function runAthenaPostmortem(
     }
     const deterministicRecurrences = detectRecurrences(history, { window: 50, threshold: 2 });
     const closureMeta = buildPostmortemInterventionClosure(postmortem, deterministicRecurrences);
+    const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, postmortem);
     const enrichedPostmortem = {
       ...postmortem,
+      closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
       recurrenceCount: closureMeta.recurrenceCount,
       recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...postmortem, ...closureMeta }),
       interventionId: closureMeta.interventionId,
@@ -3756,14 +3934,31 @@ export async function runAthenaPostmortem(
     const evidenceFast = evFast
       ? (typeof evFast === "string" ? evFast : JSON.stringify(evFast)).slice(0, 500)
       : String(workerResult?.summary || "").slice(0, 500);
-    await attemptCarryForwardAutoClose(config, String(originalPlan?.task || "").trim(), evidenceFast);
+    await attemptCarryForwardAutoClose(config, String(planArtifact?.task || originalPlan?.task || "").trim(), evidenceFast);
 
     return enrichedPostmortem;
   }
 
-  const planTask = originalPlan?.task || "unknown task";
-  const planVerification = originalPlan?.verification || "no verification defined";
-  const planContext = String(originalPlan?.context || "").slice(0, 2000);
+  const planTask = planArtifact?.task || originalPlan?.task || "unknown task";
+  const planVerification = planArtifact?.verificationCommands?.length
+    ? planArtifact.verificationCommands.join("; ")
+    : originalPlan?.verification || "no verification defined";
+  const planContext = planArtifact
+    ? JSON.stringify({
+        taskIdentity: planArtifact.taskIdentity,
+        role: planArtifact.role,
+        scope: planArtifact.scope,
+        targetFiles: planArtifact.targetFiles,
+        acceptanceCriteria: planArtifact.acceptanceCriteria,
+        riskLevel: planArtifact.riskLevel,
+        continuationFamilyKey: planArtifact.continuationFamilyKey,
+        provenance: planArtifact.provenance,
+      }, null, 2).slice(0, 2000)
+    : String(originalPlan?.context || "").slice(0, 2000);
+  const executionReportContext = JSON.stringify(executionReport, null, 2).slice(0, 2000);
+  const reviewArtifactContext = reviewArtifact
+    ? JSON.stringify(reviewArtifact, null, 2).slice(0, 1500)
+    : "(no review artifact)";
 
   // Load previous postmortems for learning — migrate v0→v1 on read
   const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
@@ -3832,8 +4027,10 @@ export async function runAthenaPostmortem(
     chatLog(stateDir, athenaName, `Duplicate result: ${workerName} — AI call skipped`);
     const dupRecurrences = detectRecurrences(pastPostmortems, { window: 50, threshold: 2 });
     const dupClosureMeta = buildPostmortemInterventionClosure(dupPm, dupRecurrences);
+    const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, dupPm);
     const enrichedDupPm = {
       ...dupPm,
+      closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
       recurrenceCount: dupClosureMeta.recurrenceCount,
       recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...dupPm, ...dupClosureMeta }),
       interventionId: dupClosureMeta.interventionId,
@@ -3861,7 +4058,16 @@ Task: ${planTask}
 Expected Verification: ${planVerification}
 Context: ${planContext}
 
-## WORKER RESULT
+## PLAN ARTIFACT
+${planArtifact ? JSON.stringify(planArtifact, null, 2).slice(0, 2000) : "(no plan artifact)"}
+
+## REVIEW FINDINGS ARTIFACT
+${reviewArtifactContext}
+
+## EXECUTION REPORT ARTIFACT
+${executionReportContext}
+
+## WORKER RESULT SUMMARY
 Worker: ${workerName}
 Status: ${workerStatus}
 PR: ${workerPr}
@@ -3941,8 +4147,10 @@ ${recurrenceContext}
 
     const fallbackRecurrences = detectRecurrences(pastPostmortems, { window: 50, threshold: 2 });
     const fallbackClosureMeta = buildPostmortemInterventionClosure(degradedPostmortem, fallbackRecurrences);
+    const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, degradedPostmortem);
     const enrichedFallbackPostmortem = {
       ...degradedPostmortem,
+      closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
       recurrenceCount: fallbackClosureMeta.recurrenceCount,
       recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...degradedPostmortem, ...fallbackClosureMeta }),
       interventionId: fallbackClosureMeta.interventionId,
@@ -4064,8 +4272,10 @@ ${recurrenceContext}
   const history = Array.isArray(pastPostmortems) ? pastPostmortems : [];
   const recurrences = detectRecurrences(history, { window: 50, threshold: 2 });
   const closureMeta = buildPostmortemInterventionClosure(postmortem, recurrences);
+  const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, postmortem);
   const enrichedPostmortem: any = {
     ...postmortem,
+    closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
     recurrenceCount: closureMeta.recurrenceCount,
     recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...postmortem, ...closureMeta }),
     interventionId: closureMeta.interventionId,
@@ -4086,7 +4296,7 @@ ${recurrenceContext}
   const evidenceAi = evAi
     ? (typeof evAi === "string" ? evAi : JSON.stringify(evAi)).slice(0, 500)
     : String(workerResult?.summary || "").slice(0, 500);
-  await attemptCarryForwardAutoClose(config, String(originalPlan?.task || "").trim(), evidenceAi);
+  await attemptCarryForwardAutoClose(config, String(planArtifact?.task || originalPlan?.task || "").trim(), evidenceAi);
 
   await appendProgress(config,
     `[ATHENA] Postmortem: ${workerName} — score=${enrichedPostmortem.qualityScore}/10 deviation=${enrichedPostmortem.deviation} recommendation=${enrichedPostmortem.recommendation} decisionQualityLabel=${enrichedPostmortem.decisionQualityLabel}`
