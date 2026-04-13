@@ -68,6 +68,10 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { applyClassificationToSuccessProbability, normalizeRoleKey } from "./failure_classifier.js";
 import { readJson, writeJson } from "./fs_utils.js";
+import {
+  IMPACT_ATTRIBUTION_OUTCOME,
+  summarizeImpactAttributionWindow,
+} from "./lesson_halflife.js";
 import { normalizePlanRoleToWorkerName } from "./role_registry.js";
 
 // ── Budget unit ───────────────────────────────────────────────────────────────
@@ -90,6 +94,11 @@ export const INTERVENTION_TYPE = Object.freeze({
   TASK:      "task",
   SPLIT:     "split",
   FOLLOWUP:  "followup",
+});
+
+export const INTERVENTION_ACCOUNTING_CATEGORY = Object.freeze({
+  PLANNING: "planning_intervention",
+  RETRY: "retry_intervention",
 });
 
 // ── Optimizer status enum ─────────────────────────────────────────────────────
@@ -1262,24 +1271,83 @@ export function buildPolicyImpactByInterventionId(
   return policyImpactMap;
 }
 
+function normalizeOutcomeScoreSignal(rawOutcome: unknown): number {
+  if (Number.isFinite(Number(rawOutcome))) {
+    return Math.max(0, Math.min(1, Number(rawOutcome)));
+  }
+  if (!rawOutcome || typeof rawOutcome !== "object") return 0;
+  const row = rawOutcome as Record<string, unknown>;
+  const explicit = Number(row.outcomeScore);
+  if (Number.isFinite(explicit)) {
+    return Math.max(0, Math.min(1, explicit));
+  }
+  const metrics = [
+    Number(row.precisionOnAttempted),
+    Number(row.attemptRate),
+    Number.isFinite(Number(row.abstainRate)) ? 1 - Number(row.abstainRate) : null,
+    Number(row.laneReliability),
+  ].filter((value) => Number.isFinite(value));
+  const hardChainSampleCount = Number(row.hardChainSampleCount ?? 0);
+  const hardChainSuccessRate = Number(row.hardChainSuccessRate);
+  if (hardChainSampleCount > 0 && Number.isFinite(hardChainSuccessRate)) {
+    metrics.push(hardChainSuccessRate);
+  }
+  if (metrics.length === 0) return 0;
+  return Math.max(0, Math.min(1, Math.round((metrics.reduce((sum, value) => sum + value, 0) / metrics.length) * 1000) / 1000));
+}
+
+function normalizeOutcomeEnvelope(
+  rawOutcome: unknown,
+): {
+  outcomeScore: number;
+  noSignalOutcome: boolean;
+  outcomeStatus: string;
+  decisionMode: string | null;
+  closureMode: string | null;
+} {
+  const outcomeScore = normalizeOutcomeScoreSignal(rawOutcome);
+  const row = rawOutcome && typeof rawOutcome === "object" ? rawOutcome as Record<string, unknown> : {};
+  const closureMode = row.closureMode ? String(row.closureMode).trim().toLowerCase() : null;
+  const decisionMode = row.decisionMode ? String(row.decisionMode).trim() : null;
+  const explicitStatus = String(row.outcomeStatus || "").trim().toLowerCase();
+  const noSignalOutcome = row.noSignalOutcome === true || closureMode === "no_signal" || explicitStatus === IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL;
+  const outcomeStatus = explicitStatus
+    || (noSignalOutcome
+      ? IMPACT_ATTRIBUTION_OUTCOME.NO_SIGNAL
+      : outcomeScore >= 0.55
+        ? IMPACT_ATTRIBUTION_OUTCOME.IMPROVED
+        : "");
+  return {
+    outcomeScore,
+    noSignalOutcome,
+    outcomeStatus,
+    decisionMode,
+    closureMode,
+  };
+}
+
 export function scoreInterventionsAgainstRubric(
   interventions: any[],
   rubricByInterventionId: Record<string, Record<string, number>>,
   opts: {
-    outcomeByInterventionId?: Record<string, number>;
+    outcomeByInterventionId?: Record<string, number | Record<string, unknown>>;
     cycleId?: string;
     policyByInterventionId?: Record<string, string>;
   } = {},
 ): Array<{
   interventionId: string;
   cycleId: string;
-  policyId: string;
-  dimensionScores: Record<string, number>;
-  rubricScore: number;
-  outcomeScore: number;
-  combinedScore: number;
-  scoredAt: string;
-}> {
+    policyId: string;
+    dimensionScores: Record<string, number>;
+    rubricScore: number;
+    outcomeScore: number;
+    combinedScore: number;
+    scoredAt: string;
+    outcomeStatus: string;
+    noSignalOutcome: boolean;
+    decisionMode: string | null;
+    closureMode: string | null;
+  }> {
   if (!Array.isArray(interventions) || interventions.length === 0) return [];
   const cycleId = String(opts.cycleId || new Date().toISOString());
   const outcomeByInterventionId = opts.outcomeByInterventionId && typeof opts.outcomeByInterventionId === "object"
@@ -1297,6 +1365,10 @@ export function scoreInterventionsAgainstRubric(
     outcomeScore: number;
     combinedScore: number;
     scoredAt: string;
+    outcomeStatus: string;
+    noSignalOutcome: boolean;
+    decisionMode: string | null;
+    closureMode: string | null;
   }> = [];
   for (let i = 0; i < interventions.length; i++) {
     const intervention = interventions[i];
@@ -1310,8 +1382,8 @@ export function scoreInterventionsAgainstRubric(
     const rubricScore = values.length > 0
       ? Math.round(((values.reduce((sum, value) => sum + Math.max(0, Math.min(1, value)), 0) / values.length)) * 1000) / 1000
       : 0;
-    const rawOutcome = Number(outcomeByInterventionId[interventionId]);
-    const outcomeScore = Number.isFinite(rawOutcome) ? Math.max(0, Math.min(1, rawOutcome)) : 0;
+    const outcomeEnvelope = normalizeOutcomeEnvelope(outcomeByInterventionId[interventionId]);
+    const outcomeScore = outcomeEnvelope.outcomeScore;
     const combinedScore = Math.round(((rubricScore * 0.6) + (outcomeScore * 0.4)) * 1000) / 1000;
     rows.push({
       interventionId,
@@ -1322,9 +1394,145 @@ export function scoreInterventionsAgainstRubric(
       outcomeScore,
       combinedScore,
       scoredAt: new Date().toISOString(),
+      outcomeStatus: outcomeEnvelope.outcomeStatus,
+      noSignalOutcome: outcomeEnvelope.noSignalOutcome,
+      decisionMode: outcomeEnvelope.decisionMode,
+      closureMode: outcomeEnvelope.closureMode,
     });
   }
   return rows;
+}
+
+function classifyInterventionAccountingCategory(
+  intervention: any,
+  opts: {
+    retryInterventionIds?: string[];
+    decisionModeByInterventionId?: Record<string, string>;
+  } = {},
+): string {
+  const interventionId = String(intervention?.id || "");
+  const retryIds = new Set(
+    Array.isArray(opts.retryInterventionIds)
+      ? opts.retryInterventionIds.map((value) => String(value || ""))
+      : [],
+  );
+  const decisionMode = String(opts.decisionModeByInterventionId?.[interventionId] || "").trim().toLowerCase();
+  const title = `${String(intervention?.title || "")} ${String(intervention?.task || "")}`.toLowerCase();
+  if (
+    retryIds.has(interventionId)
+    || String(intervention?.type || "") === INTERVENTION_TYPE.FOLLOWUP
+    || decisionMode.includes("retry")
+    || title.includes("retry")
+  ) {
+    return INTERVENTION_ACCOUNTING_CATEGORY.RETRY;
+  }
+  return INTERVENTION_ACCOUNTING_CATEGORY.PLANNING;
+}
+
+export function buildInterventionImpactAttributionRecords(
+  interventions: any[],
+  rubricByInterventionId: Record<string, Record<string, number>>,
+  opts: {
+    outcomeByInterventionId?: Record<string, number | Record<string, unknown>>;
+    cycleId?: string;
+    policyByInterventionId?: Record<string, string>;
+    lineageByInterventionId?: Record<string, string>;
+    history?: any[];
+    evidenceWindowCycles?: number;
+    minCombinedScore?: number;
+    retireThreshold?: number;
+    retryInterventionIds?: string[];
+  } = {},
+): Array<{
+  interventionId: string;
+  cycleId: string;
+  policyId: string | null;
+  lineageId: string | null;
+  interventionCategory: string;
+  rubricScore: number;
+  outcomeScore: number;
+  combinedScore: number;
+  outcomeStatus: string;
+  noSignalOutcome: boolean;
+  evidenceCount: number;
+  improvedCount: number;
+  noSignalCount: number;
+  ineffectiveCount: number;
+  averageOutcomeScore: number;
+  shouldRetire: boolean;
+  reversible: boolean;
+  retirementReason: string;
+  reactivateWhen: string;
+  decisionMode: string | null;
+  closureMode: string | null;
+}> {
+  if (!Array.isArray(interventions) || interventions.length === 0) return [];
+  const scoredRows = scoreInterventionsAgainstRubric(interventions, rubricByInterventionId, opts);
+  const interventionById = new Map(interventions.map((intervention) => [String(intervention?.id || ""), intervention]));
+  const history = Array.isArray(opts.history) ? opts.history : [];
+  const evidenceWindowCycles = Math.max(1, Math.floor(Number(opts.evidenceWindowCycles) || 3));
+  const minCombinedScore = Number.isFinite(Number(opts.minCombinedScore)) ? Number(opts.minCombinedScore) : 0.55;
+  const retireThreshold = Number.isFinite(Number(opts.retireThreshold)) ? Number(opts.retireThreshold) : 0.25;
+
+  return scoredRows.map((row) => {
+    const intervention = interventionById.get(String(row.interventionId || ""));
+    const lineageId = String(
+      opts.lineageByInterventionId?.[row.interventionId]
+      || intervention?.lineageId
+      || intervention?.lineage?.lineageId
+      || "",
+    ).trim() || null;
+    const relevantHistory = history.filter((entry) => {
+      if (String(entry?.interventionId || "") === row.interventionId) return true;
+      return Boolean(lineageId) && String(entry?.lineageId || "").trim() === lineageId;
+    });
+    const summary = summarizeImpactAttributionWindow(
+      [
+        ...relevantHistory.map((entry) => ({
+          outcomeScore: entry?.outcomeScore,
+          noSignalOutcome: entry?.noSignalOutcome,
+          outcomeStatus: entry?.outcomeStatus || entry?.closureMode || entry?.decision,
+        })),
+        {
+          outcomeScore: row.outcomeScore,
+          noSignalOutcome: row.noSignalOutcome,
+          outcomeStatus: row.outcomeStatus,
+        },
+      ],
+      {
+        minEvidenceWindow: evidenceWindowCycles,
+        improvedThreshold: minCombinedScore,
+        retireThreshold,
+        reactivationEvidenceWindow: Math.min(2, evidenceWindowCycles),
+      },
+    );
+    return {
+      interventionId: row.interventionId,
+      cycleId: row.cycleId,
+      policyId: row.policyId || null,
+      lineageId,
+      interventionCategory: classifyInterventionAccountingCategory(intervention, {
+        retryInterventionIds: opts.retryInterventionIds,
+        decisionModeByInterventionId: row.decisionMode ? { [row.interventionId]: row.decisionMode } : {},
+      }),
+      rubricScore: row.rubricScore,
+      outcomeScore: row.outcomeScore,
+      combinedScore: row.combinedScore,
+      outcomeStatus: summary.outcomeStatus,
+      noSignalOutcome: row.noSignalOutcome,
+      evidenceCount: summary.evidenceCount,
+      improvedCount: summary.improvedCount,
+      noSignalCount: summary.noSignalCount,
+      ineffectiveCount: summary.ineffectiveCount,
+      averageOutcomeScore: summary.averageOutcomeScore,
+      shouldRetire: summary.shouldRetire,
+      reversible: summary.reversible,
+      retirementReason: summary.retirementReason,
+      reactivateWhen: summary.reactivateWhen,
+      decisionMode: row.decisionMode,
+      closureMode: row.closureMode,
+    };
+  });
 }
 
 // ── Prometheus plan → Intervention adapter ────────────────────────────────────

@@ -93,6 +93,7 @@ import { rewriteVerificationCommand } from "./verification_command_registry.js";
 import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
 import { buildRankedLessonShortlists } from "./lesson_halflife.js";
 import {
+  buildPrometheusPlanArtifact,
   derivePlanContinuationFamilyKey,
   extractImplementationEvidencePaths,
   normalizePlanIdentity,
@@ -3836,7 +3837,7 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
       ? deriveImplementationEvidenceFallback(taskText, targetFiles, beforeAfter.beforeState, scope)
       : [];
 
-  return {
+  const normalizedPlan = {
     ...src,
     role: normalizedRole,
     intervention_id: interventionId,
@@ -3895,6 +3896,10 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
     // estimatedExecutionTokens: approximate total tokens this task is expected
     // to consume in a worker run; used for token-capacity-aware batching.
     estimatedExecutionTokens,
+  };
+  return {
+    ...normalizedPlan,
+    planArtifact: buildPrometheusPlanArtifact(normalizedPlan),
   };
 }
 
@@ -4895,6 +4900,7 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
     informational_topics_consumed: normalizedInformationalTopicsConsumed,
     _parserBelowFloor: belowFloor,
     _parserConfidenceFloor: PARSER_CONFIDENCE_FLOOR,
+    planArtifacts: finalPlans.map((plan: any) => plan.planArtifact || buildPrometheusPlanArtifact(plan)),
     plans: finalPlans
   };
 }

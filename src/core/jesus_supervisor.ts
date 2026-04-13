@@ -42,6 +42,7 @@ import {
   extractSessionsFromCycleRecord,
   filterStaleWorkerSessions,
 } from "./cycle_analytics.js";
+import { buildJesusStrategyBriefArtifact } from "./plan_lifecycle_contract.js";
 
 // ── CI system-learning debt detection ────────────────────────────────────────
 
@@ -228,14 +229,71 @@ const CAPABILITY_SOURCE_SIGNATURES: Readonly<Record<string, string[]>> = Object.
   "jesus-findings-to-plan-requirements":  ["mandatory_tasks", "buildmandatorytaskspromptsection", "extractmandatoryhealthauditfindings"],
   "athena-gate-pre-check":                ["gateblockrisk"],
   "athena-gate-feasibility-check":        ["gateblockrisk"],
+  "athena-correction-fidelity-tracking":  ["aretrackedfieldvaluesequal", "legacycorrections", "repairedfields"],
   "prometheus-plan-structural-lint":      ["validateallplans", "plan_contract_validator"],
   "pre-athena-plan-structural-validation":["validateallplans", "plan_contract_validator"],
   "prometheus-token-budget-floor":        ["invalid_token_budget", "minimum token budgets", "token floor"],
   "ci-failure-log-injection":             ["hydratedispatchcontextwithcievidence", "ci failure evidence", "injectcifailurecontextifmissing"],
+  "governance-gate-token-enforcement":    ["resolveathenacorrectiondispatchblockreason", "athena_correction_token", "rolling_yield_throttle", "autonomy_execution_gate_not_ready"],
   "packet-granularity-governor":          ["max_actionable_steps_per_packet", "autosplitpacket"],
   "output-fidelity-gate":                 ["detectprocessthoughtmarkers", "output-fidelity-gate"],
+  "pre-wave-diversity-validation":        ["evaluatepredispatchgovernancegate", "lane_diversity_gate_blocked", "pre-dispatch governance gate"],
   "specialization-admission-control":     ["specialization_admission", "laneadmissiongate"],
 });
+
+type CapabilityExecutionEvidenceMatcher = Readonly<{
+  capability: string;
+  contextIncludes?: readonly string[];
+}>;
+
+const CAPABILITY_EXECUTION_EVIDENCE: Readonly<Record<string, readonly CapabilityExecutionEvidenceMatcher[]>> = Object.freeze({
+  "athena-correction-fidelity-tracking": [
+    { capability: "athena-review-entry" },
+    { capability: "athena-review-exit" },
+  ],
+  "governance-gate-token-enforcement": [
+    { capability: "athena-review-exit" },
+    { capability: "dispatch-block-reason-reporting", contextIncludes: ["athena_correction_token"] },
+    { capability: "governance-gate-evaluation" },
+  ],
+  "pre-wave-diversity-validation": [
+    { capability: "dispatch-block-reason-reporting", contextIncludes: ["pre_dispatch_gate", "lane_diversity_gate_blocked"] },
+    { capability: "governance-gate-evaluation" },
+  ],
+});
+
+function getCapabilityExecutionEvidenceMatchers(capability: string): readonly CapabilityExecutionEvidenceMatcher[] {
+  return CAPABILITY_EXECUTION_EVIDENCE[capability] ?? [{ capability }];
+}
+
+function getCapabilityExecutionEvidenceTimestamp(
+  capabilityExecutionSummary: { recentTraces?: Array<{ capability?: string; observedAt?: string; context?: string }> } | null | undefined,
+  capability: string,
+): string | null {
+  const traces = Array.isArray(capabilityExecutionSummary?.recentTraces)
+    ? capabilityExecutionSummary.recentTraces
+    : [];
+  const matchers = getCapabilityExecutionEvidenceMatchers(capability);
+  let latestTimestamp: number | null = null;
+
+  for (const trace of traces) {
+    const traceCapability = String(trace?.capability || "").trim().toLowerCase();
+    if (!traceCapability) continue;
+    const traceContext = String(trace?.context || "").toLowerCase();
+    const matched = matchers.some((matcher) => {
+      if (traceCapability !== matcher.capability) return false;
+      return !matcher.contextIncludes || matcher.contextIncludes.every((snippet) => traceContext.includes(snippet));
+    });
+    if (!matched) continue;
+    const observedAt = Date.parse(String(trace?.observedAt || ""));
+    if (!Number.isFinite(observedAt)) continue;
+    if (latestTimestamp == null || observedAt > latestTimestamp) {
+      latestTimestamp = observedAt;
+    }
+  }
+
+  return latestTimestamp == null ? null : new Date(latestTimestamp).toISOString();
+}
 
 /**
  * Return true only when ALL required source signatures for a known capability
@@ -252,7 +310,7 @@ const CAPABILITY_SOURCE_SIGNATURES: Readonly<Record<string, string[]>> = Object.
  */
 function isCapabilityGapVerifiedPresentAndExecuted(
   sourceIndex: Set<string>,
-  executionTraces: Set<string>,
+  capabilityExecutionSummary: { recentTraces?: Array<{ capability?: string; observedAt?: string; context?: string }> } | null | undefined,
   gap: { capability?: unknown },
 ): boolean {
   if (!sourceIndex || sourceIndex.size === 0) return false;
@@ -260,7 +318,7 @@ function isCapabilityGapVerifiedPresentAndExecuted(
   const signatures = CAPABILITY_SOURCE_SIGNATURES[capability];
   if (!signatures || signatures.length === 0) return false;
   const sourcePresent = signatures.every((sig) => sourceIndex.has(sig));
-  const executionPresent = executionTraces.has(capability);
+  const executionPresent = getCapabilityExecutionEvidenceTimestamp(capabilityExecutionSummary, capability) != null;
   return sourcePresent && executionPresent;
 }
 
@@ -422,7 +480,6 @@ export async function runSystemHealthAudit(
     const capGaps = Array.isArray(km.capabilityGaps) ? km.capabilityGaps.slice(-5) : [];
     const sourceIndex = await loadSourceEvidenceIndex(process.cwd());
     const capabilityExecutionSummary = await loadCapabilityExecutionSummary(config);
-    const executionTraces = new Set(capabilityExecutionSummary.observedCapabilities);
 
     if (criticalLessons.length > 0) {
       // Annotate with the live CI conclusion so hasCiSystemLearningDebt (and downstream
@@ -441,9 +498,9 @@ export async function runSystemHealthAudit(
     if (capGaps.length > 0) {
       for (const gap of capGaps.slice(0, 3)) {
         const originalSeverity = String(gap?.severity || "warning").toLowerCase();
-        const verifiedPresent = isCapabilityGapVerifiedPresentAndExecuted(sourceIndex, executionTraces, gap);
+        const verifiedPresent = isCapabilityGapVerifiedPresentAndExecuted(sourceIndex, capabilityExecutionSummary, gap);
         const shouldDowngrade =
-          verifiedPresent && (originalSeverity === "critical" || originalSeverity === "warning");
+          verifiedPresent && (originalSeverity === "critical" || originalSeverity === "warning" || originalSeverity === "important");
         findings.push({
           area: "capability-gap",
           severity: shouldDowngrade ? "info" : (gap.severity || "warning"),
@@ -683,6 +740,14 @@ export function validateExpectedOutcomeMeasurable(expectedOutcome: Record<string
   if (typeof expectedOutcome.expectedWorkItemCount !== "number") return false;
 
   return true;
+}
+
+export function buildDirectiveStrategyBrief(
+  directive: Record<string, unknown>,
+  expectedOutcome: Record<string, unknown>,
+  opts: { repo?: string | null; emittedAt?: string } = {},
+) {
+  return buildJesusStrategyBriefArtifact(directive, expectedOutcome, opts);
 }
 
 // ── Main Jesus Cycle ─────────────────────────────────────────────────────────
@@ -1007,11 +1072,10 @@ export async function runJesusCycle(config) {
       // Persist capability execution status alongside findings so self-improvement
       // can distinguish "code present in source" from "actually invoked at runtime".
       const capabilityExecutionSummary = await loadCapabilityExecutionSummary(config);
-      const tracedCapabilities = new Set(capabilityExecutionSummary.observedCapabilities);
       const capabilityInvocationStatus = Object.keys(CAPABILITY_SOURCE_SIGNATURES).map(id => ({
         capability: id,
-        status: tracedCapabilities.has(id) ? "invoked" : "absent",
-        lastInvokedAt: capabilityExecutionSummary.lastInvokedAtByCapability[id] ?? null,
+        status: getCapabilityExecutionEvidenceTimestamp(capabilityExecutionSummary, id) ? "invoked" : "absent",
+        lastInvokedAt: getCapabilityExecutionEvidenceTimestamp(capabilityExecutionSummary, id),
       }));
       healthFindingsPayload.capabilityExecutionSummary = capabilityExecutionSummary;
       healthFindingsPayload.capabilityExecutionTraces = capabilityExecutionSummary.recentTraces;
@@ -1536,6 +1600,17 @@ ${workersList}`;
       });
     } catch { /* non-fatal */ }
     const needsPrometheus = prometheusAgeHours > 6;
+    const fallbackStrategyBrief = buildDirectiveStrategyBrief({
+      decision: "tactical",
+      systemHealth: "unknown",
+      wakeAthena: true,
+      callPrometheus: needsPrometheus,
+      briefForPrometheus: `Check GitHub issues and activate appropriate workers. Target repo: ${config.env?.targetRepo}`,
+      priorities: [],
+      workerSuggestions: [],
+    }, expectedOutcome as unknown as Record<string, unknown>, {
+      repo: config.env?.targetRepo || null,
+    });
     return {
       wait: false,
       wakeAthena: true,
@@ -1550,11 +1625,15 @@ ${workersList}`;
       priorities: [],
       workerSuggestions: [],
       _directivePayloadGaps: payloadValidation.gaps,
+      strategyBrief: fallbackStrategyBrief,
     };
   }
 
   const ciFastlaneRequired = hasCiSystemLearningDebt(healthFindings);
 
+  const strategyBrief = buildDirectiveStrategyBrief(d as Record<string, unknown>, expectedOutcome as unknown as Record<string, unknown>, {
+    repo: config.env?.targetRepo || null,
+  });
   const directive = {
     ...d,
     briefForPrometheus: sanitizeDirectiveFieldForPersistence(String((d as any).briefForPrometheus || "")),
@@ -1570,6 +1649,7 @@ ${workersList}`;
     },
     capacityDelta,
     expectedOutcome,
+    strategyBrief,
     ciFastlaneRequired,
   };
 

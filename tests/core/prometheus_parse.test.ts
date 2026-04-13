@@ -118,6 +118,7 @@ import {
   NON_SPECIFIC_VERIFICATION_CANONICAL_FIXTURES,
   type WaveTaskObject,
 } from "../../src/core/plan_contract_validator.js";
+import { auditReplayPolicySignals } from "../../src/core/parser_replay_harness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = path.join(__dirname, "..", "fixtures");
@@ -6856,6 +6857,23 @@ describe("validatePlanContract — verification prose handling", () => {
 
     assert.equal(result.violations.some((violation) => violation.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND), false);
   });
+
+  it("still flags forbidden_command when the executable verification fragment itself is forbidden", () => {
+    const result = validatePlanContract({
+      task: "Replace globbed node --test invocation",
+      role: "quality-worker",
+      wave: 1,
+      verification: "node --test tests/**/*.test.js — test: Replace this with an exact-target command.",
+      verification_commands: ["node --test tests/**/*.test.js"],
+      acceptance_criteria: ["Verification command is portable on Windows"],
+      dependencies: [],
+      capacityDelta: 0.33,
+      requestROI: 2.6,
+      leverage_rank: ["architecture", "task-quality"],
+    });
+
+    assert.equal(result.violations.some((violation) => violation.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND), true);
+  });
 });
 
 // ── RolePlanCompletenessError — fail-closed completeness gate ─────────────────
@@ -7483,6 +7501,80 @@ describe("high-uncertainty candidate planning wiring", () => {
 
   it("keeps the default candidate generation section aligned with the JSON contract", () => {
     assert.match(CANDIDATE_GENERATION_SECTION.content, /candidateSets/i);
+  });
+
+  it("emits candidate selection metadata that satisfies the replay audit contract", () => {
+    const rawParsed = {
+      candidateSets: [
+        {
+          label: "candidate-a",
+          plans: [
+            {
+              task: "Weakened candidate",
+              role: "evolution-worker",
+              wave: 1,
+              target_files: ["src/core/prometheus.ts"],
+              acceptance_criteria: ["one criterion only"],
+              verification: "manual later",
+            },
+          ],
+        },
+        {
+          label: "candidate-b",
+          plans: [
+            {
+              task: "Replay-safe candidate selection",
+              role: "quality-worker",
+              wave: 1,
+              scope: "src/core/prometheus.ts",
+              target_files: ["src/core/prometheus.ts", "tests/core/prometheus_parse.test.ts"],
+              acceptance_criteria: [
+                "candidate selection remains dispatchable",
+                "npm test -- tests/core/prometheus_parse.test.ts passes",
+              ],
+              verification: "npm test -- tests/core/prometheus_parse.test.ts",
+              capacityDelta: 0.2,
+              requestROI: 1.4,
+              leverage_rank: ["task-quality", "worker-specialization"],
+              before_state: "single candidate path",
+              after_state: "bounded candidate selection persisted for replay",
+              riskLevel: "low",
+            },
+          ],
+        },
+      ],
+      generatedAt: "2026-04-13T00:00:00.000Z",
+      projectHealth: "needs-work",
+      requestBudget: { estimatedPremiumRequestsTotal: 2, errorMarginPercent: 15, hardCapTotal: 3 },
+      keyFindings: "Candidate planning must remain auditable by replay harnesses.",
+      strategicNarrative: "Replay harnesses should reject malformed candidate selection metadata.",
+    };
+
+    const selection = selectPrometheusCandidatePlanSet(rawParsed, { raw: "" }, {
+      diagnosticsFreshnessAdmission: {
+        allFresh: true,
+        staleSources: [],
+        freshnessReasons: [],
+      },
+    });
+    const audit = auditReplayPolicySignals({
+      expectedDomains: ["candidate_planning"],
+      candidatePlanning: {
+        enabled: true,
+        candidateCount: selection.candidateSets.length,
+        selectedIndex: selection.selectedIndex,
+        selectedLabel: selection.selectedLabel,
+        score: selection.score,
+        tieBreakUsed: selection.tieBreakUsed,
+        reason: selection.reason,
+        summaries: selection.candidateSummaries,
+        failClosed: selection.selectedIndex < 0,
+      },
+    });
+
+    assert.equal(selection.usedSelection, true);
+    assert.equal(audit.passed, true);
+    assert.equal(audit.regressionCount, 0);
   });
 });
 
