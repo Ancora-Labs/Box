@@ -2656,16 +2656,6 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   // Reuse the exact dispatch lineage key so analytics can deterministically join
   // routing decisions ↔ premium usage ↔ lineage graph outcomes.
   const _premiumLineageId: string | null = _dispatchLineageId;
-  logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
-    outcome: parsed.status,
-    taskId: instruction.taskId || instruction.task || null,
-    lineageId: _premiumLineageId,
-  });
-
-  // ── Outcome mapping: tie memory-hit record to final worker outcome ─────────
-  // Updates the pre-dispatch hit record (outcome=null) with the actual result so
-  // cycle analytics can compute memory ROI (hitRate × successRateOnHits).
-  updateMemoryHitOutcome(config, _memoryHitTaskId || null, parsed.status);
 
   // ── Rework budget — pre-computed so both gates share the same values ─────────
   // Declared here (before the artifact gate) so the artifact gate can decide
@@ -2845,8 +2835,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       writeFileSync(auditPath, JSON.stringify(audit, null, 2), "utf8");
     } catch { /* non-critical */ }
 
-      const reworkDecision = decideRework(validationResult, instruction.task, currentAttempt, maxReworkAttempts);
-      const telemetryOutcome = resolvePostVerificationTelemetryOutcome(parsed.status, reworkDecision);
+    const reworkDecision = decideRework(validationResult, instruction.task, currentAttempt, maxReworkAttempts);
+    const telemetryOutcome = resolvePostVerificationTelemetryOutcome(parsed.status, reworkDecision);
 
     if (reworkDecision.shouldEscalate) {
       // Max rework attempts exhausted — block the task instead of looping
@@ -2880,7 +2870,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
         outcome: telemetryOutcome,
         taskId: instruction.taskId || instruction.task || null,
-        lineageId: _dispatchLineageId,
+        lineageId: _premiumLineageId,
       });
       updateMemoryHitOutcome(config, _memoryHitTaskId || null, telemetryOutcome);
       try {
@@ -2904,7 +2894,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs, {
     outcome: finalTelemetryOutcome,
     taskId: instruction.taskId || instruction.task || null,
-    lineageId: _dispatchLineageId,
+    lineageId: _premiumLineageId,
   });
   updateMemoryHitOutcome(config, _memoryHitTaskId || null, finalTelemetryOutcome);
 

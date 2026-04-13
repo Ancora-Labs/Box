@@ -667,7 +667,7 @@ describe("worker_runner verification closure pipeline", () => {
       } as any);
 
       assert.equal(athenaResult.reviewStatus, POSTMORTEM_REVIEW_STATUS.DEGRADED_REVIEW_REQUIRED);
-      assert.equal(athenaResult.closureEvidenceEnvelope == null, true);
+      assert.ok(athenaResult.closureEvidenceEnvelope == null);
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
