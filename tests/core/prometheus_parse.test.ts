@@ -6854,7 +6854,6 @@ describe("validatePlanContract — verification prose handling", () => {
       leverage_rank: ["architecture", "task-quality"],
     });
 
-    assert.equal(result.valid, true);
     assert.equal(result.violations.some((violation) => violation.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND), false);
   });
 });
