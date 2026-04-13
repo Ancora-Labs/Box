@@ -7415,6 +7415,57 @@ describe("high-uncertainty candidate planning wiring", () => {
     ));
   });
 
+  it("fails closed when every candidate set is blocked by contract or freshness gates", () => {
+    const rawParsed = {
+      candidateSets: [
+        {
+          label: "blocked-a",
+          plans: [
+            {
+              task: "Already implemented parser hardening task",
+              role: "evolution-worker",
+              wave: 1,
+              target_files: ["src/core/prometheus.ts"],
+              acceptance_criteria: ["No-op packet should be rejected"],
+              verification: "npm test -- tests/core/prometheus_parse.test.ts",
+              implementationStatus: "implemented_correctly",
+              capacityDelta: 0,
+              requestROI: 1,
+            },
+          ],
+        },
+        {
+          label: "blocked-b",
+          plans: [
+            {
+              task: "Already implemented diagnostics task",
+              role: "evolution-worker",
+              wave: 1,
+              target_files: ["src/core/prometheus.ts"],
+              acceptance_criteria: ["Duplicate work should be filtered"],
+              verification: "npm test -- tests/core/prometheus_parse.test.ts",
+              implementationStatus: "implemented_correctly",
+              capacityDelta: 0,
+              requestROI: 1,
+            },
+          ],
+        },
+      ],
+      projectHealth: "needs-work",
+    };
+    const selection = selectPrometheusCandidatePlanSet(rawParsed, { raw: "" }, {
+      diagnosticsFreshnessAdmission: {
+        allFresh: true,
+        staleSources: [],
+        freshnessReasons: [],
+      },
+    });
+
+    assert.equal(selection.usedSelection, false);
+    assert.deepEqual(selection.selectedPlans, []);
+    assert.equal(selection.reason, "all_candidates_blocked");
+  });
+
   it("builds an explicit candidateSets JSON contract for the prompt", () => {
     const section = buildCandidateGenerationSection({ minCandidates: 2, maxCandidates: 3 });
     assert.match(section.content, /candidateSets/i);
