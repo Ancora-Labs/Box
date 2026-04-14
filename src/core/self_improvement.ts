@@ -42,6 +42,11 @@ import {
   loadLedgerMeta,
   prioritizeStaleDebts,
 } from "./carry_forward_ledger.js";
+import {
+  hasFreshCiFailureEvidence,
+  hasUnresolvedCiFollowUpSignal,
+  isCiBreakageText,
+} from "./plan_contract_validator.js";
 import { buildRankedLessonShortlists } from "./lesson_halflife.js";
 import {
   classifyMemoryTrust,
@@ -375,6 +380,72 @@ function getKnowledgeMemoryAllLessons(km: any): any[] {
     ];
   }
   return Array.isArray(km?.lessons) ? km.lessons : [];
+}
+
+type CiUrgencyContext = {
+  allowHistoricalPressure: boolean;
+  filteredFindings: any[];
+  note: string | null;
+};
+
+export async function buildCiUrgencyContext(config, stateDir: string): Promise<CiUrgencyContext> {
+  let healthAuditPayload: Record<string, unknown> | null = null;
+  let findings: any[] = [];
+  try {
+    const raw = await fs.readFile(path.join(stateDir, "health_audit_findings.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      healthAuditPayload = parsed as Record<string, unknown>;
+      findings = Array.isArray((parsed as Record<string, unknown>).findings)
+        ? (parsed as Record<string, unknown>).findings as any[]
+        : [];
+    }
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      warn(`[self-improvement] failed to load health_audit_findings.json: ${String(err?.message || err)}`);
+    }
+  }
+
+  const freshCiFailureEvidence = findings.some((entry) => hasFreshCiFailureEvidence(healthAuditPayload, entry));
+
+  let unresolvedCiFollowUp = false;
+  try {
+    const { entries: debtLedger } = await loadLedgerMeta(config);
+    unresolvedCiFollowUp = Array.isArray(debtLedger) && debtLedger.some((entry) => hasUnresolvedCiFollowUpSignal(entry));
+  } catch (err) {
+    warn(`[self-improvement] failed to inspect carry-forward ledger for CI follow-up pressure: ${String(err?.message || err)}`);
+  }
+
+  if (!unresolvedCiFollowUp) {
+    try {
+      const rawPostmortems = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+      if (rawPostmortems !== null) {
+        const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+        if (migrated.ok) {
+          unresolvedCiFollowUp = extractPostmortemEntries(migrated.data).some((entry) => hasUnresolvedCiFollowUpSignal(entry));
+        }
+      }
+    } catch (err) {
+      warn(`[self-improvement] failed to inspect Athena postmortems for CI follow-up pressure: ${String(err?.message || err)}`);
+    }
+  }
+
+  const allowHistoricalPressure = freshCiFailureEvidence || unresolvedCiFollowUp;
+  const filteredFindings = findings.filter((entry) => {
+    const findingText = `${String(entry?.finding || "")}\n${String(entry?.remediation || "")}`;
+    if (!isCiBreakageText(findingText)) return true;
+    return hasFreshCiFailureEvidence(healthAuditPayload, entry);
+  });
+
+  return {
+    allowHistoricalPressure,
+    filteredFindings,
+    note: allowHistoricalPressure
+      ? (freshCiFailureEvidence
+          ? "CI urgency remains elevated because fresh CI failure evidence is present in the latest health audit."
+          : "CI urgency remains elevated because a CI-related follow-up is still unresolved, even though fresh CI failure evidence is absent.")
+      : "Historical CI-breakage lessons are background context only: no fresh CI failure evidence was found and no CI follow-up remains unresolved.",
+  };
 }
 
 export function buildSelfImprovementStabilitySnapshot(cycleHealth: any, knowledgeMemory: any, postmortems: unknown[]): any {
@@ -1131,7 +1202,13 @@ export async function collectCycleOutcomes(config) {
 async function analyzeWithAI(config, outcomes, knowledgeMemory) {
   const command = config.env?.copilotCliCommand || "copilot";
   const requestedBy = String(config?.runtime?.selfImprovementRequestedBy || "self-improvement");
-  const trustedLessons = filterMemoryEntriesByTrust(getKnowledgeMemoryAllLessons(knowledgeMemory), {
+  const stateDir = config.paths?.stateDir || "state";
+  const ciUrgency = await buildCiUrgencyContext(config, stateDir);
+  const historicalLessons = getKnowledgeMemoryAllLessons(knowledgeMemory);
+  const promptLessons = ciUrgency.allowHistoricalPressure
+    ? historicalLessons
+    : historicalLessons.filter((entry) => !isCiBreakageText(String(entry?.lesson || entry?.lessonLearned || "")));
+  const trustedLessons = filterMemoryEntriesByTrust(promptLessons, {
     includeLowTrust: config?.runtime?.selfImprovementIncludeLowTrustMemory === true,
     privilegedCaller: isPrivilegedMemoryRequester(requestedBy),
   });
@@ -1148,20 +1225,20 @@ async function analyzeWithAI(config, outcomes, knowledgeMemory) {
       return `### ${group.label}\n${lines.join("\n")}`;
     })
     .join("\n");
-  const previousGaps = (knowledgeMemory.capabilityGaps || []).slice(-5)
+  const previousGaps = (knowledgeMemory.capabilityGaps || [])
+    .filter((gap) => ciUrgency.allowHistoricalPressure || !isCiBreakageText(`${String(gap?.gap || "")}\n${String(gap?.proposedFix || "")}`))
+    .slice(-5)
     .map(g => `- [${g.severity}] ${g.gap} → ${g.proposedFix || "no fix proposed"}`).join("\n") || "None yet.";
 
   // Load health audit findings if available
-  const stateDir = config.paths?.stateDir || "state";
   let healthAuditSection = "";
-  try {
-    const auditData = JSON.parse(
-      await fs.readFile(path.join(stateDir, "health_audit_findings.json"), "utf8")
-    );
-    if (Array.isArray(auditData?.findings) && auditData.findings.length > 0) {
-      healthAuditSection = `\n## JESUS HEALTH AUDIT FINDINGS (hierarchical detection)\n${JSON.stringify(auditData.findings, null, 2)}\nAnalyze these findings — they represent issues that WORKERS and ATHENA missed but JESUS caught.\nFor each finding, determine if the system is MISSING A CAPABILITY that caused the gap.\n`;
-    }
-  } catch { /* no audit data */ }
+  if (ciUrgency.filteredFindings.length > 0 || ciUrgency.note) {
+    const findingsBlock = ciUrgency.filteredFindings.length > 0
+      ? JSON.stringify(ciUrgency.filteredFindings, null, 2)
+      : "[]";
+    const ciUrgencyNote = ciUrgency.note ? `\nCI urgency note: ${ciUrgency.note}` : "";
+    healthAuditSection = `\n## JESUS HEALTH AUDIT FINDINGS (hierarchical detection)\n${findingsBlock}\nAnalyze these findings — they represent issues that WORKERS and ATHENA missed but JESUS caught.\nFor each finding, determine if the system is MISSING A CAPABILITY that caused the gap.${ciUrgencyNote}\n`;
+  }
 
   const prompt = `You are the BOX self-improvement analyzer. Your job is to analyze the results of a completed
 automation cycle and produce actionable improvements for the next cycle.

@@ -24,6 +24,8 @@ import fs from "node:fs/promises";
 import {
   GOVERNANCE_CONTRACT_VERSION,
   GOVERNANCE_STARTUP_EXIT_CODE,
+  GOVERNANCE_DISPATCH_BLOCK_REASON,
+  GOVERNANCE_SIGNAL_REGISTRY,
   RISK_LEVEL,
   HIGH_RISK_CHANGE_TYPE,
   HIGH_RISK_SCORE_THRESHOLD,
@@ -58,6 +60,8 @@ describe("governance_contract — module exports", () => {
     assert.equal(typeof RISK_LEVEL, "object");
     assert.equal(typeof HIGH_RISK_CHANGE_TYPE, "object");
     assert.equal(typeof GOVERNANCE_ERROR_CODE, "object");
+    assert.equal(typeof GOVERNANCE_DISPATCH_BLOCK_REASON, "object");
+    assert.equal(typeof GOVERNANCE_SIGNAL_REGISTRY, "object");
     assert.equal(typeof APPROVAL_EVIDENCE_REQUIRED_FIELDS, "object");
     assert.equal(typeof APPROVAL_EVIDENCE_APPROVAL_REQUIRED_FIELDS, "object");
 
@@ -77,6 +81,27 @@ describe("governance_contract — module exports", () => {
       policy.governanceContract?.version,
       GOVERNANCE_CONTRACT_VERSION,
       "policy.json governanceContract.version must match GOVERNANCE_CONTRACT_VERSION"
+    );
+  });
+});
+
+describe("GOVERNANCE_SIGNAL_REGISTRY dispatchBlockReason contract", () => {
+  it("uses canonical outward block reasons for lane diversity while preserving rolling yield and autonomy", () => {
+    assert.equal(
+      GOVERNANCE_SIGNAL_REGISTRY.lane_diversity_gate_blocked.dispatchBlockReason,
+      GOVERNANCE_DISPATCH_BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED,
+    );
+    assert.equal(
+      GOVERNANCE_SIGNAL_REGISTRY.lane_diversity_insufficient.dispatchBlockReason,
+      GOVERNANCE_DISPATCH_BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED,
+    );
+    assert.equal(
+      GOVERNANCE_SIGNAL_REGISTRY.rolling_yield_throttle.dispatchBlockReason,
+      GOVERNANCE_DISPATCH_BLOCK_REASON.ROLLING_YIELD_THROTTLE,
+    );
+    assert.equal(
+      GOVERNANCE_SIGNAL_REGISTRY.autonomy_execution_gate_not_ready.dispatchBlockReason,
+      GOVERNANCE_DISPATCH_BLOCK_REASON.AUTONOMY_EXECUTION_GATE_NOT_READY,
     );
   });
 });

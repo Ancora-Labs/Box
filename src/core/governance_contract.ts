@@ -152,6 +152,26 @@ export const AGENT_CONTRACT_GOVERNANCE_REASON_CODE = Object.freeze({
 
 export const AUTONOMY_EXECUTION_GATE_REASON_CODE = "autonomy_execution_gate_not_ready" as const;
 
+export const GOVERNANCE_DISPATCH_BLOCK_REASON = Object.freeze({
+  BUDGET_EXHAUSTED: "budget_exhausted",
+  GUARDRAIL_PAUSE_WORKERS_ACTIVE: "guardrail_pause_workers_active",
+  GUARDRAIL_FORCE_CHECKPOINT_ACTIVE: "force_checkpoint_validation_active",
+  GOVERNANCE_FREEZE_ACTIVE: "governance_freeze_active",
+  AUTONOMY_EXECUTION_GATE_NOT_READY: AUTONOMY_EXECUTION_GATE_REASON_CODE,
+  LINEAGE_CYCLE_DETECTED: "lineage_cycle_detected",
+  GOVERNANCE_CANARY_BREACH: "governance_canary_breach",
+  CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION: "cloud_agent_governance_policy_violation",
+  CRITICAL_DEBT_OVERDUE: "critical_debt_overdue",
+  MANDATORY_DRIFT_DEBT_UNRESOLVED: "mandatory_drift_debt_unresolved",
+  PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",
+  CROSS_CYCLE_PREREQUISITE_UNMET: "cross_cycle_prerequisite_unmet",
+  DEPENDENCY_READINESS_INCOMPLETE: "dependency_readiness_incomplete",
+  LANE_DIVERSITY_GATE_BLOCKED: "lane_diversity_insufficient",
+  ROLLING_YIELD_THROTTLE: "rolling_yield_throttle",
+  SPECIALIZATION_ADMISSION_GATE: "specialization_admission_gate_failed",
+  OVERSIZED_PACKET: "packet_exceeds_actionable_steps_cap",
+} as const);
+
 export function resolveAutonomyExecutionGateBlockReason(autonomyBandStatus: unknown): {
   blocked: boolean;
   reasonCode: typeof AUTONOMY_EXECUTION_GATE_REASON_CODE | null;
@@ -182,87 +202,92 @@ export function resolveAutonomyExecutionGateBlockReason(autonomyBandStatus: unkn
 export const GOVERNANCE_SIGNAL_REGISTRY = Object.freeze({
   budget_exhausted: {
     gateKey: "BUDGET_ELIGIBILITY",
-    dispatchBlockReason: "budget_exhausted",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.BUDGET_EXHAUSTED,
     blocking: true,
   },
   guardrail_pause_workers_active: {
     gateKey: "GUARDRAIL_PAUSE",
-    dispatchBlockReason: "guardrail_pause_workers_active",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.GUARDRAIL_PAUSE_WORKERS_ACTIVE,
     blocking: true,
   },
   force_checkpoint_validation_active: {
     gateKey: "FORCE_CHECKPOINT",
-    dispatchBlockReason: "force_checkpoint_validation_active",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.GUARDRAIL_FORCE_CHECKPOINT_ACTIVE,
     blocking: true,
   },
   autonomy_execution_gate_not_ready: {
     gateKey: "AUTONOMY_EXECUTION",
-    dispatchBlockReason: AUTONOMY_EXECUTION_GATE_REASON_CODE,
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.AUTONOMY_EXECUTION_GATE_NOT_READY,
     blocking: true,
   },
   governance_freeze_active: {
     gateKey: "GOVERNANCE_FREEZE",
-    dispatchBlockReason: "governance_freeze_active",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE,
     blocking: true,
   },
   cloud_agent_governance_policy_violation: {
     gateKey: "CLOUD_AGENT_GOVERNANCE",
-    dispatchBlockReason: "cloud_agent_governance_policy_violation",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION,
     blocking: true,
   },
   lineage_cycle_detected: {
     gateKey: "LINEAGE_CYCLE",
-    dispatchBlockReason: "lineage_cycle_detected",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.LINEAGE_CYCLE_DETECTED,
     blocking: true,
   },
   governance_canary_breach: {
     gateKey: "GOVERNANCE_CANARY",
-    dispatchBlockReason: "governance_canary_breach",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.GOVERNANCE_CANARY_BREACH,
     blocking: true,
   },
   critical_debt_overdue: {
     gateKey: "CARRY_FORWARD_DEBT",
-    dispatchBlockReason: "critical_debt_overdue",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.CRITICAL_DEBT_OVERDUE,
     blocking: true,
   },
   mandatory_drift_debt_unresolved: {
     gateKey: "MANDATORY_DRIFT_DEBT",
-    dispatchBlockReason: "mandatory_drift_debt_unresolved",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED,
     blocking: true,
   },
   plan_evidence_coupling_invalid: {
     gateKey: "PLAN_EVIDENCE_COUPLING",
-    dispatchBlockReason: "plan_evidence_coupling_invalid",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID,
     blocking: true,
   },
   cross_cycle_prerequisite_unmet: {
     gateKey: "CROSS_CYCLE_PREREQUISITE",
-    dispatchBlockReason: "cross_cycle_prerequisite_unmet",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.CROSS_CYCLE_PREREQUISITE_UNMET,
     blocking: true,
   },
   dependency_readiness_incomplete: {
     gateKey: "DEPENDENCY_READINESS",
-    dispatchBlockReason: "dependency_readiness_incomplete",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.DEPENDENCY_READINESS_INCOMPLETE,
     blocking: true,
   },
   lane_diversity_gate_blocked: {
     gateKey: "LANE_DIVERSITY",
-    dispatchBlockReason: "lane_diversity_gate_blocked",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED,
+    blocking: true,
+  },
+  lane_diversity_insufficient: {
+    gateKey: "LANE_DIVERSITY",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED,
     blocking: true,
   },
   rolling_yield_throttle: {
     gateKey: "ROLLING_COMPLETION_YIELD",
-    dispatchBlockReason: "rolling_yield_throttle",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.ROLLING_YIELD_THROTTLE,
     blocking: true,
   },
   specialization_admission_gate_failed: {
     gateKey: "SPECIALIZATION_ADMISSION",
-    dispatchBlockReason: "specialization_admission_gate_failed",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.SPECIALIZATION_ADMISSION_GATE,
     blocking: true,
   },
   packet_exceeds_actionable_steps_cap: {
     gateKey: "OVERSIZED_PACKET",
-    dispatchBlockReason: "packet_exceeds_actionable_steps_cap",
+    dispatchBlockReason: GOVERNANCE_DISPATCH_BLOCK_REASON.OVERSIZED_PACKET,
     blocking: true,
   },
 } as const);

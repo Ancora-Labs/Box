@@ -2205,10 +2205,32 @@ export function updateTopicKnowledge(
   return memory;
 }
 
+function planProvidesVerifiedTopicClosureEvidence(plan: any): boolean {
+  const implementationStatus = String(plan?.implementationStatus || "").trim().toLowerCase();
+  const implementationEvidence = extractImplementationEvidencePaths(plan?.implementationEvidence);
+  if (implementationStatus === "implemented_correctly" && implementationEvidence.length > 0) {
+    return true;
+  }
+
+  const closureEnvelope = plan?.closureEvidenceEnvelope;
+  if (closureEnvelope && typeof closureEnvelope === "object") {
+    const lifecycleState = String((closureEnvelope as Record<string, unknown>).lifecycleState || "").trim().toLowerCase();
+    if (lifecycleState === POSTMORTEM_LIFECYCLE_STATE.CLOSED && (closureEnvelope as Record<string, unknown>).verified === true) {
+      return true;
+    }
+  }
+
+  const lifecycleState = String(plan?._lifecycleState || plan?.lifecycleState || "").trim().toLowerCase();
+  if (lifecycleState === POSTMORTEM_LIFECYCLE_STATE.CLOSED && plan?._lifecycleEvidenceVerified === true) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
- * Detect topics that have been fully planned (all research topics have corresponding
- * plans with concrete target_files and verification). Mark them completed and generate
- * a concise summary from accumulated knowledge.
+ * Detect topics that have verified closure evidence or an explicit resolved-state
+ * contract. Referencing a topic via synthesis_sources alone does not retire it.
  */
 export function detectAndCompleteTopics(
   memory: TopicMemoryState,
@@ -2220,15 +2242,19 @@ export function detectAndCompleteTopics(
   const completedThisRun: string[] = [];
   const archivedThisRun: string[] = [];
   const now = new Date().toISOString();
+  void qualityGateQuarantinedTopics;
 
-  // Build set of topic keys covered by plan synthesis_sources (forward reference — accurate)
-  const coveredByPlanKeys = new Set<string>();
+  const resolvedByExecutionKeys = new Set<string>();
   for (const plan of (plans || [])) {
     const sources = Array.isArray((plan as any).synthesis_sources) ? (plan as any).synthesis_sources as string[] : [];
+    const verifiedClosure = planProvidesVerifiedTopicClosureEvidence(plan);
     for (const s of sources) {
-      coveredByPlanKeys.add(topicKey(s));
-      // Also try canonical resolution so partial matches work
-      coveredByPlanKeys.add(findCanonicalTopicKey(topicKey(s), Object.keys(memory.topics)));
+      const directKey = topicKey(s);
+      const canonicalKey = findCanonicalTopicKey(directKey, Object.keys(memory.topics));
+      if (verifiedClosure) {
+        resolvedByExecutionKeys.add(directKey);
+        resolvedByExecutionKeys.add(canonicalKey);
+      }
     }
   }
 
@@ -2242,40 +2268,29 @@ export function detectAndCompleteTopics(
     informationalKeys.add(findCanonicalTopicKey(topicKey(t), Object.keys(memory.topics)));
   }
 
-  // Fallback: if synthesis quality gate quarantined topics and Prometheus did not
-  // emit either synthesis_sources or informational_topics_consumed, archive those
-  // low-density topics so they do not remain active forever.
-  const quarantinedKeys = new Set<string>();
-  for (const t of (qualityGateQuarantinedTopics || [])) {
-    quarantinedKeys.add(topicKey(t));
-    quarantinedKeys.add(findCanonicalTopicKey(topicKey(t), Object.keys(memory.topics)));
-  }
-  const canFallbackArchiveQuarantined = quarantinedKeys.size > 0 && coveredByPlanKeys.size === 0 && informationalKeys.size === 0;
-
   for (const rawTopic of researchTopics) {
     const key = findCanonicalTopicKey(topicKey(rawTopic), Object.keys(memory.topics));
     if (!key || !memory.topics[key]) continue;
     const entry = memory.topics[key];
     if (entry.status === "completed" || entry.status === "archived") continue;
 
-    const coveredByPlan = coveredByPlanKeys.has(key);
+    const coveredByVerifiedExecution = resolvedByExecutionKeys.has(key);
     const isInformational = informationalKeys.has(key);
-    const isQuarantinedLowDensity = canFallbackArchiveQuarantined && quarantinedKeys.has(key);
 
-    if (entry.runCount >= 1 && (coveredByPlan || isInformational || isQuarantinedLowDensity)) {
+    if (entry.runCount >= 1 && (coveredByVerifiedExecution || isInformational)) {
       const fragmentSummary = entry.knowledgeFragments.slice(-5).join("; ");
       entry.lastUpdatedAt = now;
       entry.knowledgeFragments = [];
-      if (coveredByPlan) {
+      if (coveredByVerifiedExecution) {
         entry.status = "completed";
-        entry.completedSummary = `Completed after ${entry.runCount} run(s) — reason: plan produced. Fragments: ${fragmentSummary.slice(0, 300)}`;
+        entry.completedSummary = `Completed after ${entry.runCount} run(s) — reason: verified execution or resolved-state contract. Fragments: ${fragmentSummary.slice(0, 300)}`;
         entry.archivedSummary = null;
         completedThisRun.push(key);
       } else {
         entry.status = "archived";
         const archiveReason = isInformational
           ? "reviewed as informational (no implementation needed)"
-          : "quarantined by synthesis quality gate (insufficient actionable signal)";
+          : "resolved without implementation";
         entry.archivedSummary = `Archived after ${entry.runCount} run(s) — ${archiveReason}. Fragments: ${fragmentSummary.slice(0, 300)}`;
         entry.completedSummary = null;
         archivedThisRun.push(key);

@@ -33,6 +33,7 @@ import path from "node:path";
 import os from "node:os";
 
 import {
+  buildCiUrgencyContext,
   collectCycleOutcomes,
   OUTCOME_DEGRADED_REASON,
   buildSelfImprovementStabilitySnapshot,
@@ -200,6 +201,64 @@ describe("buildSelfImprovementStabilitySnapshot", () => {
     assert.equal(snapshot.knowledgeMemory.recurringLessons, 2);
     assert.equal(snapshot.knowledgeMemory.criticalRecurringLessons, 2);
     assert.equal(snapshot.knowledgeMemory.maxRecurrenceCount, 3);
+  });
+});
+
+describe("buildCiUrgencyContext", () => {
+  it("suppresses historical CI lesson pressure when the latest audit is green and no CI follow-up is open", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-si-ci-quiet-"));
+    try {
+      await writeTestJson(stateDir, "health_audit_findings.json", {
+        auditedAt: new Date().toISOString(),
+        latestMainCiConclusion: "success",
+        findings: [
+          {
+            area: "ci",
+            capabilityNeeded: "ci-fix",
+            finding: "CI failure already resolved on main",
+          },
+        ],
+      });
+      await writeTestJson(stateDir, "carry_forward_ledger.json", { entries: [], cycleCounter: 1 });
+
+      const result = await buildCiUrgencyContext({ paths: { stateDir } }, stateDir);
+      assert.equal(result.allowHistoricalPressure, false);
+      assert.deepEqual(result.filteredFindings, []);
+      assert.match(result.note || "", /no fresh CI failure evidence/i);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps CI lesson pressure elevated when a CI follow-up is still unresolved", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-si-ci-open-"));
+    try {
+      await writeTestJson(stateDir, "health_audit_findings.json", {
+        auditedAt: new Date().toISOString(),
+        latestMainCiConclusion: "success",
+        findings: [],
+      });
+      await writeTestJson(stateDir, "carry_forward_ledger.json", {
+        cycleCounter: 3,
+        entries: [
+          {
+            id: "debt-ci-1",
+            lesson: "Repair CI broken workflow before enabling the next planner batch",
+            severity: "critical",
+            openedCycle: 2,
+            dueCycle: 3,
+            closedAt: null,
+            closureEvidence: null,
+          },
+        ],
+      });
+
+      const result = await buildCiUrgencyContext({ paths: { stateDir } }, stateDir);
+      assert.equal(result.allowHistoricalPressure, true);
+      assert.match(result.note || "", /follow-up is still unresolved/i);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
   });
 });
 

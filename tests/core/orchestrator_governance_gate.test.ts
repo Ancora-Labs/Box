@@ -361,6 +361,16 @@ describe("orchestrator governance correction token mapping", () => {
       `${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}:athena_correction_token=${BLOCK_REASON.CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION}`,
     );
   });
+
+  it("maps legacy lane_diversity_gate_blocked correction tokens to the canonical outward lane diversity reason", () => {
+    const reason = resolveAthenaCorrectionDispatchBlockReason([
+      "Pre-dispatch governance state infeasible (lane_diversity_gate_blocked) — diversify active lanes before dispatch",
+    ]);
+    assert.equal(
+      reason,
+      `${BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED}:athena_correction_token=lane_diversity_gate_blocked`,
+    );
+  });
 });
 
 describe("orchestrator governance gate — cloud-agent profile", () => {

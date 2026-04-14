@@ -292,6 +292,15 @@ export function isCiBreakFinding(finding: unknown): boolean {
  */
 export const SYSTEM_LEARNING_CI_DEBT_AUDIT_MAX_AGE_MS = CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS;
 
+export function isCiBreakageText(value: unknown): boolean {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return (
+    CI_SYSTEM_LEARNING_DEBT_PATTERN.test(text)
+    || /\b(ci|continuous[\s_-]?integration|workflow|pipeline|checks?)\b/i.test(text)
+  );
+}
+
 /**
  * Return true when a finding is a system-learning entry that encodes CI-breaking
  * debt (text matches the CI-debt pattern).  Used by normalizeStaleCiBreakFindings
@@ -303,7 +312,53 @@ export function isSystemLearningCiDebtFinding(finding: unknown): boolean {
   const area = String(entry.area || "").trim().toLowerCase();
   if (area !== "system-learning") return false;
   const text = `${String(entry.finding || "")} ${String(entry.remediation || "")}`;
-  return CI_SYSTEM_LEARNING_DEBT_PATTERN.test(text);
+  return isCiBreakageText(text);
+}
+
+export function hasFreshCiFailureEvidence(
+  payload: unknown,
+  finding: unknown,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!finding || typeof finding !== "object") return false;
+  const entry = finding as Record<string, unknown>;
+  if (!isCiBreakFinding(finding) && !isSystemLearningCiDebtFinding(finding)) {
+    return false;
+  }
+
+  const payloadObj = payload && typeof payload === "object"
+    ? payload as Record<string, unknown>
+    : {};
+  const payloadConclusion = String(payloadObj.latestMainCiConclusion || "").trim().toLowerCase();
+  const findingConclusion = String(entry.latestMainCiConclusion || "").trim().toLowerCase();
+  if (payloadConclusion === "success" || findingConclusion === "success") {
+    return false;
+  }
+
+  const auditedAt = String(payloadObj.auditedAt || entry.auditedAt || "").trim();
+  const auditedAtMs = auditedAt ? Date.parse(auditedAt) : NaN;
+  if (!Number.isFinite(auditedAtMs)) return false;
+  const auditAgeMs = nowMs - auditedAtMs;
+  if (auditAgeMs < 0) return false;
+  return auditAgeMs <= SYSTEM_LEARNING_CI_DEBT_AUDIT_MAX_AGE_MS;
+}
+
+export function hasUnresolvedCiFollowUpSignal(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+  const record = entry as Record<string, unknown>;
+  if (record.closedAt || record.taskCompleted === true || record.followUpNeeded === false) {
+    return false;
+  }
+  const text = [
+    record.followUpTask,
+    record.lesson,
+    record.lessonLearned,
+    record.expectedOutcome,
+    record.actualOutcome,
+    record.finding,
+    record.remediation,
+  ].map((value) => String(value || "").trim()).filter(Boolean).join("\n");
+  return isCiBreakageText(text);
 }
 
 export function isCiCriticalMandatoryFinding(finding: unknown): boolean {
