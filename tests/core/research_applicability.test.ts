@@ -4,6 +4,10 @@ import {
   scoreTopicApplicability,
   type TopicApplicabilityVerdict,
 } from "../../src/core/research_synthesizer.js";
+import {
+  detectAndCompleteTopics,
+  updateTopicKnowledge,
+} from "../../src/core/prometheus.js";
 
 // ── scoreTopicApplicability unit tests ────────────────────────────────────────
 
@@ -130,5 +134,81 @@ describe("scoreTopicApplicability — shape contract", () => {
   it("negative path: empty topic object returns applicable (no patterns to trigger a block)", () => {
     const result = scoreTopicApplicability({});
     assert.equal(result.verdict, "applicable");
+  });
+});
+
+describe("detectAndCompleteTopics — closure evidence gate", () => {
+  function buildTopicMemory(topic: string) {
+    return updateTopicKnowledge(
+      { topics: {} },
+      [topic],
+      [],
+      { topics: [{ topic, summary: "Topic evidence fragment for deterministic testing." }] },
+    );
+  }
+
+  it("keeps a topic active when a plan only cites synthesis_sources without closure evidence", () => {
+    const topic = "Closure evidence for research-backed planning";
+    const memory = buildTopicMemory(topic);
+
+    const result = detectAndCompleteTopics(
+      memory,
+      [topic],
+      [
+        {
+          task: "Wire topic-backed plan",
+          synthesis_sources: [topic],
+          implementationStatus: "not_implemented",
+          implementationEvidence: [],
+        },
+      ],
+      {},
+    );
+
+    const entry = result.memory.topics[Object.keys(result.memory.topics)[0]];
+    assert.equal(entry.status, "active");
+    assert.deepEqual(result.completedThisRun, []);
+    assert.deepEqual(result.archivedThisRun, []);
+  });
+
+  it("marks a topic completed when a linked plan carries verified execution evidence", () => {
+    const topic = "Verified execution closes the linked research topic";
+    const memory = buildTopicMemory(topic);
+
+    const result = detectAndCompleteTopics(
+      memory,
+      [topic],
+      [
+        {
+          task: "Ship the research-backed fix",
+          synthesis_sources: [topic],
+          implementationStatus: "implemented_correctly",
+          implementationEvidence: ["src/core/prometheus.ts"],
+        },
+      ],
+      {},
+    );
+
+    const entry = result.memory.topics[Object.keys(result.memory.topics)[0]];
+    assert.equal(entry.status, "completed");
+    assert.equal(result.completedThisRun.length, 1);
+    assert.match(entry.completedSummary || "", /verified execution or resolved-state contract/i);
+  });
+
+  it("negative path: does not archive low-density quarantined topics without an explicit resolved-state contract", () => {
+    const topic = "Low-density topic should remain active until resolved";
+    const memory = buildTopicMemory(topic);
+
+    const result = detectAndCompleteTopics(
+      memory,
+      [topic],
+      [],
+      {},
+      [topic],
+    );
+
+    const entry = result.memory.topics[Object.keys(result.memory.topics)[0]];
+    assert.equal(entry.status, "active");
+    assert.deepEqual(result.archivedThisRun, []);
   });
 });

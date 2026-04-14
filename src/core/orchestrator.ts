@@ -133,7 +133,7 @@ import { assessRetryExpectedROI, loadRouteROILedger, rankModelsByTaskKindExpecte
 import { loadHookPolicy, DEFAULT_HOOK_POLICY_PATH } from "./policy_engine.js";
 import {
   AGENT_CONTRACT_GOVERNANCE_REASON_CODE,
-  AUTONOMY_EXECUTION_GATE_REASON_CODE,
+  GOVERNANCE_DISPATCH_BLOCK_REASON,
   GOVERNANCE_SIGNAL_REGISTRY,
   resolveAutonomyExecutionGateBlockReason,
 } from "./governance_contract.js";
@@ -209,31 +209,7 @@ export const GATE_PRECEDENCE = Object.freeze({
  * BUDGET_EXHAUSTED intentionally mirrors the budget_controller output prefix so
  * both the controller and the gate surface the same token vocabulary.
  */
-export const BLOCK_REASON = Object.freeze({
-  BUDGET_EXHAUSTED:               "budget_exhausted",
-  GUARDRAIL_PAUSE_WORKERS_ACTIVE: "guardrail_pause_workers_active",
-  GUARDRAIL_FORCE_CHECKPOINT_ACTIVE: "force_checkpoint_validation_active",
-  GOVERNANCE_FREEZE_ACTIVE:       "governance_freeze_active",
-  AUTONOMY_EXECUTION_GATE_NOT_READY: AUTONOMY_EXECUTION_GATE_REASON_CODE,
-  LINEAGE_CYCLE_DETECTED:         "lineage_cycle_detected",
-  GOVERNANCE_CANARY_BREACH:       "governance_canary_breach",
-  CLOUD_AGENT_GOVERNANCE_POLICY_VIOLATION: "cloud_agent_governance_policy_violation",
-  CRITICAL_DEBT_OVERDUE:          "critical_debt_overdue",
-  MANDATORY_DRIFT_DEBT_UNRESOLVED:"mandatory_drift_debt_unresolved",
-  PLAN_EVIDENCE_COUPLING_INVALID: "plan_evidence_coupling_invalid",
-  /** One or more plans require cross-cycle confirmation but no token was provided. */
-  CROSS_CYCLE_PREREQUISITE_UNMET: "cross_cycle_prerequisite_unmet",
-  /** One or more plans carry confidence metadata below the minimum dispatch threshold. */
-  DEPENDENCY_READINESS_INCOMPLETE:"dependency_readiness_incomplete",
-  /** Rolling completion yield fell at or below the throttle threshold. */
-  ROLLING_YIELD_THROTTLE:         "rolling_yield_throttle",
-  /** Dispatch topology failed lane diversity minimum. */
-  LANE_DIVERSITY_GATE_BLOCKED:    "lane_diversity_insufficient",
-  /** Specialist share is below the adaptive lane utilization target. */
-  SPECIALIZATION_ADMISSION_GATE:  "specialization_admission_gate_failed",
-  /** Per-role plan group exceeds the configured actionable-steps cap — decompose before dispatch. */
-  OVERSIZED_PACKET:               "packet_exceeds_actionable_steps_cap",
-});
+export const BLOCK_REASON = GOVERNANCE_DISPATCH_BLOCK_REASON;
 
 const CLOUD_AGENT_ALLOWED_SETUP_JOB_KEYS = new Set([
   "steps",

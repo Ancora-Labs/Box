@@ -551,6 +551,50 @@ describe("evaluatePreDispatchGovernanceGate — cross-cycle prerequisite token g
   });
 });
 
+describe("evaluatePreDispatchGovernanceGate — lane diversity outward token", () => {
+  it("emits the canonical lane_diversity_insufficient outward reason", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-lane-diversity-gate-"));
+    try {
+      const config = {
+        paths: { stateDir },
+        canary: { enabled: false },
+        systemGuardian: { enabled: false },
+        governanceFreeze: { enabled: false, manualOverrideActive: false },
+        runtime: { disableDriftDebtGate: true },
+        workerPool: { minLanes: 2 },
+      };
+      const decision = await evaluatePreDispatchGovernanceGate(config, [
+        {
+          task_id: "T-001",
+          task: "Preserve canonical lane diversity token",
+          role: "evolution-worker",
+          capabilityTag: "runtime-refactor",
+          verification: "tests/core/athena_review_normalization.test.ts — test: emits the canonical lane diversity reason",
+          verification_commands: ["npm test -- tests/core/athena_review_normalization.test.ts"],
+          acceptance_criteria: ["dispatch blocks before wave 1 when only one lane is active"],
+          target_files: ["src/core/orchestrator.ts"],
+          scope: "src/core/",
+        },
+        {
+          task_id: "T-002",
+          task: "Keep the packet in the same lane to trigger diversity gating",
+          role: "evolution-worker",
+          capabilityTag: "runtime-refactor",
+          verification: "tests/core/athena_review_normalization.test.ts — test: emits the canonical lane diversity reason",
+          verification_commands: ["npm test -- tests/core/athena_review_normalization.test.ts"],
+          acceptance_criteria: ["lane diversity gate emits canonical outward reason"],
+          target_files: ["src/core/orchestrator.ts"],
+          scope: "src/core/",
+        },
+      ], "lane-diversity-canonical");
+      assert.equal(decision.blocked, true);
+      assert.ok(String(decision.reason || "").startsWith(BLOCK_REASON.LANE_DIVERSITY_GATE_BLOCKED));
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── Task 3: revalidatePatchedPlansAfterNormalization ─────────────────────────
 
 describe("revalidatePatchedPlansAfterNormalization (Task 3)", () => {

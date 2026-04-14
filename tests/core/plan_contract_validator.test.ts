@@ -26,12 +26,64 @@ import {
   validateAndInjectRolePlans,
   ROLE_PLAN_COVERAGE_MISSING_MARKER_PREFIX,
   ROLE_PLAN_SKELETON_METADATA_SOURCE,
+  hasFreshCiFailureEvidence,
+  hasUnresolvedCiFollowUpSignal,
+  isCiBreakageText,
   isCiBreakFinding,
   CI_BREAK_FINDING_FRESHNESS_MAX_AGE_MS,
 } from "../../src/core/plan_contract_validator.js";
 import { checkForbiddenCommands } from "../../src/core/verification_command_registry.js";
 
 describe("plan_contract_validator", () => {
+  describe("CI urgency helpers", () => {
+    it("detects fresh CI failure evidence only when the audit is recent and CI is not green", () => {
+      const nowMs = Date.now();
+      const payload = {
+        auditedAt: new Date(nowMs - 60_000).toISOString(),
+        latestMainCiConclusion: "failure",
+      };
+      const finding = {
+        area: "ci",
+        capabilityNeeded: "ci-fix",
+        finding: "Main CI is failing on tests/core/example.test.ts",
+      };
+      assert.equal(hasFreshCiFailureEvidence(payload, finding, nowMs), true);
+    });
+
+    it("does not treat green audits as fresh CI failure evidence", () => {
+      const nowMs = Date.now();
+      const payload = {
+        auditedAt: new Date(nowMs - 60_000).toISOString(),
+        latestMainCiConclusion: "success",
+      };
+      const finding = {
+        area: "ci",
+        capabilityNeeded: "ci-fix",
+        finding: "Main CI was failing earlier in the cycle",
+      };
+      assert.equal(hasFreshCiFailureEvidence(payload, finding, nowMs), false);
+    });
+
+    it("recognizes unresolved CI follow-up entries and ignores resolved ones", () => {
+      assert.equal(
+        hasUnresolvedCiFollowUpSignal({
+          followUpNeeded: true,
+          followUpTask: "Repair CI broken workflow after flaky failure analysis",
+        }),
+        true,
+      );
+      assert.equal(
+        hasUnresolvedCiFollowUpSignal({
+          followUpNeeded: true,
+          followUpTask: "Repair CI broken workflow after flaky failure analysis",
+          closedAt: new Date().toISOString(),
+        }),
+        false,
+      );
+      assert.equal(isCiBreakageText("Repair CI broken workflow after flaky failure analysis"), true);
+    });
+  });
+
   describe("normalizeLeverageRank", () => {
     it("maps aliases to canonical dimension set", () => {
       const normalized = normalizeLeverageRank(["quality", "learning loop", "routing", "security"]);
