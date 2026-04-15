@@ -480,6 +480,52 @@ describe("normalizePrometheusParsedOutput", () => {
     assert.equal(normalized.executionStrategy.workerTopology.workerCount, 1);
   });
 
+  it("chooses bounded_chain for dependency-bound single-lane plans under elevated uncertainty", () => {
+    const parsed = {
+      plans: [
+        {
+          task: "Stabilize planner dependency gate",
+          task_id: "stabilize-planner-dependency-gate",
+          role: "evolution-worker",
+          wave: 1,
+          dependencies: [],
+          target_files: ["src/core/prometheus.ts", "src/core/plan_contract_validator.ts"],
+          acceptance_criteria: ["Execution pattern resolves to bounded_chain with 1 assertion", "Plan remains on the implementation lane"],
+          verification: "tests/core/prometheus_parse.test.ts — test: chooses bounded_chain for dependency-bound plans",
+          capacityDelta: 0.18,
+          requestROI: 1.6,
+        },
+        {
+          task: "Propagate bounded_chain into batch metadata",
+          task_id: "propagate-bounded-chain-into-batch-metadata",
+          role: "evolution-worker",
+          wave: 2,
+          dependencies: ["stabilize-planner-dependency-gate"],
+          target_files: ["src/core/worker_batch_planner.ts", "tests/core/worker_batch_planner.test.ts"],
+          acceptance_criteria: ["Downstream batch metadata keeps bounded_chain with 1 assertion", "Dependency ordering remains explicit in wave 2"],
+          verification: "tests/core/worker_batch_planner.test.ts — test: stamps bounded_chain for dependency-bound plans",
+          capacityDelta: 0.2,
+          requestROI: 1.9,
+        },
+      ],
+      executionStrategy: {
+        planningMode: "master_evolution",
+        planningUncertainty: "high",
+        executionPattern: "wave_parallel",
+        waves: [
+          { wave: 1, tasks: [{ role: "evolution-worker", task: "Stabilize planner dependency gate", task_id: "stabilize-planner-dependency-gate" }] },
+          { wave: 2, tasks: [{ role: "evolution-worker", task: "Propagate bounded_chain into batch metadata", task_id: "propagate-bounded-chain-into-batch-metadata" }] },
+        ],
+      },
+    };
+
+    const normalized = normalizePrometheusParsedOutput(parsed, { raw: "", planningUncertainty: "high" });
+
+    assert.equal(normalized.executionStrategy.planningUncertainty, "high");
+    assert.equal(normalized.executionStrategy.executionPattern, "bounded_chain");
+    assert.ok(normalized.plans.every((plan: any) => plan.planningUncertainty === "high"));
+  });
+
   it("extracts plans from narrative wave sections when no JSON plans exist", () => {
     const parsed = {};
     const thinking = `

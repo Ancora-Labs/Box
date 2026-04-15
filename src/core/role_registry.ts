@@ -41,6 +41,7 @@ export type PrometheusPlanningMode =
 export const EXECUTION_PATTERN = Object.freeze({
   WAVE_PARALLEL: "wave_parallel",
   SINGLE_WORKER: "single_worker",
+  BOUNDED_CHAIN: "bounded_chain",
   SERIAL_REPAIR: "serial_repair",
 } as const);
 
@@ -326,6 +327,7 @@ export function selectExecutionPatternForPlans(
     planningMode?: unknown;
     workerTopology?: WorkerTopologyContract | null;
     admittedWorkerTopology?: WorkerTopologyContract | null;
+    uncertainty?: unknown;
   } = {},
 ): ExecutionPattern {
   const planningMode = normalizePrometheusPlanningMode(
@@ -341,6 +343,33 @@ export function selectExecutionPatternForPlans(
   }
   if (workerTopology.continuation?.preservesMultiLaneAdmission) {
     return EXECUTION_PATTERN.WAVE_PARALLEL;
+  }
+  const normalizedUncertainty = String(opts.uncertainty || "").trim().toLowerCase();
+  const dependencySignals = (Array.isArray(plans) ? plans : []).reduce<number>((count, plan) => {
+    if (!plan || typeof plan !== "object") return count;
+    const source = plan as Record<string, unknown>;
+    const hasDependencyEdges =
+      (Array.isArray(source.dependsOn) && source.dependsOn.length > 0)
+      || (Array.isArray(source.dependencies) && source.dependencies.length > 0)
+      || (Array.isArray(source.waveDepends) && source.waveDepends.length > 0);
+    return hasDependencyEdges ? count + 1 : count;
+  }, 0);
+  const distinctWaves = new Set(
+    (Array.isArray(plans) ? plans : [])
+      .map((plan) => Math.max(1, Math.floor(Number((plan as any)?.wave) || 1)))
+      .filter(Number.isFinite),
+  ).size;
+  const hasDependencyEvidence = dependencySignals > 0 || distinctWaves > 1;
+  if (
+    hasDependencyEvidence
+    && (
+      workerTopology.laneCount <= 1
+      || workerTopology.maxParallelWorkers <= 1
+      || normalizedUncertainty === "high"
+      || (normalizedUncertainty === "medium" && distinctWaves > 1)
+    )
+  ) {
+    return EXECUTION_PATTERN.BOUNDED_CHAIN;
   }
   if (workerTopology.workerCount <= 1 && workerTopology.maxParallelWorkers <= 1) {
     return EXECUTION_PATTERN.SINGLE_WORKER;

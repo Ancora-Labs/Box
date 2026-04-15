@@ -117,6 +117,17 @@ function hasExplicitDependencies(plan) {
   );
 }
 
+function resolveBatchPlanningUncertainty(plans = []): string {
+  const normalized = new Set(
+    (Array.isArray(plans) ? plans : [])
+      .map((plan) => String(plan?.planningUncertainty || plan?.uncertainty || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  if (normalized.has("high")) return "high";
+  if (normalized.has("medium")) return "medium";
+  return "low";
+}
+
 function slugify(text) {
   return String(text || "worker")
     .toLowerCase()
@@ -1523,7 +1534,10 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
   flattened.sort((a, b) => (a.wave as number) - (b.wave as number));
   const topologyPlans = flattened.flatMap((batch) => Array.isArray(batch?.plans) ? batch.plans : []);
   const workerTopology = buildWorkerTopologyContract(topologyPlans);
-  const executionPattern = selectExecutionPatternForPlans(topologyPlans, { workerTopology });
+  const executionPattern = selectExecutionPatternForPlans(topologyPlans, {
+    workerTopology,
+    uncertainty: resolveBatchPlanningUncertainty(topologyPlans),
+  });
 
   return flattened.map((batch, index) => ({
     ...batch,
@@ -1907,7 +1921,10 @@ export function buildTokenFirstBatches(
   }));
   const topologyPlans = mapped.flatMap((batch) => Array.isArray(batch?.plans) ? batch.plans : []);
   const workerTopology = buildWorkerTopologyContract(topologyPlans);
-  const executionPattern = selectExecutionPatternForPlans(topologyPlans, { workerTopology });
+  const executionPattern = selectExecutionPatternForPlans(topologyPlans, {
+    workerTopology,
+    uncertainty: resolveBatchPlanningUncertainty(topologyPlans),
+  });
 
   // ── DAG parallelism bound ──────────────────────────────────────────────────
   // Compute a safe concurrency cap from wave topology: max wave number is a

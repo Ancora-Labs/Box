@@ -16,6 +16,7 @@ import {
   normalizePlanRoleToWorkerName,
   normalizePrometheusPlanningMode,
   PROMETHEUS_PLANNING_MODE,
+  selectExecutionPatternForPlans,
   type ExecutionPattern,
   type PrometheusPlanningMode,
   type WorkerTopologyContract,
@@ -522,6 +523,14 @@ export function validateExecutionStrategyContract(payload: any): ExecutionStrate
   const executionPattern = normalizeExecutionPattern(rawExecutionPattern, null);
   const seedPlans = buildExecutionStrategyTopologySeedPlans(source);
   const workerTopology = buildWorkerTopologyContract(seedPlans, { planningMode });
+  const expectedExecutionPattern = selectExecutionPatternForPlans(seedPlans, {
+    planningMode,
+    workerTopology,
+    uncertainty:
+      (executionStrategy as any).planningUncertainty
+      ?? source.planningUncertainty
+      ?? source.uncertainty,
+  });
   const violations: PlanViolation[] = [];
 
   if (!planningModeExplicit) {
@@ -551,6 +560,15 @@ export function validateExecutionStrategyContract(payload: any): ExecutionStrate
     violations.push({
       field: "executionStrategy.executionPattern",
       message: `executionStrategy.executionPattern is invalid: "${String(rawExecutionPattern).trim()}"`,
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.INVALID_EXECUTION_PATTERN,
+    });
+  } else if (executionPattern !== expectedExecutionPattern) {
+    violations.push({
+      field: "executionStrategy.executionPattern",
+      message:
+        `executionStrategy.executionPattern must match the authoritative pattern `
+        + `"${expectedExecutionPattern}" derived from plan shape, uncertainty, and worker topology`,
       severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
       code: PACKET_VIOLATION_CODE.INVALID_EXECUTION_PATTERN,
     });
