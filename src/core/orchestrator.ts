@@ -1635,7 +1635,7 @@ export async function evaluatePreDispatchGovernanceGate(
           workerTopology: continuationTopology,
           admittedWorkerTopology,
         });
-        if (diversityBypass.bypass) {
+        if (diversityBypass.bypass && String(diversityBypass.reason || "").startsWith("admitted_multi_lane_continuation:")) {
           laneDiversityBypassReason = diversityBypass.reason;
           warn(`[orchestrator] lane diversity gate bypassed for continuation topology: ${String(diversityBypass.reason || "unknown_reason")}`);
         } else {
