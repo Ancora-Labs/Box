@@ -121,6 +121,35 @@ describe("worker_batch_planner", () => {
     assert.equal(Array.isArray((batches[0] as any).workerTopology.roles), true);
   });
 
+  it("stamps bounded_chain when a dependency-bound plan set carries high planning uncertainty", () => {
+    const config = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+    const plans = [
+      {
+        ...buildPlan(0),
+        role: "Evolution Worker",
+        wave: 1,
+        task_id: "bounded-chain-root",
+        task: "Bounded chain root",
+        planningUncertainty: "high",
+      },
+      {
+        ...buildPlan(1),
+        role: "Evolution Worker",
+        wave: 2,
+        task_id: "bounded-chain-child",
+        task: "Bounded chain child",
+        dependencies: ["bounded-chain-root"],
+        planningUncertainty: "high",
+      },
+    ];
+
+    const batches = buildRoleExecutionBatches(plans, config);
+
+    assert.ok(batches.length >= 2);
+    assert.ok(batches.every((batch: any) => batch.executionPattern === "bounded_chain"));
+    assert.equal((batches[0] as any).workerTopology.laneCount, 1);
+  });
+
   it("produces the same result when capabilityPoolResult is null (backward-compatible)", () => {
     const config = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
     const plans = [buildPlan(0), buildPlan(1), buildPlan(2)];

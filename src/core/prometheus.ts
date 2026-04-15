@@ -3660,6 +3660,27 @@ function resolvePrometheusPlanningModeFromContext(parsed: any, aiResult: any = {
   ) || PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION;
 }
 
+function resolveExecutionStrategyPlanningUncertainty(parsed: any, aiResult: any = {}): "low" | "medium" | "high" {
+  const candidates = [
+    parsed?.executionStrategy?.planningUncertainty,
+    parsed?.planningUncertainty,
+    parsed?.uncertainty,
+    aiResult?.planningUncertainty,
+    aiResult?.uncertainty,
+  ];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || "").trim().toLowerCase();
+    if (normalized === "high" || normalized === "medium") return normalized;
+    if (normalized === "low") return "low";
+  }
+  const parserConfidence = Number(parsed?.parserConfidence ?? aiResult?.parserConfidence);
+  if (Number.isFinite(parserConfidence)) {
+    if (parserConfidence < 0.75) return "high";
+    if (parserConfidence < 0.9) return "medium";
+  }
+  return "low";
+}
+
 /**
  * Normalizes string entries in executionStrategy.waves[*].tasks to the canonical
  * {role, task, task_id} object shape.  This is the single normalization gate:
@@ -3670,7 +3691,10 @@ function resolvePrometheusPlanningModeFromContext(parsed: any, aiResult: any = {
  * String tasks are coerced to evolution-worker role. Exported so retry paths and
  * integration callers can apply the same normalization without re-parsing.
  */
-export function normalizeExecutionStrategyWaveTasks(strategy: any): { waves: ExecutionWave[] } & Record<string, unknown> {
+export function normalizeExecutionStrategyWaveTasks(
+  strategy: any,
+  opts: { uncertainty?: unknown } = {},
+): { waves: ExecutionWave[] } & Record<string, unknown> {
   if (!strategy || !Array.isArray(strategy.waves)) return strategy;
   const waves: ExecutionWave[] = strategy.waves.map((w: any) => {
     if (!w || typeof w !== "object" || !Array.isArray(w.tasks)) return w as ExecutionWave;
@@ -3686,6 +3710,10 @@ export function normalizeExecutionStrategyWaveTasks(strategy: any): { waves: Exe
     normalizedStrategy.planningMode,
     PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION,
   ) || PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION;
+  const planningUncertainty = resolveExecutionStrategyPlanningUncertainty(
+    normalizedStrategy,
+    { planningUncertainty: opts.uncertainty },
+  );
   const seededPlans = waves.flatMap((wave) => (Array.isArray(wave.tasks) ? wave.tasks : []).map((task) => ({
     role: task.role,
     wave: wave.wave,
@@ -3694,21 +3722,33 @@ export function normalizeExecutionStrategyWaveTasks(strategy: any): { waves: Exe
   const workerTopology = buildWorkerTopologyContract(seededPlans, { planningMode });
   const executionPattern = normalizeExecutionPattern(
     normalizedStrategy.executionPattern,
-    selectExecutionPatternForPlans(seededPlans, { planningMode, workerTopology }),
+    selectExecutionPatternForPlans(seededPlans, {
+      planningMode,
+      workerTopology,
+      uncertainty: planningUncertainty,
+    }),
   );
   return {
     ...normalizedStrategy,
     planningMode,
+    planningUncertainty,
     executionPattern,
     workerTopology,
   };
 }
 
-function buildExecutionStrategyFromPlans(plans = [], opts: { planningMode?: unknown } = {}) {
+function buildExecutionStrategyFromPlans(
+  plans = [],
+  opts: { planningMode?: unknown; uncertainty?: unknown } = {},
+) {
   const planningMode = normalizePrometheusPlanningMode(
     opts.planningMode,
     PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION,
   ) || PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION;
+  const planningUncertainty = resolveExecutionStrategyPlanningUncertainty(
+    { planningUncertainty: opts.uncertainty },
+    {},
+  );
   const waveMap = new Map();
   for (const plan of plans) {
     const wave = Number.isFinite(Number(plan.wave)) ? Number(plan.wave) : 1;
@@ -3725,7 +3765,12 @@ function buildExecutionStrategyFromPlans(plans = [], opts: { planningMode?: unkn
   const workerTopology = buildWorkerTopologyContract(plans, { planningMode });
   return {
     planningMode,
-    executionPattern: selectExecutionPatternForPlans(plans, { planningMode, workerTopology }),
+    planningUncertainty,
+    executionPattern: selectExecutionPatternForPlans(plans, {
+      planningMode,
+      workerTopology,
+      uncertainty: planningUncertainty,
+    }),
     workerTopology,
     waves: sortedWaves.map((wave, idx) => ({
       wave,
@@ -4977,33 +5022,40 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
     ? health
     : inferProjectHealth(analysisText);
   const planningMode = resolvePrometheusPlanningModeFromContext(input, aiResult);
+  const planningUncertainty = resolveExecutionStrategyPlanningUncertainty(input, aiResult);
 
   let executionStrategy = (input.executionStrategy && typeof input.executionStrategy === "object")
     ? input.executionStrategy
     : { waves: Array.isArray(input.waves) ? input.waves : [] };
   if (!Array.isArray(executionStrategy.waves) || executionStrategy.waves.length === 0) {
-    executionStrategy = buildExecutionStrategyFromPlans(plans, { planningMode });
+    executionStrategy = buildExecutionStrategyFromPlans(plans, { planningMode, uncertainty: planningUncertainty });
   }
   // Normalize string tasks to canonical {role, task, task_id} objects — no string ambiguity.
   executionStrategy = normalizeExecutionStrategyWaveTasks({
     ...executionStrategy,
     planningMode: executionStrategy?.planningMode || planningMode,
+    planningUncertainty: executionStrategy?.planningUncertainty || planningUncertainty,
+  }, {
+    uncertainty: planningUncertainty,
   });
   const executionStrategyContract = validateExecutionStrategyContract({
     plans,
     executionStrategy,
     planningMode,
+    planningUncertainty,
   });
   if (!executionStrategyContract.valid) {
-    executionStrategy = buildExecutionStrategyFromPlans(plans, { planningMode });
+    executionStrategy = buildExecutionStrategyFromPlans(plans, { planningMode, uncertainty: planningUncertainty });
   } else {
     executionStrategy = {
       ...executionStrategy,
       planningMode: executionStrategyContract.planningMode,
+      planningUncertainty,
       executionPattern: executionStrategyContract.executionPattern,
       workerTopology: executionStrategyContract.workerTopology,
     };
   }
+  plans = plans.map((plan) => ({ ...plan, planningUncertainty }));
 
   let requestBudget = (input.requestBudget && Number.isFinite(Number(input.requestBudget.estimatedPremiumRequestsTotal)))
     ? {
@@ -5468,7 +5520,7 @@ The JSON block must contain all of the following fields:
   },
   "executionStrategy": {
     "planningMode": "master_evolution|repair_plan",
-    "executionPattern": "wave_parallel|single_worker|serial_repair",
+    "executionPattern": "wave_parallel|bounded_chain|single_worker|serial_repair",
     "workerTopology": {
       "workerCount": <n>,
       "laneCount": <n>,
@@ -7364,7 +7416,7 @@ RULE: Every packet MUST contain enough work to justify a full AI context call. T
 - master_evolution = produce the primary capacity-increase plan for the cycle. Favor explicit worker topology and parallel wave structure when evidence supports it.
 - repair_plan = repair a rejected plan with the smallest deterministic changes needed to make it dispatchable. Do NOT widen scope into a fresh repo-wide master plan.
 - You MUST emit executionStrategy.planningMode, executionStrategy.executionPattern, and executionStrategy.workerTopology in the JSON block.
-- executionPattern MUST be one of: wave_parallel | single_worker | serial_repair.
+- executionPattern MUST be one of: wave_parallel | bounded_chain | single_worker | serial_repair.
 - workerTopology MUST include workerCount, laneCount, maxParallelWorkers, roles[], and lanes[] derived from the actual plans you emit.
 
 ## STRUCTURAL CORRECTNESS — LEARN THESE PATTERNS
