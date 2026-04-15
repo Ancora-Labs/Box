@@ -22,6 +22,7 @@ import {
   computeBatchEstimatedDurationMinutes,
 } from "../../src/core/worker_batch_planner.js";
 import { validatePacketBatchAdmission } from "../../src/core/plan_contract_validator.js";
+import { buildWorkerTopologyContract, selectExecutionPatternForPlans } from "../../src/core/role_registry.js";
 import {
   computeAdaptiveSpecializedShareTarget,
   buildLanePerformanceFromCycleTelemetry,
@@ -1864,6 +1865,28 @@ describe("buildTokenFirstBatches — wave topology preservation", () => {
     for (const batch of batches) {
       assert.equal(batch.wave, 3);
     }
+  });
+
+  it("preserves multi-lane admission metadata for later-wave singleton continuation slices", () => {
+    const admittedPlans = [
+      { role: "quality-worker", task: "Quality wave 1", wave: 1, target_files: ["tests/core/a.test.ts"] },
+      { role: "governance-worker", task: "Governance wave 1", wave: 1, target_files: ["src/core/governance_freeze.ts"] },
+      { role: "Evolution Worker", task: "Implementation wave 2", wave: 2, target_files: ["src/core/orchestrator.ts"] },
+    ];
+    const admittedTopology = buildWorkerTopologyContract(admittedPlans);
+    const continuationPlans = [admittedPlans[2]];
+    const continuationTopology = buildWorkerTopologyContract(continuationPlans, {
+      admittedWorkerTopology: admittedTopology,
+    });
+
+    assert.equal(continuationTopology.workerCount, 1);
+    assert.equal(continuationTopology.continuation?.preservesMultiLaneAdmission, true);
+    assert.deepEqual(continuationTopology.continuation?.missingLanes, ["governance", "quality"]);
+    assert.equal(
+      selectExecutionPatternForPlans(continuationPlans, { workerTopology: continuationTopology }),
+      "wave_parallel",
+      "continuation slices should keep the admitted multi-lane execution pattern",
+    );
   });
 });
 

@@ -27,6 +27,7 @@ import {
   WORKER_CYCLE_ARTIFACTS_FILE,
   WORKER_CYCLE_ARTIFACTS_SCHEMA,
 } from "../../src/core/cycle_analytics.js";
+import { buildWorkerTopologyContract } from "../../src/core/role_registry.js";
 import {
   stampBatchPlanTaskIds,
   extractBatchTaskSummary,
@@ -282,6 +283,43 @@ describe("persistSkippedDispatchCheckpoint", () => {
       assert.equal(parsed.plannerPromptLineage.lineageId, "planner:abc");
       assert.equal(parsed.reviewerPromptLineage.lineageId, "reviewer:def");
       assert.equal(parsed.reviewerPromptLineage.cacheableSegments, 2);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists the admitted worker topology for later-wave continuation resumes", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-dispatch-topology-"));
+    try {
+      const config = { paths: { stateDir }, runtime: {} };
+      const workerBatches = [
+        {
+          role: "quality-worker",
+          wave: 1,
+          task: "Quality wave",
+          plans: [{ role: "quality-worker", task: "Quality wave", wave: 1 }],
+        },
+        {
+          role: "evolution-worker",
+          wave: 2,
+          task: "Continuation wave",
+          plans: [{ role: "evolution-worker", task: "Continuation wave", wave: 2 }],
+        },
+      ];
+      const admittedWorkerTopology = buildWorkerTopologyContract(
+        workerBatches.flatMap((batch) => batch.plans),
+      );
+      for (const batch of workerBatches) {
+        (batch as any).workerTopology = admittedWorkerTopology;
+      }
+
+      await persistSkippedDispatchCheckpoint(config, workerBatches, {
+        planAnalyzedAt: "2026-04-04T00:00:00.000Z",
+      });
+      const raw = await fs.readFile(path.join(stateDir, "dispatch_checkpoint.json"), "utf8");
+      const parsed = JSON.parse(raw);
+      assert.equal(parsed.admittedWorkerTopology.laneCount, admittedWorkerTopology.laneCount);
+      assert.equal(parsed.admittedWorkerTopology.workerCount, admittedWorkerTopology.workerCount);
     } finally {
       await fs.rm(stateDir, { recursive: true, force: true });
     }

@@ -63,6 +63,20 @@ export interface WorkerTopologyLaneContract {
   specialized: boolean;
 }
 
+export interface WorkerTopologyContinuationContract {
+  admittedLaneCount: number;
+  admittedWorkerCount: number;
+  remainingLaneCount: number;
+  remainingWorkerCount: number;
+  preservedLanes: string[];
+  preservedRoles: string[];
+  missingLanes: string[];
+  missingRoles: string[];
+  preservesMultiLaneAdmission: boolean;
+  continuationRequired: boolean;
+  reason: string;
+}
+
 export interface WorkerTopologyContract {
   schemaVersion: 1;
   planningMode: PrometheusPlanningMode;
@@ -71,6 +85,55 @@ export interface WorkerTopologyContract {
   maxParallelWorkers: number;
   roles: WorkerTopologyRoleContract[];
   lanes: WorkerTopologyLaneContract[];
+  continuation?: WorkerTopologyContinuationContract | null;
+}
+
+function normalizeTopologyNameList(values: unknown[]): string[] {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+function buildContinuationContract(
+  admittedTopology: WorkerTopologyContract | null,
+  currentRoles: WorkerTopologyRoleContract[],
+  currentLanes: WorkerTopologyLaneContract[],
+): WorkerTopologyContinuationContract | null {
+  if (!admittedTopology || typeof admittedTopology !== "object") return null;
+
+  const admittedLaneCount = Math.max(0, Math.floor(Number(admittedTopology.laneCount || 0)));
+  const admittedWorkerCount = Math.max(0, Math.floor(Number(admittedTopology.workerCount || 0)));
+  const admittedLanes = normalizeTopologyNameList(
+    Array.isArray(admittedTopology.lanes) ? admittedTopology.lanes.map((lane) => lane?.lane) : [],
+  );
+  const admittedRoles = normalizeTopologyNameList(
+    Array.isArray(admittedTopology.roles) ? admittedTopology.roles.map((role) => role?.role) : [],
+  );
+  const preservedLanes = normalizeTopologyNameList(currentLanes.map((lane) => lane.lane));
+  const preservedRoles = normalizeTopologyNameList(currentRoles.map((role) => role.role));
+  const missingLanes = admittedLanes.filter((lane) => !preservedLanes.includes(lane));
+  const missingRoles = admittedRoles.filter((role) => !preservedRoles.includes(role));
+  const continuationRequired = missingLanes.length > 0 || missingRoles.length > 0;
+  if (!continuationRequired) return null;
+
+  const preservesMultiLaneAdmission = admittedLaneCount > 1 && preservedLanes.length > 0 && preservedLanes.length < admittedLaneCount;
+  return {
+    admittedLaneCount,
+    admittedWorkerCount,
+    remainingLaneCount: preservedLanes.length,
+    remainingWorkerCount: preservedRoles.length,
+    preservedLanes,
+    preservedRoles,
+    missingLanes,
+    missingRoles,
+    preservesMultiLaneAdmission,
+    continuationRequired: true,
+    reason: preservesMultiLaneAdmission
+      ? "preserved_admitted_multi_lane_topology_for_continuation"
+      : "continuation_subset_of_admitted_topology",
+  };
 }
 
 export function normalizeWorkerName(name: unknown): string {
@@ -161,7 +224,7 @@ export function isSpecialistLane(lane: unknown): boolean {
 
 export function buildWorkerTopologyContract(
   plans: unknown[],
-  opts: { planningMode?: unknown } = {},
+  opts: { planningMode?: unknown; admittedWorkerTopology?: WorkerTopologyContract | null } = {},
 ): WorkerTopologyContract {
   const planningMode = normalizePrometheusPlanningMode(
     opts.planningMode,
@@ -253,20 +316,31 @@ export function buildWorkerTopologyContract(
     maxParallelWorkers,
     roles,
     lanes,
+    continuation: buildContinuationContract(opts.admittedWorkerTopology || null, roles, lanes),
   };
 }
 
 export function selectExecutionPatternForPlans(
   plans: unknown[],
-  opts: { planningMode?: unknown; workerTopology?: WorkerTopologyContract | null } = {},
+  opts: {
+    planningMode?: unknown;
+    workerTopology?: WorkerTopologyContract | null;
+    admittedWorkerTopology?: WorkerTopologyContract | null;
+  } = {},
 ): ExecutionPattern {
   const planningMode = normalizePrometheusPlanningMode(
     opts.planningMode,
     PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION,
   ) || PROMETHEUS_PLANNING_MODE.MASTER_EVOLUTION;
-  const workerTopology = opts.workerTopology || buildWorkerTopologyContract(plans, { planningMode });
+  const workerTopology = opts.workerTopology || buildWorkerTopologyContract(plans, {
+    planningMode,
+    admittedWorkerTopology: opts.admittedWorkerTopology || null,
+  });
   if (planningMode === PROMETHEUS_PLANNING_MODE.REPAIR_PLAN) {
     return EXECUTION_PATTERN.SERIAL_REPAIR;
+  }
+  if (workerTopology.continuation?.preservesMultiLaneAdmission) {
+    return EXECUTION_PATTERN.WAVE_PARALLEL;
   }
   if (workerTopology.workerCount <= 1 && workerTopology.maxParallelWorkers <= 1) {
     return EXECUTION_PATTERN.SINGLE_WORKER;
