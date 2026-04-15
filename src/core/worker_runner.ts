@@ -3301,7 +3301,6 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   if (finalOutputExitTimer) {
     clearTimeout(finalOutputExitTimer);
-    finalOutputExitTimer = null;
   }
 
   const stdout = String(result?.stdout || "");
