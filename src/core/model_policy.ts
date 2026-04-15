@@ -15,6 +15,7 @@
 import path from "node:path";
 import { readJson, writeJson } from "./fs_utils.js";
 import { scheduleBoundedHypothesisCandidates, type ScheduledHypothesisCandidate } from "./hypothesis_scheduler.js";
+import { resolvePromptFamilyLineageJoinKey } from "./prompt_compiler.js";
 import {
   normalizeInterventionLineageContract,
   resolveInterventionLineageJoinKey,
@@ -550,28 +551,13 @@ function resolveRoutingLineageJoinKey(
   contract: InterventionLineageContract,
   hints: { taskKind?: unknown; role?: unknown; explicitJoinKey?: unknown } = {},
 ): string | null {
-  const explicitJoinKey = String(hints.explicitJoinKey || "").trim();
-  const taskKind = normalizeRoutingJoinTaskKind(hints.taskKind ?? contract.taskKind);
-  const role = String(hints.role ?? contract.role ?? "").trim().toLowerCase();
-  const derivedJoinKey = (
-    contract.promptFamilyKey
-    && (
-      taskKind === "planning"
-      || taskKind === "plan-review"
-      || taskKind === "review"
-      || taskKind === "analysis"
-      || role === "prometheus"
-      || role === "athena"
-      || role === "jesus"
-    )
-  )
-    ? `prompt-family:${contract.promptFamilyKey}`
-    : resolveInterventionLineageJoinKey(contract)
-      || (contract.promptFamilyKey ? `prompt-family:${contract.promptFamilyKey}` : null);
-  if (explicitJoinKey && (!derivedJoinKey || explicitJoinKey === derivedJoinKey)) {
-    return explicitJoinKey;
-  }
-  return derivedJoinKey ?? (explicitJoinKey || null);
+  return resolvePromptFamilyLineageJoinKey({
+    promptFamilyKey: contract.promptFamilyKey,
+    taskKind: normalizeRoutingJoinTaskKind(hints.taskKind ?? contract.taskKind),
+    role: hints.role ?? contract.role,
+    explicitJoinKey: hints.explicitJoinKey,
+    fallbackJoinKey: resolveInterventionLineageJoinKey(contract),
+  });
 }
 
 /**

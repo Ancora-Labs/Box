@@ -12,6 +12,7 @@ import {
   CACHE_COMPLETION_OUTCOME,
   appendCacheOutcome,
   appendPromptCacheTelemetry,
+  readPromptCacheTelemetry,
   appendInterventionRetirementEvidence,
   appendPolicyClosureEvidence,
   enforceStateRetention,
@@ -615,10 +616,33 @@ describe("recordCapabilityExecution", () => {
     const parsed = JSON.parse(raw.trim());
     assert.equal(parsed.lineageId, "lineage-1");
     assert.equal(parsed.lineageJoinKey, "lineage:lineage-1");
+    assert.equal(parsed.stablePrefixHash, "planner");
+    assert.equal(parsed.cacheableSegments, 6);
     assert.equal(parsed.lineage.taskId, "task-1");
     assert.equal(parsed.lineage.role, "quality-worker");
     assert.equal(parsed.lineage.lane, "quality");
     assert.equal(parsed.lineage.specialized, true);
+  });
+
+  it("normalizes prompt-cache telemetry around the prompt-family key when lineage ids are absent", async () => {
+    const config = { paths: { stateDir } };
+    const result = await appendPromptCacheTelemetry(config, {
+      promptFamilyKey: "review-family",
+      agent: "athena",
+      model: "GPT-5.4",
+      taskKind: "review",
+      totalSegments: 7,
+      cacheableSegments: 3,
+      estimatedSavedTokens: 90,
+    });
+    assert.equal(result.ok, true);
+
+    const entries = await readPromptCacheTelemetry(config);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].cachedSegments, 3);
+    assert.equal(entries[0].cacheableSegments, 3);
+    assert.equal(entries[0].lineageJoinKey, "prompt-family:review-family");
+    assert.equal(entries[0].stablePrefixHash, "review-family");
   });
 
   it("retains capability-execution lineage metadata in the runtime summary", async () => {

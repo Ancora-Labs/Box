@@ -490,6 +490,10 @@ export const CACHE_STABLE_SECTION_NAMES: ReadonlySet<string> = new Set([
   "leverage-ranked-alternatives",
 ]);
 
+function normalizePromptSectionName(name: unknown): string {
+  return String(name || "").trim().toLowerCase().replace(/[_\s]+/g, "-");
+}
+
 function isInvariantPromptSection(section: { partitionBudget?: string; required?: boolean } | null | undefined): boolean {
   return section?.partitionBudget === PROMPT_BUDGET_PARTITION.INVARIANT;
 }
@@ -498,11 +502,44 @@ function isCacheablePromptSection(
   section: { name?: string; cacheable?: boolean; partitionBudget?: string; required?: boolean } | null | undefined,
   extraStableNames: ReadonlySet<string>,
 ): boolean {
-  const name = String(section?.name || "").toLowerCase();
+  const name = normalizePromptSectionName(section?.name);
   return CACHE_STABLE_SECTION_NAMES.has(name)
     || extraStableNames.has(name)
     || section?.cacheable === true
     || isInvariantPromptSection(section);
+}
+
+function normalizePromptCacheContent(content: unknown): string {
+  return stripPromptLineageMarker(content).replace(/\s+/g, " ").trim();
+}
+
+function hasPromptSectionContent(section: { content?: unknown } | null | undefined): boolean {
+  return normalizePromptCacheContent(section?.content).length > 0;
+}
+
+function collectStablePrefixSections(
+  sections: Array<{ name?: string; content?: string; cacheable?: boolean; partitionBudget?: string; required?: boolean; [key: string]: any }>,
+  extraStableNames: ReadonlySet<string>,
+): Array<{ name: string; content: string }> {
+  const prefix: Array<{ name: string; content: string }> = [];
+  let prefixOpen = true;
+  for (const section of sections || []) {
+    if (!section || !prefixOpen) {
+      if (!prefixOpen) break;
+      continue;
+    }
+    const content = normalizePromptCacheContent(section.content);
+    if (!content) continue;
+    if (!isCacheablePromptSection(section, extraStableNames)) {
+      prefixOpen = false;
+      continue;
+    }
+    prefix.push({
+      name: normalizePromptSectionName(section.name),
+      content,
+    });
+  }
+  return prefix;
 }
 
 /**
@@ -513,8 +550,9 @@ function isCacheablePromptSection(
  *   (b) `opts.stableNames` includes its name, or
  *   (c) the section already carries `cacheable: true`.
  *
- * Sections that vary per-call (task context, plan details) are left
- * `cacheable: false` so callers know not to include them in a cached prefix.
+ * Cacheability is enforced as a contiguous prefix. Once a dynamic section is
+ * encountered, later sections remain non-cacheable even if they are otherwise
+ * structurally stable — provider prompt caching only reuses a stable prefix.
  *
  * Original section objects are never mutated — a new array is returned.
  *
@@ -526,10 +564,16 @@ export function markCacheableSegments(
   sections: Array<{ name: string; content: string; cacheable?: boolean; [key: string]: any }>,
   opts: { stableNames?: string[] } = {}
 ): Array<{ name: string; content: string; cacheable: boolean; [key: string]: any }> {
-  const extra = new Set((opts.stableNames || []).map(n => String(n).toLowerCase()));
-  return (sections || []).map(s => {
-    const isStable = isCacheablePromptSection(s, extra);
-    return { ...s, cacheable: isStable };
+  const extra = new Set((opts.stableNames || []).map(normalizePromptSectionName));
+  let prefixOpen = true;
+  return (sections || []).map((section) => {
+    const hasContent = hasPromptSectionContent(section);
+    const isStable = isCacheablePromptSection(section, extra);
+    const cacheable = Boolean(prefixOpen && hasContent && isStable);
+    if (prefixOpen && hasContent && !isStable) {
+      prefixOpen = false;
+    }
+    return { ...section, cacheable };
   });
 }
 
@@ -546,23 +590,65 @@ export function derivePromptFamilyKey(
 ): string {
   const stableOnly = opts.stableOnly !== false;
   const emptyStableNames = new Set<string>();
-  const normalized = (sections || [])
-    .filter((section) => {
-      if (!section || typeof section.content !== "string") return false;
-      if (section.content.trim().length === 0) return false;
-      return stableOnly ? isCacheablePromptSection(section, emptyStableNames) : true;
-    })
-    .map((section) => ({
-      name: String(section.name || "").trim().toLowerCase(),
-      content: String(section.content || "").replace(/\s+/g, " ").trim(),
-    }))
-    .sort((left, right) => left.name.localeCompare(right.name) || left.content.localeCompare(right.content));
+  const normalized = stableOnly
+    ? collectStablePrefixSections(sections, emptyStableNames)
+    : (sections || [])
+      .filter((section) => hasPromptSectionContent(section))
+      .map((section) => ({
+        name: normalizePromptSectionName(section.name),
+        content: normalizePromptCacheContent(section.content),
+      }));
+  const includeSalt = normalized.length === 0 || stableOnly === false;
 
   const payload = JSON.stringify({
-    salt: String(opts.salt || "prompt-family"),
+    schema: stableOnly ? "stable-prefix-v2" : "full-prompt-v2",
+    salt: includeSalt ? String(opts.salt || "prompt-family") : null,
     sections: normalized,
   });
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+}
+
+export function buildPromptFamilyJoinKey(promptFamilyKey: unknown): string | null {
+  const normalized = normalizePromptLineageScalar(promptFamilyKey, 160);
+  return normalized ? `prompt-family:${normalized}` : null;
+}
+
+function normalizePromptJoinTaskKind(value: unknown): string {
+  return String(value || "").trim().toLowerCase().replace(/[_\s]+/g, "-");
+}
+
+export function shouldUsePromptFamilyJoinKey(
+  hints: { taskKind?: unknown; role?: unknown } = {},
+): boolean {
+  const taskKind = normalizePromptJoinTaskKind(hints.taskKind);
+  const role = String(hints.role || "").trim().toLowerCase();
+  return (
+    taskKind === "planning"
+    || taskKind === "plan-review"
+    || taskKind === "review"
+    || taskKind === "analysis"
+    || role === "prometheus"
+    || role === "athena"
+    || role === "jesus"
+  );
+}
+
+export function resolvePromptFamilyLineageJoinKey(
+  input: {
+    promptFamilyKey?: unknown;
+    taskKind?: unknown;
+    role?: unknown;
+    explicitJoinKey?: unknown;
+    fallbackJoinKey?: unknown;
+  } = {},
+): string | null {
+  const explicitJoinKey = normalizePromptLineageScalar(input.explicitJoinKey, 240);
+  const fallbackJoinKey = normalizePromptLineageScalar(input.fallbackJoinKey, 240);
+  const promptFamilyJoinKey = buildPromptFamilyJoinKey(input.promptFamilyKey);
+  if (shouldUsePromptFamilyJoinKey({ taskKind: input.taskKind, role: input.role })) {
+    return promptFamilyJoinKey || explicitJoinKey || fallbackJoinKey;
+  }
+  return explicitJoinKey || fallbackJoinKey || promptFamilyJoinKey;
 }
 
 export const PROMPT_LINEAGE_MARKER_PREFIX = "<!-- BOX_PROMPT_LINEAGE:";

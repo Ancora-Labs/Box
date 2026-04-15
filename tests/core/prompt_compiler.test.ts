@@ -348,7 +348,7 @@ describe("prompt_compiler", () => {
       );
     });
 
-    it("keeps prompt-family key stable when cacheable invariant section order changes", () => {
+    it("changes prompt-family key when the stable prefix order changes", () => {
       const invariantA = {
         ...section("output-format", "Always emit structured packets."),
         partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
@@ -359,7 +359,7 @@ describe("prompt_compiler", () => {
       };
       const first = markCacheableSegments([invariantA, invariantB, section("context", "dynamic A")]);
       const second = markCacheableSegments([invariantB, invariantA, section("context", "dynamic B")]);
-      assert.equal(
+      assert.notEqual(
         derivePromptFamilyKey(first, { salt: "test" }),
         derivePromptFamilyKey(second, { salt: "test" }),
       );
@@ -372,6 +372,31 @@ describe("prompt_compiler", () => {
         derivePromptFamilyKey(first, { salt: "test" }),
         derivePromptFamilyKey(second, { salt: "test" }),
       );
+    });
+
+    it("ignores caller salt when a stable prefix exists", () => {
+      const marked = markCacheableSegments([
+        section("role", "You are Prometheus."),
+        section("context", "dynamic cycle input A"),
+      ]);
+      assert.equal(
+        derivePromptFamilyKey(marked, { salt: "planner" }),
+        derivePromptFamilyKey(marked, { salt: "reviewer" }),
+      );
+    });
+
+    it("forces cacheability to stop after the first dynamic section", () => {
+      const marked = markCacheableSegments([
+        section("role", "You are Prometheus."),
+        section("context", "dynamic cycle input"),
+        {
+          ...section("system", "Stable but no longer prefix-cacheable."),
+          partitionBudget: PROMPT_BUDGET_PARTITION.INVARIANT,
+        },
+      ]);
+      assert.equal(marked[0].cacheable, true);
+      assert.equal(marked[1].cacheable, false);
+      assert.equal(marked[2].cacheable, false);
     });
 
     it("builds and extracts a prompt-lineage marker deterministically", () => {

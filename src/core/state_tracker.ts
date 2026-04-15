@@ -1,6 +1,7 @@
-﻿import fs from "node:fs/promises";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureParent, readJson, writeJson } from "./fs_utils.js";
+import { resolvePromptFamilyLineageJoinKey } from "./prompt_compiler.js";
 import { emitEvent } from "./logger.js";
 import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 import { validateLineageEntry, buildFailureClusters, detectLoop, LINEAGE_ERROR_CODE, LINEAGE_THRESHOLDS } from "./lineage_graph.js";
@@ -718,10 +719,13 @@ export async function appendPromptCacheTelemetry(
     model?: string;
     taskKind?: string;
     totalSegments: number;
-    cachedSegments: number;
+    cachedSegments?: number;
+    cacheableSegments?: number;
     estimatedSavedTokens?: number;
+    stablePrefixHash?: string;
     lineage?: unknown;
     lineageId?: string;
+    lineageJoinKey?: string;
     taskId?: string;
     cycleId?: string;
     interventionId?: string;
@@ -734,14 +738,18 @@ export async function appendPromptCacheTelemetry(
   const filePath = path.join(config?.paths?.stateDir || "state", "prompt_cache_usage.jsonl");
   try {
     const totalSegments = Math.max(0, Math.floor(Number(record?.totalSegments || 0)));
-    const cachedSegments = Math.max(0, Math.floor(Number(record?.cachedSegments || 0)));
+    const cacheableSegments = Math.max(
+      0,
+      Math.floor(Number(record?.cacheableSegments ?? record?.cachedSegments ?? 0)),
+    );
     if (!String(record?.promptFamilyKey || "").trim()) {
       return { ok: false, reason: "promptFamilyKey is required" };
     }
     if (totalSegments <= 0) {
       return { ok: false, reason: "totalSegments must be > 0" };
     }
-    const boundedCachedSegments = Math.min(totalSegments, cachedSegments);
+    const promptFamilyKey = String(record.promptFamilyKey).trim();
+    const boundedCachedSegments = Math.min(totalSegments, cacheableSegments);
     const estimatedSavedTokens = Math.max(0, Math.round(Number(record?.estimatedSavedTokens || 0)));
     const lineage = normalizeInterventionLineageContract(record?.lineage, {
       lineageId: record?.lineageId ?? null,
@@ -757,17 +765,26 @@ export async function appendPromptCacheTelemetry(
       specialized: record?.specialized ?? null,
       rerouteReasonCode: record?.rerouteReasonCode ?? null,
     });
+    const lineageJoinKey = resolvePromptFamilyLineageJoinKey({
+      promptFamilyKey,
+      taskKind: record?.taskKind ?? lineage.taskKind,
+      role: record?.agent ?? lineage.role,
+      explicitJoinKey: record?.lineageJoinKey,
+      fallbackJoinKey: resolveInterventionLineageJoinKey(lineage),
+    });
     const entry = {
-      promptFamilyKey: String(record.promptFamilyKey).trim(),
+      promptFamilyKey,
+      stablePrefixHash: normalizeLineageScalar(record?.stablePrefixHash ?? promptFamilyKey),
       agent: String(record?.agent || "unknown"),
       model: String(record?.model || "unknown"),
       taskKind: String(record?.taskKind || "general"),
       totalSegments,
       cachedSegments: boundedCachedSegments,
+      cacheableSegments: boundedCachedSegments,
       hitRate: Math.round((boundedCachedSegments / totalSegments) * 1000) / 1000,
       estimatedSavedTokens,
       lineageId: lineage.lineageId,
-      lineageJoinKey: resolveInterventionLineageJoinKey(lineage),
+      lineageJoinKey,
       lineage,
       recordedAt: new Date().toISOString(),
     };
@@ -789,7 +806,44 @@ export async function readPromptCacheTelemetry(config): Promise<any[]> {
       .filter(Boolean)
       .map((line) => {
         try {
-          return JSON.parse(line);
+          const entry = JSON.parse(line);
+          const promptFamilyKey = String(entry?.promptFamilyKey || "").trim();
+          const lineage = normalizeInterventionLineageContract(entry?.lineage, {
+            lineageId: normalizeLineageScalar(entry?.lineageId),
+            taskId: normalizeLineageScalar(entry?.taskId),
+            cycleId: normalizeLineageScalar(entry?.cycleId),
+            taskKind: normalizeLineageScalar(entry?.taskKind),
+            interventionId: normalizeLineageScalar(entry?.interventionId),
+            promptFamilyKey: promptFamilyKey || null,
+            model: normalizeLineageScalar(entry?.model),
+            role: normalizeLineageScalar(entry?.agent ?? entry?.role),
+            lane: normalizeLineageScalar(entry?.lane),
+            capability: normalizeLineageScalar(entry?.capability),
+            specialized: normalizeLineageBoolean(entry?.specialized),
+            rerouteReasonCode: normalizeLineageScalar(entry?.rerouteReasonCode),
+          });
+          const totalSegments = Math.max(0, Math.floor(Number(entry?.totalSegments || 0)));
+          const cacheableSegments = Math.min(
+            totalSegments,
+            Math.max(0, Math.floor(Number(entry?.cacheableSegments ?? entry?.cachedSegments ?? 0))),
+          );
+          return {
+            ...entry,
+            promptFamilyKey,
+            stablePrefixHash: normalizeLineageScalar(entry?.stablePrefixHash ?? promptFamilyKey),
+            totalSegments,
+            cachedSegments: cacheableSegments,
+            cacheableSegments,
+            lineageId: lineage.lineageId,
+            lineageJoinKey: resolvePromptFamilyLineageJoinKey({
+              promptFamilyKey,
+              taskKind: entry?.taskKind ?? lineage.taskKind,
+              role: entry?.agent ?? entry?.role ?? lineage.role,
+              explicitJoinKey: entry?.lineageJoinKey,
+              fallbackJoinKey: resolveInterventionLineageJoinKey(lineage),
+            }),
+            lineage,
+          };
         } catch {
           return null;
         }
