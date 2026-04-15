@@ -42,12 +42,16 @@ import {
   KNOWLEDGE_MEMORY_SCHEMA_VERSION,
   runSelfImprovementCycle,
   upsertKnowledgeMemoryLesson,
+  deriveReflectionHeuristic,
+  evaluateReflectionHeuristicOutcome,
+  reconcileReflectionHeuristics,
 } from "../../src/core/self_improvement.js";
 import { DECISION_QUALITY_LABEL } from "../../src/core/athena_reviewer.js";
 import {
   WORKER_CYCLE_ARTIFACTS_FILE,
   LEGACY_EVOLUTION_PROGRESS_FILE,
   LEGACY_EVOLUTION_PROGRESS_SCHEMA_VERSION,
+  buildReflectionHeuristicTelemetry,
 } from "../../src/core/cycle_analytics.js";
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -1281,6 +1285,185 @@ describe("collectCycleOutcomes — capabilityExecutionSummary with traces", () =
       result.capabilityExecutionSummary.observedCapabilityCount,
       result.capabilityExecutionSummary.observedCapabilities.length
     );
+  });
+});
+
+describe("reflection heuristics", () => {
+  it("derives typed retry heuristics from structured reflection memory", () => {
+    const heuristic = deriveReflectionHeuristic({
+      roleName: "evolution-worker",
+      taskKind: "implementation",
+      taskFingerprint: "fp-auth-fix",
+      taskSnippet: "fix auth verification gap",
+      outcome: {
+        status: "partial",
+        failureClass: "verification",
+        retryAction: "rework",
+        recordedAt: "2026-04-15T00:00:00.000Z",
+      },
+      retryState: {
+        failedPhase: "test",
+        evidence: [
+          { code: "tests_status", detail: "TESTS=fail", source: "verification_report" },
+        ],
+        mutation: {
+          instructions: [
+            "Repair TESTS=fail before entering push.",
+          ],
+        },
+      },
+    });
+
+    assert.equal(heuristic?.failure_type, "verification");
+    assert.equal(heuristic?.root_cause, "tests_failed");
+    assert.equal(heuristic?.next_attempt_rule, "repair tests=fail before entering push");
+    assert.equal(heuristic?.taskFingerprint, "fp-auth-fix");
+  });
+
+  it("retires a heuristic when a later verified postmortem exists for the same task fingerprint", () => {
+    const heuristic = {
+      heuristicId: "heuristic-1",
+      taskFingerprint: "fp-auth-fix",
+      sourceRecordedAt: "2026-04-15T00:00:00.000Z",
+    };
+
+    const evaluation = evaluateReflectionHeuristicOutcome(heuristic, [
+      {
+        taskFingerprint: "fp-auth-fix",
+        reviewedAt: "2026-04-15T01:00:00.000Z",
+        taskCompleted: true,
+        recommendation: "proceed",
+        closureEvidenceEnvelope: { verified: true },
+      },
+    ], "2026-04-15T02:00:00.000Z");
+
+    assert.equal(evaluation.status, "retired");
+    assert.equal(evaluation.verifiedOutcomeCount, 1);
+    assert.equal(evaluation.retirementReason, "verified_later_outcome");
+  });
+
+  it("negative path: keeps a heuristic active when no later verified outcome exists", () => {
+    const evaluation = evaluateReflectionHeuristicOutcome({
+      heuristicId: "heuristic-2",
+      taskFingerprint: "fp-auth-fix",
+      sourceRecordedAt: "2026-04-15T00:00:00.000Z",
+    }, [
+      {
+        taskFingerprint: "fp-auth-fix",
+        reviewedAt: "2026-04-15T01:00:00.000Z",
+        taskCompleted: false,
+        recommendation: "rework",
+      },
+    ], "2026-04-15T02:00:00.000Z");
+
+    assert.equal(evaluation.status, "active");
+    assert.equal(evaluation.verifiedOutcomeCount, 0);
+  });
+});
+
+describe("reconcileReflectionHeuristics", () => {
+  it("promotes active heuristics, retires verified ones, and persists ledger state", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-reflection-heuristics-"));
+    try {
+      await writeTestJson(tmpDir, "reflection_memory.json", {
+        schemaVersion: 2,
+        updatedAt: "2026-04-15T00:05:00.000Z",
+        entries: [
+          {
+            roleName: "evolution-worker",
+            taskKind: "implementation",
+            taskFingerprint: "fp-active",
+            taskSnippet: "repair verification flow",
+            outcome: {
+              status: "partial",
+              retryAction: "rework",
+              failureClass: "verification",
+              recordedAt: "2026-04-15T00:00:00.000Z",
+            },
+            retryState: {
+              failedPhase: "test",
+              evidence: [{ code: "tests_status", detail: "TESTS=fail", source: "verification_report" }],
+              mutation: { instructions: ["Repair TESTS=fail before entering push."] },
+            },
+          },
+          {
+            roleName: "evolution-worker",
+            taskKind: "implementation",
+            taskFingerprint: "fp-retired",
+            taskSnippet: "repair closure evidence",
+            outcome: {
+              status: "blocked",
+              retryAction: "reassign",
+              failureClass: "policy",
+              recordedAt: "2026-04-15T00:00:00.000Z",
+            },
+            retryState: {
+              failedPhase: "plan",
+              evidence: [{ code: "dispatch_block_reason", detail: "missing output markers", source: "dispatch_contract" }],
+              mutation: { instructions: ["Re-validate repo, tools, and scoped files before editing."] },
+            },
+          },
+        ],
+      });
+      await writeTestJson(tmpDir, "athena_postmortems.json", {
+        schemaVersion: 1,
+        entries: [
+          {
+            taskFingerprint: "fp-retired",
+            reviewedAt: "2026-04-15T01:00:00.000Z",
+            taskCompleted: true,
+            recommendation: "proceed",
+            closureEvidenceEnvelope: { verified: true },
+          },
+        ],
+      });
+
+      const knowledgeMemory = {
+        schemaVersion: KNOWLEDGE_MEMORY_SCHEMA_VERSION,
+        working: { lessons: [], configTunings: [], promptHints: [], updatedAt: null },
+        episodic: { lessons: [], retainedAt: null },
+        policy: { rules: [], updatedAt: null },
+        lastUpdated: null,
+      };
+
+      const result = await reconcileReflectionHeuristics(
+        tmpDir,
+        knowledgeMemory,
+        { timestamp: "2026-04-15T02:00:00.000Z" },
+        20,
+      );
+
+      assert.equal(result.promotedCount, 2);
+      assert.equal(result.retiredCount, 1);
+      assert.equal(result.activeCount, 1);
+      assert.equal(result.verifiedOutcomeCount, 1);
+      assert.equal(knowledgeMemory.working.lessons.length, 1, "only the active heuristic should stay in working memory");
+      assert.equal(knowledgeMemory.working.lessons[0].reflectionHeuristic.taskFingerprint, "fp-active");
+
+      const ledger = JSON.parse(await fs.readFile(path.join(tmpDir, "reflection_heuristics.json"), "utf8"));
+      assert.equal(ledger.entries.length, 2);
+      const retired = ledger.entries.find((entry) => entry.taskFingerprint === "fp-retired");
+      assert.equal(retired.status, "retired");
+      assert.equal(retired.retirementReason, "verified_later_outcome");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("buildReflectionHeuristicTelemetry", () => {
+  it("summarizes active, retired, and verified heuristic coverage", () => {
+    const telemetry = buildReflectionHeuristicTelemetry([
+      { taskFingerprint: "fp-1", status: "active", measuredAt: "2026-04-15T00:00:00.000Z", verifiedOutcomeCount: 0 },
+      { taskFingerprint: "fp-2", status: "retired", measuredAt: "2026-04-15T01:00:00.000Z", verifiedOutcomeCount: 1 },
+    ]);
+
+    assert.equal(telemetry.heuristicCount, 2);
+    assert.equal(telemetry.activeCount, 1);
+    assert.equal(telemetry.retiredCount, 1);
+    assert.equal(telemetry.measuredCount, 2);
+    assert.equal(telemetry.verifiedOutcomeCount, 1);
+    assert.equal(telemetry.taskFingerprintCoverage, 1);
   });
 });
 

@@ -2567,6 +2567,46 @@ export function splitEvaluationSuites(samples: unknown[]): {
   };
 }
 
+export function buildReflectionHeuristicTelemetry(entries: unknown[]): {
+  heuristicCount: number;
+  activeCount: number;
+  retiredCount: number;
+  measuredCount: number;
+  verifiedOutcomeCount: number;
+  taskFingerprintCoverage: number;
+} {
+  const safeEntries: Array<Record<string, unknown>> = Array.isArray(entries)
+    ? entries.filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry))
+        .map((entry) => entry as Record<string, unknown>)
+    : [];
+  const heuristicCount = safeEntries.length;
+  const activeCount = safeEntries.filter((entry) =>
+    String(entry.status || "").trim().toLowerCase() === "active"
+  ).length;
+  const retiredCount = safeEntries.filter((entry) =>
+    String(entry.status || "").trim().toLowerCase() === "retired"
+  ).length;
+  const measuredCount = safeEntries.filter((entry) =>
+    String(entry.measuredAt || "").trim().length > 0
+  ).length;
+  const verifiedOutcomeCount = safeEntries.reduce((sum: number, entry) => (
+    sum + Math.max(0, Number(entry.verifiedOutcomeCount || 0))
+  ), 0);
+  const withFingerprint = safeEntries.filter((entry) =>
+    String(entry.taskFingerprint || "").trim().length > 0
+  ).length;
+  return {
+    heuristicCount,
+    activeCount,
+    retiredCount,
+    measuredCount,
+    verifiedOutcomeCount,
+    taskFingerprintCoverage: heuristicCount > 0
+      ? Math.round((withFingerprint / heuristicCount) * 1000) / 1000
+      : 0,
+  };
+}
+
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 /**
@@ -2602,6 +2642,7 @@ export async function persistCycleAnalytics(config, record) {
     runtimeRetirementEvidence,
     runtimeLineageState,
     runtimeAthenaPostmortems,
+    runtimeReflectionHeuristics,
   ] = await Promise.all([
     loadCapabilityExecutionSummary({ paths: { stateDir } }),
     readPromptCacheTelemetry({ paths: { stateDir } }),
@@ -2610,6 +2651,7 @@ export async function persistCycleAnalytics(config, record) {
     loadInterventionRetirementEvidence({ paths: { stateDir } }),
     readJson(path.join(stateDir, "lineage_graph.json"), { entries: [] }),
     readJson(path.join(stateDir, "athena_postmortems.json"), []),
+    readJson(path.join(stateDir, "reflection_heuristics.json"), { entries: [] }),
   ]);
   const normalizedCapabilityExecutionSummary = normalizeCapabilityExecutionSummary(
     record?.capabilityExecutionSummary ?? runtimeCapabilityExecutionSummary,
@@ -2632,6 +2674,11 @@ export async function persistCycleAnalytics(config, record) {
     ...record,
     capabilityExecutionSummary: normalizedCapabilityExecutionSummary,
     interventionLineageTelemetry: normalizedInterventionLineageTelemetry,
+    reflectionHeuristicTelemetry: buildReflectionHeuristicTelemetry(
+      Array.isArray((runtimeReflectionHeuristics as Record<string, unknown>)?.entries)
+        ? (runtimeReflectionHeuristics as Record<string, unknown>).entries as unknown[]
+        : [],
+    ),
     confidence: applyCapabilityExecutionConfidenceGate(record?.confidence, normalizedCapabilityExecutionSummary, true),
   };
 
