@@ -18,6 +18,8 @@ import {
   retireLowYieldPolicyFamilies,
   LOW_YIELD_IMPACT_THRESHOLD,
   LOW_YIELD_MIN_EVIDENCE_RECORDS,
+  buildPromptTruthMaintenanceSnapshot,
+  resolveStructuredTruthRetirement,
 } from "../../src/core/learning_policy_compiler.js";
 
 describe("learning_policy_compiler", () => {
@@ -343,6 +345,58 @@ describe("learning_policy_compiler", () => {
       const policies = [{ id: "custom-recurrence-xyz", severity: "warning", _hardGated: false }];
       const result = buildPromptHardConstraints(policies);
       assert.equal(result.length, 0);
+    });
+  });
+
+  describe("truth reconciliation", () => {
+    it("retires explicitly closed historical items even when the text still sounds active", () => {
+      const retirement = resolveStructuredTruthRetirement(
+        {
+          id: "hist-1",
+          status: "closed",
+          finding: "Critical worker isolation gap still needs urgent follow-up",
+        },
+        "Critical worker isolation gap still needs urgent follow-up",
+      );
+      assert.ok(retirement);
+      assert.match(retirement!.reason, /closed despite stale active wording/i);
+    });
+
+    it("keeps active items when no closure metadata exists", () => {
+      const retirement = resolveStructuredTruthRetirement(
+        {
+          id: "active-1",
+          status: "pending",
+          finding: "Keep verification telemetry active",
+        },
+        "Keep verification telemetry active",
+      );
+      assert.equal(retirement, null);
+    });
+
+    it("demotes closed lessons and priorities into retired historical context", () => {
+      const snapshot = buildPromptTruthMaintenanceSnapshot({
+        signals: {
+          latestMainCiConclusion: "failure",
+          latestMainCiHealthy: false,
+          athenaTrackedFieldsDeepEquality: false,
+          preDispatchGovernanceGate: false,
+          preDispatchLaneDiversityGate: false,
+        },
+        lessons: [
+          { id: "lesson-closed", lesson: "Patch missing retry guard", status: "closed" },
+          { id: "lesson-open", lesson: "Keep worker retries bounded" },
+        ],
+        leadershipPriorities: [
+          { description: "Demote stale capability gap", lifecycleState: "resolved" },
+          { description: "Protect active verifier coverage" },
+        ],
+      });
+
+      assert.deepEqual(snapshot.lessons.activeText, ["Keep worker retries bounded"]);
+      assert.equal(snapshot.lessons.retired.length, 1);
+      assert.deepEqual(snapshot.priorities.activeText, ["Protect active verifier coverage"]);
+      assert.equal(snapshot.priorities.retired.length, 1);
     });
   });
 

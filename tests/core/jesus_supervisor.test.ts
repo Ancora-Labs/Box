@@ -21,6 +21,7 @@ import {
   validateExpectedOutcomeMeasurable,
   sanitizeDirectiveFieldForPersistence,
   buildDirectiveStrategyBrief,
+  reconcileLeadershipHealthFindings,
   shouldWarnJesusDecisionLatency,
   hasReachedJesusSoftTimeout,
   formatJesusTierEscalationMessage,
@@ -273,6 +274,43 @@ describe("jesus_supervisor — buildDirectiveStrategyBrief", () => {
     );
     assert.equal(artifact.priorities[1], "Ship feature dashboard");
     assert.equal(artifact.priorities[2], "Clean up docs");
+  });
+});
+
+describe("jesus_supervisor — reconcileLeadershipHealthFindings", () => {
+  it("demotes closed and stale-ci findings into resolved historical lineage", () => {
+    const reconciled = reconcileLeadershipHealthFindings([
+      {
+        area: "capability-gap",
+        severity: "critical",
+        finding: "Missing prompt truth filter",
+        remediation: "Add filter",
+        capabilityNeeded: "prompt-truth-filter",
+        status: "closed",
+      },
+      {
+        area: "ci",
+        severity: "critical",
+        finding: "Failed CI: main is broken",
+        remediation: "Repair CI",
+        capabilityNeeded: "ci-fix",
+      },
+      {
+        area: "worker-health",
+        severity: "warning",
+        finding: "Worker heartbeat drifted",
+        remediation: "Check worker session freshness",
+        capabilityNeeded: "worker-observability",
+      },
+    ], {
+      latestMainCiConclusion: "success",
+      resolvedAt: "2026-04-15T11:00:00.000Z",
+    });
+
+    assert.equal(reconciled.activeFindings.length, 1);
+    assert.equal(reconciled.activeFindings[0].area, "worker-health");
+    assert.equal(reconciled.resolvedLineage.length, 2);
+    assert.equal(reconciled.resolvedLineage.every((entry) => entry._resolvedAt === "2026-04-15T11:00:00.000Z"), true);
   });
 });
 

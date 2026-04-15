@@ -54,6 +54,7 @@ import {
   buildPromptTruthMaintenanceSection,
   buildPromptTruthMaintenanceSnapshot,
   collectPromptTruthSignals,
+  resolveStructuredTruthRetirement,
 } from "./learning_policy_compiler.js";
 
 // ── CI system-learning debt detection ────────────────────────────────────────
@@ -869,6 +870,55 @@ export function buildDirectiveStrategyBrief(
   return buildJesusStrategyBriefArtifact(prioritizedDirective, expectedOutcome, opts);
 }
 
+export function reconcileLeadershipHealthFindings(
+  healthFindings: unknown[],
+  opts: { latestMainCiConclusion?: unknown; resolvedAt?: string } = {},
+): {
+  activeFindings: Record<string, unknown>[];
+  resolvedLineage: Record<string, unknown>[];
+} {
+  const latestMainCiConclusion = String(opts.latestMainCiConclusion || "").trim().toLowerCase();
+  const liveMainCiSuccess = latestMainCiConclusion === "success";
+  const resolvedAt = String(opts.resolvedAt || "").trim() || new Date().toISOString();
+  const activeFindings: Record<string, unknown>[] = [];
+  const resolvedLineage: Record<string, unknown>[] = [];
+  const CI_DEBT_PATTERN = /\bci[-_\s]?(?:broken|break|fail(?:ed|ing)?|fix|repair)\b/i;
+
+  for (const finding of Array.isArray(healthFindings) ? healthFindings : []) {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) continue;
+    const entry = finding as Record<string, unknown>;
+    const area = String(entry.area || "").trim().toLowerCase();
+    const capability = String(entry.capabilityNeeded || "").trim().toLowerCase();
+    const text = `${String(entry.finding || "")} ${String(entry.remediation || "")}`.trim();
+    const structuredRetirement = resolveStructuredTruthRetirement(entry, text);
+    const isCiBreak = area === "ci" && (capability === "ci-fix" || capability === "ci-setup");
+    const isSystemLearningCiDebt = area === "system-learning" && CI_DEBT_PATTERN.test(text);
+    const staleCiRetirement = liveMainCiSuccess && (isCiBreak || isSystemLearningCiDebt)
+      ? {
+          reasonCode: isCiBreak
+            ? "stale_ci_break:latestMainCiConclusion=success"
+            : "stale_system_learning_ci_debt:latestMainCiConclusion=success",
+          reason: isCiBreak
+            ? "retired because fresh main-branch CI state supersedes the historical CI-break finding"
+            : "retired because fresh main-branch CI state supersedes historical system-learning CI debt",
+        }
+      : null;
+    const retirement = staleCiRetirement || structuredRetirement;
+    if (!retirement) {
+      activeFindings.push(entry);
+      continue;
+    }
+    resolvedLineage.push({
+      ...entry,
+      _resolvedAt: resolvedAt,
+      _resolutionReason: retirement.reasonCode,
+      _resolutionNote: retirement.reason,
+    });
+  }
+
+  return { activeFindings, resolvedLineage };
+}
+
 // ── Main Jesus Cycle ─────────────────────────────────────────────────────────
 
 /**
@@ -1123,39 +1173,9 @@ export async function runJesusCycle(config) {
   // the normalization layer can detect when a previously-stale CI-break finding
   // has been superseded by a healthy CI run.
   {
-    const liveMainCiSuccess = githubState.latestMainCi?.conclusion === "success";
-
-    // Partition findings: when main CI is healthy, move stale CI-break and
-    // system-learning CI-debt findings to resolvedLineage so downstream
-    // consumers don't treat historical debt as active mandatory work.
-    const CI_DEBT_PATTERN = /\bci[-_\s]?(?:broken|break|fail(?:ed|ing)?|fix|repair)\b/i;
-    const activeFindings: typeof healthFindings = [];
-    const resolvedLineage: Record<string, unknown>[] = [];
-    const resolvedAt = new Date().toISOString();
-
-    for (const f of healthFindings) {
-      const area = String(f.area || "").trim().toLowerCase();
-      const capability = String(f.capabilityNeeded || "").trim().toLowerCase();
-      const text = `${String(f.finding || "")} ${String(f.remediation || "")}`;
-      const isCiBreak =
-        (area === "ci" && (capability === "ci-fix" || capability === "ci-setup"));
-      const isSysLearningCiDebt =
-        area === "system-learning" &&
-        CI_DEBT_PATTERN.test(text) &&
-        String(f.latestMainCiConclusion || "").trim().toLowerCase() === "success";
-
-      if (liveMainCiSuccess && (isCiBreak || isSysLearningCiDebt)) {
-        resolvedLineage.push({
-          ...f,
-          _resolvedAt: resolvedAt,
-          _resolutionReason: isCiBreak
-            ? "stale_ci_break:latestMainCiConclusion=success"
-            : "stale_system_learning_ci_debt:latestMainCiConclusion=success",
-        });
-      } else {
-        activeFindings.push(f);
-      }
-    }
+    const { activeFindings, resolvedLineage } = reconcileLeadershipHealthFindings(healthFindings, {
+      latestMainCiConclusion: githubState.latestMainCi?.conclusion,
+    });
     promptHealthFindings = activeFindings;
 
     const healthFindingsPayload: Record<string, unknown> = {
