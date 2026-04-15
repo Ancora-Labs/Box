@@ -3213,6 +3213,11 @@ const RESOLVED_BENCHMARK_RECOMMENDATION_STATUSES = new Set([
   "implemented",
   "implemented_correctly",
   "retired",
+  "closed",
+  "resolved",
+  "completed",
+  "archived",
+  "superseded",
 ]);
 
 export function extractLatestBenchmarkRecommendations(benchmarkData: unknown): Record<string, unknown>[] {
@@ -3238,9 +3243,28 @@ export function extractActiveBenchmarkRecommendations(benchmarkData: unknown): R
 export function isResolvedBenchmarkRecommendation(recommendation: unknown): boolean {
   if (!recommendation || typeof recommendation !== "object" || Array.isArray(recommendation)) return false;
   const record = recommendation as Record<string, unknown>;
-  const implementationStatus = String(record.implementationStatus || "").trim().toLowerCase();
-  if (RESOLVED_BENCHMARK_RECOMMENDATION_STATUSES.has(implementationStatus)) return true;
-  if (record.ciClosed === true) return true;
+  const lifecycleStatuses = [
+    record.implementationStatus,
+    record.status,
+    record.state,
+    record.lifecycleState,
+    record.recommendationStatus,
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+  if (lifecycleStatuses.some((status) => RESOLVED_BENCHMARK_RECOMMENDATION_STATUSES.has(status))) return true;
+  if (
+    record.ciClosed === true
+    || record.closed === true
+    || record.resolved === true
+    || record.retired === true
+    || record.historical === true
+    || record.active === false
+  ) return true;
+  if (
+    String(record.closedAt || "").trim().length > 0
+    || String(record.resolvedAt || "").trim().length > 0
+    || String(record.retiredAt || "").trim().length > 0
+    || String(record.archivedAt || "").trim().length > 0
+  ) return true;
   return String(record.mergedSha || "").trim().length > 0;
 }
 

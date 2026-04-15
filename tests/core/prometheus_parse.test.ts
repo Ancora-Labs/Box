@@ -64,6 +64,7 @@ import {
   ensurePersistedAnalysisTimestamps,
   validateCycleProofEvidenceSeams,
   buildTrustedMemoryShortlist,
+  reconcilePromptMemoryShortlistByTruth,
   normalizeScalarContractField,
   enforceCiRepairPacketForMandatoryFindings,
   isResearchDegradedModeActive,
@@ -703,6 +704,30 @@ describe("buildTrustedMemoryShortlist", () => {
     }, { requestedBy: "Jesus", includeLowTrust: true });
     assert.equal(shortlist.lessons.length, 1);
     assert.equal(shortlist.promptHints.length, 1);
+  });
+
+  it("reconciles closed prompt hints out of prompt memory before prompt assembly", () => {
+    const shortlist = buildTrustedMemoryShortlist({
+      lessons: [
+        { lesson: "Keep deterministic replay coverage", trust: { level: "high", source: "system", reason: "system", taggedAt: "2026-01-01T00:00:00.000Z" } },
+      ],
+      promptHints: [
+        { id: "hint-closed", hint: "Urgently fix the already closed CI breach", status: "closed", trust: { level: "high", source: "system", reason: "system", taggedAt: "2026-01-01T00:00:00.000Z" } },
+        { id: "hint-open", hint: "Keep replay closure evidence deterministic", trust: { level: "high", source: "system", reason: "system", taggedAt: "2026-01-01T00:00:00.000Z" } },
+      ],
+    }, { requestedBy: "Prometheus" });
+
+    const reconciled = reconcilePromptMemoryShortlistByTruth(shortlist, {
+      latestMainCiConclusion: "failure",
+      latestMainCiHealthy: false,
+      athenaTrackedFieldsDeepEquality: false,
+      preDispatchGovernanceGate: false,
+      preDispatchLaneDiversityGate: false,
+    });
+
+    assert.equal(reconciled.promptHints.length, 1);
+    assert.equal((reconciled.promptHints[0] as any).id, "hint-open");
+    assert.equal(reconciled.retiredPromptHints.length, 1);
   });
 });
 
@@ -5073,6 +5098,17 @@ describe("health-audit mandatory task injection contract", () => {
     assert.equal(result.length, 1, "warning severity must be included as mandatory");
     assert.equal(result[0].id, "cap-warning");
     assert.equal(result[0].severity, "warning");
+  });
+
+  it("extractMandatoryHealthAuditFindings demotes closed findings before wave planning", () => {
+    const payload = {
+      findings: [
+        { area: "ci", severity: "critical", finding: "Fix stale CI outage", remediation: "repair", capabilityNeeded: "cap-closed", status: "closed" },
+        { area: "capability-gap", severity: "critical", finding: "Missing planner contract", remediation: "implement", capabilityNeeded: "cap-open" },
+      ],
+    };
+    const result = extractMandatoryHealthAuditFindings(payload);
+    assert.deepEqual(result.map((entry) => entry.id), ["cap-open"]);
   });
 
   it("buildMandatoryTasksPromptSection renders MANDATORY_TASKS with finding ids", () => {

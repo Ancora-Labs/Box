@@ -33,6 +33,7 @@ export const TRUTH_MAINTENANCE_REASON_CODE = Object.freeze({
   GOVERNANCE_GATE_FIXED: "GOVERNANCE_GATE_FIXED",
   LANE_DIVERSITY_PRE_DISPATCH_FIXED: "LANE_DIVERSITY_PRE_DISPATCH_FIXED",
   RESEARCH_RECOMMENDATION_RESOLVED: "RESEARCH_RECOMMENDATION_RESOLVED",
+  CLOSED_HISTORICAL_CONTEXT: "CLOSED_HISTORICAL_CONTEXT",
 });
 
 export const REFLECTION_HEURISTIC_STATUS = Object.freeze({
@@ -97,7 +98,7 @@ export interface PromptTruthRetirement {
 
 export interface PromptTruthRetiredItem<T = unknown> {
   id: string;
-  kind: "lesson" | "recommendation" | "priority";
+  kind: "lesson" | "recommendation" | "priority" | "hint" | "finding";
   text: string;
   label: string;
   reasonCode: string;
@@ -204,6 +205,103 @@ function matchesLaneDiversityTimingDebt(text: string): boolean {
   return /after|timing|pre dispatch|pre-dispatch|pre wave|pre-wave|before wave|before dispatch|monocultural/.test(text);
 }
 
+const CLOSED_TRUTH_STATUS_FIELDS = Object.freeze([
+  "status",
+  "state",
+  "lifecycleState",
+  "implementationStatus",
+  "recommendationStatus",
+  "findingStatus",
+  "truthStatus",
+  "outcomeStatus",
+] as const);
+const CLOSED_TRUTH_TIMESTAMP_FIELDS = Object.freeze([
+  "closedAt",
+  "resolvedAt",
+  "retiredAt",
+  "archivedAt",
+  "historicalAt",
+  "mergedAt",
+] as const);
+const CLOSED_TRUTH_BOOLEAN_FIELDS = Object.freeze([
+  "closed",
+  "resolved",
+  "retired",
+  "historical",
+  "archived",
+  "superseded",
+  "ciClosed",
+  "implemented",
+] as const);
+const OPEN_TRUTH_BOOLEAN_FIELDS = Object.freeze([
+  "open",
+  "active",
+  "pending",
+  "reopened",
+] as const);
+const CLOSED_TRUTH_STATUS_TOKENS = new Set([
+  "closed",
+  "resolved",
+  "retired",
+  "historical",
+  "archived",
+  "implemented",
+  "implemented_correctly",
+  "completed",
+  "fixed",
+  "superseded",
+  "inactive",
+]);
+const OPEN_TRUTH_STATUS_TOKENS = new Set([
+  "open",
+  "active",
+  "pending",
+  "in_progress",
+  "in-progress",
+  "reopened",
+  "unresolved",
+]);
+
+function normalizeTruthLifecycleToken(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s]+/g, "_");
+}
+
+export function resolveStructuredTruthRetirement(
+  item: unknown,
+  text: unknown,
+): PromptTruthRetirement | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const record = item as Record<string, unknown>;
+  const lifecycleTokens = CLOSED_TRUTH_STATUS_FIELDS
+    .map((field) => normalizeTruthLifecycleToken(record[field]))
+    .filter(Boolean);
+  const explicitClosed =
+    lifecycleTokens.some((token) => CLOSED_TRUTH_STATUS_TOKENS.has(token))
+    || CLOSED_TRUTH_BOOLEAN_FIELDS.some((field) => record[field] === true)
+    || CLOSED_TRUTH_TIMESTAMP_FIELDS.some((field) => String(record[field] || "").trim().length > 0)
+    || String(record.mergedSha || "").trim().length > 0
+    || record.active === false;
+  if (!explicitClosed) return null;
+
+  const explicitOpen =
+    lifecycleTokens.some((token) => OPEN_TRUTH_STATUS_TOKENS.has(token))
+    || OPEN_TRUTH_BOOLEAN_FIELDS.some((field) => record[field] === true)
+    || record.active === true;
+  const normalizedText = normalizeTruthText(text);
+  const staleActiveWording =
+    explicitOpen
+    || /\b(missing|broken|blocked|must fix|follow up|follow-up|required|urgent|recurring|open issue)\b/.test(normalizedText);
+  return {
+    reasonCode: TRUTH_MAINTENANCE_REASON_CODE.CLOSED_HISTORICAL_CONTEXT,
+    reason: staleActiveWording
+      ? "retired because lifecycle metadata marks it closed despite stale active wording"
+      : "retired because lifecycle metadata marks it closed historical context",
+  };
+}
+
 export async function collectPromptTruthSignals(
   repoRoot: string,
   opts: { latestMainCiConclusion?: unknown } = {},
@@ -287,7 +385,7 @@ export function resolvePromptTruthRetirement(
 export function reconcilePromptTruthItems<T>(
   items: T[],
   opts: {
-    kind: "lesson" | "recommendation" | "priority";
+    kind: "lesson" | "recommendation" | "priority" | "hint" | "finding";
     signals: PromptTruthSignals;
     getText: (item: T) => unknown;
     getId?: (item: T, index: number) => unknown;
@@ -339,6 +437,9 @@ export function buildPromptTruthMaintenanceSnapshot(
     getId: (item, index) => (item && typeof item === "object" && !Array.isArray(item)
       ? (item as Record<string, unknown>).id || (item as Record<string, unknown>).addedAt || (item as Record<string, unknown>).source
       : null) || `lesson-${index + 1}`,
+    retireWhen: (item, text, signals) =>
+      resolveStructuredTruthRetirement(item, text)
+      || resolvePromptTruthRetirement(text, signals),
   });
   const recommendationsResult = reconcilePromptTruthItems(input.researchRecommendations ?? [], {
     kind: "recommendation",
@@ -355,7 +456,8 @@ export function buildPromptTruthMaintenanceSnapshot(
           reason: "retired because benchmark tracking marks it implemented or closed",
         };
       }
-      return resolvePromptTruthRetirement(text, signals);
+      return resolveStructuredTruthRetirement(item, text)
+        || resolvePromptTruthRetirement(text, signals);
     },
   });
   const prioritiesResult = reconcilePromptTruthItems(input.leadershipPriorities ?? [], {
@@ -364,6 +466,9 @@ export function buildPromptTruthMaintenanceSnapshot(
     getText: extractPriorityTruthText,
     getLabel: extractPriorityTruthText,
     getId: (_item, index) => `priority-${index + 1}`,
+    retireWhen: (item, text, signals) =>
+      resolveStructuredTruthRetirement(item, text)
+      || resolvePromptTruthRetirement(text, signals),
   });
 
   return {

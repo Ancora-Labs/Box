@@ -45,6 +45,7 @@ import {
   MIN_TELEMETRY_SAMPLE_THRESHOLD,
   migrateLegacyEvolutionProgressToCompletedTaskIds,
   parseDispatchBlockReasonContract,
+  isResolvedBenchmarkRecommendation,
   WORKER_CYCLE_ARTIFACTS_SCHEMA,
   LEGACY_EVOLUTION_PROGRESS_FILE,
   LEGACY_EVOLUTION_PROGRESS_SCHEMA_VERSION,
@@ -174,6 +175,40 @@ describe("migrateLegacyEvolutionProgressToCompletedTaskIds", () => {
     });
     assert.equal(migration.ok, false);
     assert.equal(migration.reason, "unknown_future_version");
+  });
+});
+
+describe("isResolvedBenchmarkRecommendation", () => {
+  it("treats closed lifecycle statuses as resolved historical recommendations", () => {
+    assert.equal(
+      isResolvedBenchmarkRecommendation({
+        topic: "Truth maintenance",
+        status: "closed",
+        summary: "Planner contradiction pass shipped",
+      }),
+      true,
+    );
+  });
+
+  it("treats explicit closure timestamps and inactive flags as resolved", () => {
+    assert.equal(
+      isResolvedBenchmarkRecommendation({
+        topic: "Wave planner",
+        resolvedAt: "2026-04-15T10:00:00.000Z",
+        active: false,
+      }),
+      true,
+    );
+  });
+
+  it("negative path: keeps pending recommendations actionable", () => {
+    assert.equal(
+      isResolvedBenchmarkRecommendation({
+        topic: "Worker runtime",
+        implementationStatus: "pending",
+      }),
+      false,
+    );
   });
 });
 

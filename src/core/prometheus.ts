@@ -113,6 +113,10 @@ import {
   buildPromptTruthMaintenanceSection,
   collectPromptTruthSignals,
   buildPromptTruthMaintenanceSnapshot,
+  reconcilePromptTruthItems,
+  resolveStructuredTruthRetirement,
+  resolvePromptTruthRetirement,
+  type PromptTruthSignals,
 } from "./learning_policy_compiler.js";
 import { buildRankedLessonShortlists } from "./lesson_halflife.js";
 import {
@@ -445,9 +449,10 @@ export function extractMandatoryHealthAuditFindings(payload: unknown): Mandatory
   for (let i = 0; i < findings.length; i++) {
     const raw = findings[i];
     if (!raw || typeof raw !== "object") continue;
+    const entry = raw as Record<string, unknown>;
+    if (resolveStructuredTruthRetirement(entry, `${String(entry.finding || "")} ${String(entry.remediation || "")}`)) continue;
     const severity = normalizeMandatorySeverity((raw as any).severity);
     if (!severity || !HEALTH_AUDIT_MANDATORY_SEVERITIES.has(severity)) continue;
-    const entry = raw as Record<string, unknown>;
     const id = buildMandatoryFindingId(entry, i);
     if (!id || seen.has(id)) continue;
     seen.add(id);
@@ -4610,6 +4615,56 @@ export function buildTrustedMemoryShortlist(
   };
 }
 
+export function reconcilePromptMemoryShortlistByTruth(
+  shortlist: {
+    lessons?: unknown[];
+    promptHints?: unknown[];
+    droppedLowTrustLessons?: number;
+    droppedLowTrustHints?: number;
+  } | null | undefined,
+  signals: PromptTruthSignals,
+): {
+  lessons: unknown[];
+  promptHints: unknown[];
+  droppedLowTrustLessons: number;
+  droppedLowTrustHints: number;
+  retiredPromptHints: Array<{ label: string; reason: string }>;
+} {
+  const safeShortlist = shortlist && typeof shortlist === "object"
+    ? shortlist
+    : {};
+  const hintSnapshot = reconcilePromptTruthItems(Array.isArray(safeShortlist.promptHints) ? safeShortlist.promptHints : [], {
+    kind: "hint",
+    signals,
+    getText: (item) => {
+      if (typeof item === "string") return item.trim();
+      if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+      const record = item as Record<string, unknown>;
+      return String(record.hint || record.reason || record.lesson || record.finding || "").trim();
+    },
+    getLabel: (item) => {
+      if (typeof item === "string") return item.trim();
+      if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+      const record = item as Record<string, unknown>;
+      return String(record.hint || record.reason || record.lesson || record.finding || "").trim();
+    },
+    getId: (item, index) => (item && typeof item === "object" && !Array.isArray(item)
+      ? (item as Record<string, unknown>).id || (item as Record<string, unknown>).addedAt || (item as Record<string, unknown>).source
+      : null) || `hint-${index + 1}`,
+    retireWhen: (item, text, truthSignals) =>
+      resolveStructuredTruthRetirement(item, text)
+      || resolvePromptTruthRetirement(text, truthSignals),
+  });
+
+  return {
+    lessons: Array.isArray(safeShortlist.lessons) ? safeShortlist.lessons : [],
+    promptHints: hintSnapshot.active,
+    droppedLowTrustLessons: Number(safeShortlist.droppedLowTrustLessons || 0),
+    droppedLowTrustHints: Number(safeShortlist.droppedLowTrustHints || 0),
+    retiredPromptHints: hintSnapshot.retired.map(({ label, reason }) => ({ label, reason })),
+  };
+}
+
 function hasValidParserContractFields(parsed: any): boolean {
   if (!parsed || typeof parsed !== "object") return false;
   const rawHealth = String(parsed.projectHealth ?? "").trim().toLowerCase();
@@ -6809,6 +6864,7 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
       ? (effectiveSynthesis as any).plannerSignals.priorityActions
       : [];
     if (truthSignals && memoryShortlist) {
+      const reconciledPromptMemory = reconcilePromptMemoryShortlistByTruth(memoryShortlist, truthSignals.signals);
       const plannerPrioritySnapshot = buildPromptTruthMaintenanceSnapshot({
         signals: truthSignals.signals,
         researchRecommendations: plannerPriorityActions,
@@ -6849,8 +6905,9 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
         retiredPriorities: retiredTruthPriorities,
       }, { maxActivePerKind: 4, maxRetiredPerKind: 4 });
       memoryShortlist = {
-        ...memoryShortlist,
+        ...reconciledPromptMemory,
         lessons: truthSnapshot.lessons.active,
+        promptHints: reconciledPromptMemory.promptHints,
       };
     }
 
