@@ -37,7 +37,15 @@ import {
 } from "./governance_freeze.js";
 import { isGuardrailActive } from "./guardrail_executor.js";
 import { GUARDRAIL_ACTION } from "./catastrophe_detector.js";
-import { buildPolicyImpactEntry, computePolicyImpactTrend, applyPolicyHalfLifeRetirement, buildPolicyImpactAttribution } from "./learning_policy_compiler.js";
+import {
+  buildPolicyImpactEntry,
+  computePolicyImpactTrend,
+  applyPolicyHalfLifeRetirement,
+  buildPolicyImpactAttribution,
+  buildReflectionHeuristicId,
+  buildReflectionHeuristicLessonText,
+  REFLECTION_HEURISTIC_STATUS,
+} from "./learning_policy_compiler.js";
 import {
   loadLedgerMeta,
   prioritizeStaleDebts,
@@ -699,6 +707,351 @@ function attachMemoryTrustMetadata(entry: any, opts: { source: string; sourceTyp
   return {
     ...entry,
     trust,
+  };
+}
+
+const REFLECTION_MEMORY_FILE = "reflection_memory.json";
+const REFLECTION_HEURISTICS_FILE = "reflection_heuristics.json";
+export const REFLECTION_HEURISTIC_SCHEMA_VERSION = 1;
+
+function normalizeReflectionToken(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+}
+
+function normalizeReflectionRule(value: unknown): string {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.]+$/, "")
+    .toLowerCase()
+    .slice(0, 220);
+}
+
+function deriveReflectionFailureType(entry: any): string {
+  const direct = normalizeReflectionToken(entry?.outcome?.failureClass || entry?.failureClass);
+  if (direct) return direct;
+  const failedPhase = normalizeReflectionToken(entry?.retryState?.failedPhase);
+  if (failedPhase === "test") return "verification";
+  if (failedPhase === "push") return "publication";
+  if (failedPhase === "edit") return "implementation";
+  if (failedPhase === "plan") return "planning";
+  return "unknown";
+}
+
+function deriveReflectionRootCause(entry: any): string {
+  const evidenceCodes = Array.isArray(entry?.retryState?.evidence)
+    ? entry.retryState.evidence
+      .map((item: any) => normalizeReflectionToken(item?.code))
+      .filter(Boolean)
+    : [];
+  if (evidenceCodes.includes("dispatch_block_reason")) return "dispatch_block_reason";
+  if (evidenceCodes.includes("tests_status")) return "tests_failed";
+  if (evidenceCodes.includes("build_status")) return "build_failed";
+  if (evidenceCodes.includes("verification_gaps") || evidenceCodes.includes("missing_test_output")) return "verification_artifact_gap";
+  if (evidenceCodes.includes("missing_sha") || evidenceCodes.includes("missing_clean_tree") || evidenceCodes.includes("pr_url")) return "push_artifact_gap";
+  if (evidenceCodes.includes("scope_scan") || evidenceCodes.includes("target_files")) return "scope_alignment_gap";
+  if (evidenceCodes[0]) return evidenceCodes[0];
+  return normalizeReflectionToken(entry?.retryState?.failedPhase || entry?.outcome?.status) || "unknown";
+}
+
+function deriveReflectionNextAttemptRule(entry: any): string {
+  const instructions = Array.isArray(entry?.retryState?.mutation?.instructions)
+    ? entry.retryState.mutation.instructions
+      .map((item: unknown) => normalizeReflectionRule(item))
+      .filter(Boolean)
+    : [];
+  if (instructions.length > 0) {
+    return instructions[0];
+  }
+  const failedPhase = normalizeReflectionToken(entry?.retryState?.failedPhase);
+  if (failedPhase === "test") return "reproduce the recorded verification evidence before widening edits";
+  if (failedPhase === "push") return "reuse the recorded branch and pr context before another push";
+  if (failedPhase === "edit") return "inspect the last touched files before searching wider";
+  return "re validate repo tools and scoped files before editing";
+}
+
+function isVerifiedReflectionOutcome(postmortem: any): boolean {
+  if (!postmortem || typeof postmortem !== "object") return false;
+  if (postmortem?.closureBoundaryViolation === true) return false;
+  if (postmortem?.closureEvidenceEnvelope?.verified === true) return true;
+  if (postmortem?.verified === true) return true;
+  return postmortem?.taskCompleted === true
+    && String(postmortem?.recommendation || "").trim().toLowerCase() === "proceed";
+}
+
+export function deriveReflectionHeuristic(entry: any): any | null {
+  if (!entry || typeof entry !== "object") return null;
+  const taskFingerprint = String(entry?.taskFingerprint || "").trim();
+  if (!taskFingerprint) return null;
+  const failure_type = deriveReflectionFailureType(entry);
+  const root_cause = deriveReflectionRootCause(entry);
+  const next_attempt_rule = deriveReflectionNextAttemptRule(entry);
+  const sourceRecordedAt = String(entry?.outcome?.recordedAt || entry?.recordedAt || "").trim() || new Date(0).toISOString();
+  const heuristicId = buildReflectionHeuristicId({
+    taskFingerprint,
+    failure_type,
+    root_cause,
+    next_attempt_rule,
+  });
+  return {
+    heuristicId,
+    roleName: String(entry?.roleName || "").trim(),
+    taskKind: String(entry?.taskKind || "general").trim() || "general",
+    taskSnippet: String(entry?.taskSnippet || entry?.task || "").trim(),
+    taskFingerprint,
+    failure_type,
+    root_cause,
+    next_attempt_rule,
+    sourceRecordedAt,
+    retryAction: entry?.outcome?.retryAction != null ? String(entry.outcome.retryAction) : null,
+    sourceStatus: String(entry?.outcome?.status || "unknown").trim().toLowerCase(),
+  };
+}
+
+export function evaluateReflectionHeuristicOutcome(heuristic: any, postmortems: any[], measuredAt = new Date().toISOString()): any {
+  const fingerprint = String(heuristic?.taskFingerprint || "").trim();
+  const recordedAtMs = new Date(String(heuristic?.sourceRecordedAt || 0)).getTime();
+  const related = (Array.isArray(postmortems) ? postmortems : []).filter((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const reviewedAtMs = new Date(String((entry as any)?.reviewedAt || 0)).getTime();
+    if (Number.isFinite(recordedAtMs) && Number.isFinite(reviewedAtMs) && reviewedAtMs < recordedAtMs) return false;
+    return String((entry as any)?.taskFingerprint || "").trim() === fingerprint;
+  });
+  const verified = related.filter((entry) => isVerifiedReflectionOutcome(entry));
+  const verifiedOutcomeCount = verified.length;
+  const latestVerifiedAt = verified.length > 0
+    ? String(verified[verified.length - 1]?.reviewedAt || measuredAt)
+    : null;
+  const impactEntry = buildPolicyImpactEntry(
+    String(heuristic?.heuristicId || ""),
+    "verified_later_outcome",
+    0,
+    verifiedOutcomeCount > 0 ? 1 : 0,
+    { measuredAt, cycleId: latestVerifiedAt || measuredAt, minImprovementDelta: 0.5 },
+  );
+  const trend = computePolicyImpactTrend(String(heuristic?.heuristicId || ""), [impactEntry]);
+  const attribution = buildPolicyImpactAttribution(
+    { id: heuristic?.heuristicId, _inactiveCycles: verifiedOutcomeCount > 0 ? 0 : 1 },
+    trend,
+    0,
+    verifiedOutcomeCount > 0 ? 1 : 0,
+    {
+      cycleId: latestVerifiedAt || measuredAt,
+      minImprovementDelta: 0.5,
+      minInactiveCycles: 1,
+      minEffectiveness: 0.2,
+    },
+  );
+  return {
+    relatedOutcomeCount: related.length,
+    verifiedOutcomeCount,
+    latestVerifiedAt,
+    measuredAt,
+    status: verifiedOutcomeCount > 0 ? REFLECTION_HEURISTIC_STATUS.RETIRED : REFLECTION_HEURISTIC_STATUS.ACTIVE,
+    retirementReason: verifiedOutcomeCount > 0 ? "verified_later_outcome" : null,
+    impactEntry,
+    attribution,
+  };
+}
+
+async function loadReflectionHeuristicLedger(stateDir: string) {
+  try {
+    return await readJson(path.join(stateDir, REFLECTION_HEURISTICS_FILE), {
+      schemaVersion: REFLECTION_HEURISTIC_SCHEMA_VERSION,
+      entries: [],
+      updatedAt: null,
+    });
+  } catch (err) {
+    warn(`[self-improvement] failed to load ${REFLECTION_HEURISTICS_FILE}: ${String((err as any)?.message || err)}`);
+    return {
+      schemaVersion: REFLECTION_HEURISTIC_SCHEMA_VERSION,
+      entries: [],
+      updatedAt: null,
+    };
+  }
+}
+
+async function saveReflectionHeuristicLedger(stateDir: string, ledger: any) {
+  try {
+    await writeJson(path.join(stateDir, REFLECTION_HEURISTICS_FILE), {
+      schemaVersion: REFLECTION_HEURISTIC_SCHEMA_VERSION,
+      entries: Array.isArray(ledger?.entries) ? ledger.entries : [],
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    warn(`[self-improvement] failed to save ${REFLECTION_HEURISTICS_FILE}: ${String((err as any)?.message || err)}`);
+    throw err;
+  }
+}
+
+async function loadReflectionMemoryEntries(stateDir: string): Promise<any[]> {
+  try {
+    const result = await readJsonSafe(path.join(stateDir, REFLECTION_MEMORY_FILE));
+    if (!result.ok) {
+      if (result.reason !== READ_JSON_REASON.MISSING) {
+        warn(`[self-improvement] reflection memory unavailable: reason=${result.reason}`);
+      }
+      return [];
+    }
+    return Array.isArray(result.data?.entries) ? result.data.entries : [];
+  } catch (err) {
+    warn(`[self-improvement] failed to load ${REFLECTION_MEMORY_FILE}: ${String((err as any)?.message || err)}`);
+    return [];
+  }
+}
+
+async function loadAthenaPostmortemEntries(stateDir: string): Promise<any[]> {
+  try {
+    const raw = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+    if (raw === null) return [];
+    const migrated = migrateData(raw, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+    if (!migrated.ok) {
+      warn(`[self-improvement] failed to migrate athena_postmortems.json for reflection heuristics: ${migrated.reason}`);
+      return [];
+    }
+    return extractPostmortemEntries(migrated.data);
+  } catch (err) {
+    warn(`[self-improvement] failed to load athena_postmortems.json for reflection heuristics: ${String((err as any)?.message || err)}`);
+    return [];
+  }
+}
+
+function upsertReflectionHeuristicLesson(km: any, heuristic: any, evaluation: any, maxLessons: number) {
+  const lesson = attachMemoryTrustMetadata({
+    lesson: buildReflectionHeuristicLessonText(heuristic),
+    source: "reflection-memory",
+    category: "retry-strategy",
+    severity: heuristic?.sourceStatus === "blocked" ? "critical" : "warning",
+    addedAt: heuristic?.sourceRecordedAt || new Date().toISOString(),
+    reflectionHeuristic: {
+      heuristicId: heuristic?.heuristicId,
+      taskFingerprint: heuristic?.taskFingerprint,
+      failure_type: heuristic?.failure_type,
+      root_cause: heuristic?.root_cause,
+      next_attempt_rule: heuristic?.next_attempt_rule,
+      status: evaluation?.status || REFLECTION_HEURISTIC_STATUS.ACTIVE,
+      promotedAt: heuristic?.sourceRecordedAt || new Date().toISOString(),
+      measuredAt: evaluation?.measuredAt || null,
+      verifiedOutcomeCount: evaluation?.verifiedOutcomeCount || 0,
+      retirementReason: evaluation?.retirementReason || null,
+      latestVerifiedAt: evaluation?.latestVerifiedAt || null,
+    },
+  }, {
+    source: "reflection-memory",
+    sourceType: "system",
+    isUserMediated: false,
+    reason: buildReflectionHeuristicLessonText(heuristic),
+  });
+  upsertKnowledgeMemoryLesson(km, lesson, maxLessons);
+}
+
+function markRetiredReflectionLessons(km: any, retiredById: Map<string, any>) {
+  const updatePartition = (entries: any[], moveToEpisodic: boolean) => {
+    const active: any[] = [];
+    const retired: any[] = [];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const heuristicId = String(entry?.reflectionHeuristic?.heuristicId || "").trim();
+      const lifecycle = heuristicId ? retiredById.get(heuristicId) : null;
+      if (!lifecycle) {
+        active.push(entry);
+        continue;
+      }
+      const updated = {
+        ...entry,
+        reflectionHeuristic: {
+          ...entry.reflectionHeuristic,
+          status: REFLECTION_HEURISTIC_STATUS.RETIRED,
+          measuredAt: lifecycle.measuredAt,
+          verifiedOutcomeCount: lifecycle.verifiedOutcomeCount,
+          retirementReason: lifecycle.retirementReason,
+          latestVerifiedAt: lifecycle.latestVerifiedAt,
+          retiredAt: lifecycle.latestVerifiedAt || lifecycle.measuredAt,
+        },
+      };
+      if (moveToEpisodic) retired.push(updated);
+      else active.push(updated);
+    }
+    return { active, retired };
+  };
+
+  if (km?.schemaVersion >= KNOWLEDGE_MEMORY_SCHEMA_VERSION) {
+    if (!km.working) km.working = { lessons: [], configTunings: [], promptHints: [], updatedAt: null };
+    if (!km.episodic) km.episodic = { lessons: [], retainedAt: null };
+    const workingResult = updatePartition(km.working.lessons, true);
+    const episodicResult = updatePartition(km.episodic.lessons, false);
+    km.working.lessons = workingResult.active;
+    km.episodic.lessons = [...episodicResult.active, ...workingResult.retired];
+    return;
+  }
+  km.lessons = updatePartition(km.lessons, false).active;
+}
+
+export async function reconcileReflectionHeuristics(stateDir: string, knowledgeMemory: any, outcomes: any, maxLessons: number) {
+  const [reflectionEntries, postmortems, existingLedger] = await Promise.all([
+    loadReflectionMemoryEntries(stateDir),
+    loadAthenaPostmortemEntries(stateDir),
+    loadReflectionHeuristicLedger(stateDir),
+  ]);
+  const measuredAt = String(outcomes?.timestamp || new Date().toISOString());
+  const derived = reflectionEntries
+    .map((entry) => deriveReflectionHeuristic(entry))
+    .filter(Boolean);
+  const existingEntries = Array.isArray(existingLedger?.entries) ? existingLedger.entries : [];
+  const byId = new Map(existingEntries.map((entry: any) => [String(entry?.heuristicId || ""), entry]));
+  const nextEntries: any[] = [];
+  const retiredById = new Map<string, any>();
+  let promotedCount = 0;
+  let retiredCount = 0;
+  let measuredCount = 0;
+
+  for (const heuristic of derived) {
+    const evaluation = evaluateReflectionHeuristicOutcome(heuristic, postmortems, measuredAt);
+    measuredCount++;
+    const existing = byId.get(String(heuristic.heuristicId || "")) as Record<string, unknown> | undefined;
+    const nextEntry = {
+      ...existing,
+      ...heuristic,
+      promotedAt: existing?.promotedAt || measuredAt,
+      status: evaluation.status,
+      measuredAt: evaluation.measuredAt,
+      relatedOutcomeCount: evaluation.relatedOutcomeCount,
+      verifiedOutcomeCount: evaluation.verifiedOutcomeCount,
+      latestVerifiedAt: evaluation.latestVerifiedAt,
+      retirementReason: evaluation.retirementReason,
+      impactEntry: evaluation.impactEntry,
+      impactAttribution: evaluation.attribution,
+    };
+    nextEntries.push(nextEntry);
+    if (!existing) promotedCount++;
+    if (evaluation.status === REFLECTION_HEURISTIC_STATUS.RETIRED) {
+      retiredCount++;
+      retiredById.set(String(heuristic.heuristicId || ""), evaluation);
+      continue;
+    }
+    upsertReflectionHeuristicLesson(knowledgeMemory, heuristic, evaluation, maxLessons);
+  }
+
+  for (const existing of existingEntries) {
+    const heuristicId = String(existing?.heuristicId || "");
+    if (!heuristicId || nextEntries.some((entry) => String(entry?.heuristicId || "") === heuristicId)) continue;
+    nextEntries.push(existing);
+  }
+
+  markRetiredReflectionLessons(knowledgeMemory, retiredById);
+  await saveReflectionHeuristicLedger(stateDir, { entries: nextEntries });
+
+  return {
+    promotedCount,
+    measuredCount,
+    retiredCount,
+    activeCount: nextEntries.filter((entry) => entry?.status === REFLECTION_HEURISTIC_STATUS.ACTIVE).length,
+    verifiedOutcomeCount: nextEntries.reduce((sum, entry) => sum + Math.max(0, Number(entry?.verifiedOutcomeCount || 0)), 0),
+    entries: nextEntries,
   };
 }
 
@@ -2441,6 +2794,15 @@ export async function runSelfImprovementCycle(config) {
 
   // 2. Load existing knowledge
   const knowledgeMemory = await loadKnowledgeMemory(stateDir);
+  const maxLessons = siConfig.maxReports || 200;
+  const reflectionHeuristics = await reconcileReflectionHeuristics(stateDir, knowledgeMemory, outcomes, maxLessons);
+  if (reflectionHeuristics.measuredCount > 0) {
+    await appendProgress(
+      config,
+      `[SELF-IMPROVEMENT][REFLECTION] promoted=${reflectionHeuristics.promotedCount} measured=${reflectionHeuristics.measuredCount} retired=${reflectionHeuristics.retiredCount} active=${reflectionHeuristics.activeCount}`
+    );
+    await saveKnowledgeMemory(stateDir, knowledgeMemory);
+  }
 
   // 3. Analyze with AI
   let analysis;
@@ -2459,7 +2821,6 @@ export async function runSelfImprovementCycle(config) {
 
   // 4. Store lessons in knowledge memory
   const newLessons = Array.isArray(analysis.lessons) ? analysis.lessons : [];
-  const maxLessons = siConfig.maxReports || 200;
   for (const lesson of newLessons) {
     const enrichedLesson = attachMemoryTrustMetadata({
       ...lesson,
@@ -2564,7 +2925,14 @@ export async function runSelfImprovementCycle(config) {
       configChangesCanaryStarted: canaryStartedCount,
       nextCyclePriorities: analysis.nextCyclePriorities || [],
       workerFeedback: analysis.workerFeedback || [],
-      capabilityGaps: newGaps
+      capabilityGaps: newGaps,
+      reflectionHeuristics: {
+        promotedCount: reflectionHeuristics.promotedCount,
+        measuredCount: reflectionHeuristics.measuredCount,
+        retiredCount: reflectionHeuristics.retiredCount,
+        activeCount: reflectionHeuristics.activeCount,
+        verifiedOutcomeCount: reflectionHeuristics.verifiedOutcomeCount,
+      },
     },
     policyImpact: {
       measuredCount: policyImpact.impactEntriesAdded,

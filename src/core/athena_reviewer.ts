@@ -54,6 +54,7 @@ import {
   POSTMORTEM_LIFECYCLE_STATE,
 } from "./plan_lifecycle_contract.js";
 import type { PostmortemLifecycleEvidenceEnvelope } from "./plan_lifecycle_contract.js";
+import { buildTaskFingerprint } from "./lineage_graph.js";
 import {
   loadLedgerMeta,
   autoCloseVerifiedDebt,
@@ -3701,6 +3702,12 @@ function computeDeterministicPostmortem(workerResult, originalPlan, dql) {
   };
 }
 
+function buildPostmortemTaskFingerprint(originalPlan: any, planArtifact: any): string {
+  const taskKind = String(planArtifact?.taskKind || originalPlan?.taskKind || "general").trim() || "general";
+  const task = String(planArtifact?.task || originalPlan?.task || "").trim();
+  return buildTaskFingerprint(taskKind, task);
+}
+
 function buildPostmortemLifecycleEvidenceEnvelope(
   workerResult: EvidenceEnvelope,
   originalPlan: any,
@@ -3871,6 +3878,7 @@ export async function runAthenaPostmortem(
     ? workerResult.executionReport
     : buildWorkerExecutionReportArtifact(workerResult);
   const planArtifact = getPrometheusPlanArtifact(originalPlan);
+  const taskFingerprint = buildPostmortemTaskFingerprint(originalPlan, planArtifact);
   const reviewArtifact = workerResult?.reviewArtifact && typeof workerResult.reviewArtifact === "object"
     ? workerResult.reviewArtifact
     : null;
@@ -3929,6 +3937,7 @@ export async function runAthenaPostmortem(
     const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, postmortem);
     const enrichedPostmortem = {
       ...postmortem,
+      taskFingerprint,
       closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
       recurrenceCount: closureMeta.recurrenceCount,
       recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...postmortem, ...closureMeta }),
@@ -4032,6 +4041,7 @@ export async function runAthenaPostmortem(
     const lastPm = pastPostmortems[pastPostmortems.length - 1];
     const dupPm = {
       ...lastPm,
+      taskFingerprint: String(lastPm?.taskFingerprint || taskFingerprint),
       reviewedAt: new Date().toISOString(),
       model: "duplicate-skip",
       decisionQualityLabel: dql.label,
@@ -4165,6 +4175,7 @@ ${recurrenceContext}
     const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, degradedPostmortem);
     const enrichedFallbackPostmortem = {
       ...degradedPostmortem,
+      taskFingerprint,
       closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
       recurrenceCount: fallbackClosureMeta.recurrenceCount,
       recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...degradedPostmortem, ...fallbackClosureMeta }),
@@ -4185,6 +4196,7 @@ ${recurrenceContext}
 
   const d = aiResult.parsed;
   const rawPostmortem = {
+    taskFingerprint,
     workerName: d.workerName || workerName,
     taskCompleted: d.taskCompleted !== false,
     expectedOutcome: d.expectedOutcome || "",
@@ -4290,6 +4302,7 @@ ${recurrenceContext}
   const lifecycleEvidenceEnvelope = buildPostmortemLifecycleEvidenceEnvelope(workerResult, originalPlan, postmortem);
   const enrichedPostmortem: any = {
     ...postmortem,
+    taskFingerprint,
     closureEvidenceEnvelope: lifecycleEvidenceEnvelope,
     recurrenceCount: closureMeta.recurrenceCount,
     recurrenceWeightedPriority: scoreRecurrenceWeightedPriority({ ...postmortem, ...closureMeta }),

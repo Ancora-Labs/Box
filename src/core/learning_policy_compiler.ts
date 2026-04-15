@@ -11,6 +11,7 @@
  */
 import path from "node:path";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   computeDecayedPolicyEffectiveness,
   IMPACT_ATTRIBUTION_OUTCOME,
@@ -33,6 +34,48 @@ export const TRUTH_MAINTENANCE_REASON_CODE = Object.freeze({
   LANE_DIVERSITY_PRE_DISPATCH_FIXED: "LANE_DIVERSITY_PRE_DISPATCH_FIXED",
   RESEARCH_RECOMMENDATION_RESOLVED: "RESEARCH_RECOMMENDATION_RESOLVED",
 });
+
+export const REFLECTION_HEURISTIC_STATUS = Object.freeze({
+  ACTIVE: "active",
+  RETIRED: "retired",
+} as const);
+
+function normalizeReflectionHeuristicToken(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+}
+
+export function buildReflectionHeuristicId(input: {
+  taskFingerprint?: unknown;
+  failure_type?: unknown;
+  root_cause?: unknown;
+  next_attempt_rule?: unknown;
+}): string {
+  const serialized = JSON.stringify({
+    taskFingerprint: String(input?.taskFingerprint || "").trim(),
+    failure_type: normalizeReflectionHeuristicToken(input?.failure_type),
+    root_cause: normalizeReflectionHeuristicToken(input?.root_cause),
+    next_attempt_rule: normalizeReflectionHeuristicToken(input?.next_attempt_rule),
+  });
+  return createHash("sha1").update(serialized).digest("hex");
+}
+
+export function buildReflectionHeuristicLessonText(input: {
+  failure_type?: unknown;
+  root_cause?: unknown;
+  next_attempt_rule?: unknown;
+  taskFingerprint?: unknown;
+}): string {
+  const failureType = normalizeReflectionHeuristicToken(input?.failure_type) || "unknown_failure";
+  const rootCause = normalizeTruthText(input?.root_cause).replace(/\s+/g, " ").trim() || "unknown root cause";
+  const nextAttemptRule = String(input?.next_attempt_rule || "").replace(/\s+/g, " ").trim() || "resume with deterministic evidence";
+  const fingerprint = String(input?.taskFingerprint || "").trim().slice(0, 12) || "unknown-task";
+  return `Retry heuristic ${failureType} for ${fingerprint}: ${rootCause}; next attempt must ${nextAttemptRule}`;
+}
 
 export interface PromptTruthSignals {
   latestMainCiConclusion: string | null;
