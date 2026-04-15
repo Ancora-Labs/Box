@@ -35,6 +35,7 @@ import {
   PACKET_VIOLATION_CODE,
   PLAN_VIOLATION_SEVERITY,
 } from "../../src/core/plan_contract_validator.js";
+import { buildWorkerTopologyContract } from "../../src/core/role_registry.js";
 
 describe("orchestrator pipeline progress — resilience", () => {
   let tmpDir;
@@ -708,6 +709,63 @@ describe("orchestrator checkpoint resume — pre-dispatch governance gate", () =
     assert.equal(checkpoint.completedPlans, 0, "no wave should complete when lane diversity blocks before dispatch");
     const workerSessionsExists = await fs.access(path.join(tmpDir, "worker_sessions.json")).then(() => true).catch(() => false);
     assert.equal(workerSessionsExists, false, "worker sessions must not be created before the first wave dispatch");
+  });
+
+  it("preserves admitted multi-lane topology for later-wave continuation slices instead of blocking a singleton lane", async () => {
+    const admittedPlans = [
+      {
+        id: "T1",
+        task: "Add governance freeze coverage",
+        role: "governance-worker",
+        wave: 1,
+        dependsOn: [],
+        filesInScope: [],
+        targetFiles: ["src/core/governance_freeze.ts"],
+        scope: "governance",
+        verification_commands: ["npm test"],
+        acceptance_criteria: ["governance checks stay deterministic"],
+      },
+      {
+        id: "T2",
+        task: "Add orchestrator regression tests",
+        role: "quality-worker",
+        wave: 1,
+        dependsOn: [],
+        filesInScope: [],
+        targetFiles: ["tests/core/orchestrator_pipeline_progress.test.ts"],
+        scope: "quality",
+        verification_commands: ["npm test"],
+        acceptance_criteria: ["test coverage captures continuation behavior"],
+      },
+      {
+        id: "T3",
+        task: "Carry forward the admitted continuation work",
+        role: "evolution-worker",
+        wave: 2,
+        dependsOn: [],
+        filesInScope: [],
+        targetFiles: ["src/core/orchestrator.ts"],
+        scope: "implementation",
+        verification_commands: ["npm test"],
+        acceptance_criteria: ["remaining continuation work dispatches without replanning drift"],
+      },
+    ];
+    const gateDecision = await evaluatePreDispatchGovernanceGate(
+      {
+        ...config,
+        systemGuardian: { enabled: false },
+        workerPool: {
+          minLanes: 2,
+          specializationTargets: { minSpecializedShare: 0.75 },
+        },
+      },
+      [admittedPlans[2]],
+      "late-wave-singleton-continuation",
+      null,
+      { admittedWorkerTopology: buildWorkerTopologyContract(admittedPlans) },
+    );
+
+    assert.equal(gateDecision.blocked, false, "later-wave continuation slices should preserve the admitted multi-lane topology");
   });
 
   it("proceeds with resumed dispatch when governance gate is clear", async () => {

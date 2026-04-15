@@ -76,7 +76,8 @@ import { initializeAggregateLiveLog, appendAggregateLiveLogSync } from "./live_l
 import { buildRoleExecutionBatches, buildTokenFirstBatches, measureWaveBoundaryIdleGap, shouldPackAcrossWaveBoundary, estimatePlanTokens, getUsableModelContextTokens, DEFAULT_SPECIALIST_FILL_THRESHOLD } from "./worker_batch_planner.js";
 import { computeFrontier } from "./dag_scheduler.js";
 import { agentFileExists, nameToSlug, validateCriticalAgentContracts } from "./agent_loader.js";
-import { getRoleRegistry, assertRoleCapabilityForTask, isAthenaReviewOrPostmortemTask } from "./role_registry.js";
+import { buildWorkerTopologyContract, getRoleRegistry, assertRoleCapabilityForTask, isAthenaReviewOrPostmortemTask } from "./role_registry.js";
+import type { WorkerTopologyContract } from "./role_registry.js";
 import { normalizePromptLineageContract } from "./prompt_compiler.js";
 import {
   checkArchitectureDrift,
@@ -941,14 +942,30 @@ export function rebatchOversizedAthenaPlanGroupsForAdmission(
  * fewer active lanes than minLanes purely because of conflict serialization.
  */
 export function shouldBypassLaneDiversityHardGate(opts: {
-  plans: any[];
+  plans: unknown[];
   minLanes: number;
-  capabilityPoolResult: { activeLaneCount: number };
-  laneConflicts: any[];
+  capabilityPoolResult: ({ activeLaneCount?: number } & Record<string, unknown>) | null;
+  laneConflicts: unknown[];
+  workerTopology?: { continuation?: { preservesMultiLaneAdmission?: boolean; reason?: string; admittedLaneCount?: number; remainingLaneCount?: number; missingLanes?: string[] } | null } | null;
+  admittedWorkerTopology?: { laneCount?: number } | null;
 }): { bypass: boolean; reason: string | null } {
   const laneConflicts = Array.isArray(opts?.laneConflicts) ? opts.laneConflicts : [];
   const activeLaneCount = Number(opts?.capabilityPoolResult?.activeLaneCount ?? 0);
   const minLanes = Number(opts?.minLanes ?? 2);
+  const continuation = opts?.workerTopology?.continuation;
+  const admittedLaneCount = Number(opts?.admittedWorkerTopology?.laneCount ?? continuation?.admittedLaneCount ?? 0);
+
+  if (
+    continuation?.preservesMultiLaneAdmission === true
+    && admittedLaneCount >= minLanes
+    && activeLaneCount < minLanes
+  ) {
+    const missingLanes = Array.isArray(continuation?.missingLanes) ? continuation.missingLanes.join(",") : "";
+    return {
+      bypass: true,
+      reason: `admitted_multi_lane_continuation:${String(continuation?.reason || "preserved_admitted_multi_lane_topology_for_continuation")};admitted=${admittedLaneCount};remaining=${Number(continuation?.remainingLaneCount ?? activeLaneCount)};missing=${missingLanes || "none"}`,
+    };
+  }
 
   if (laneConflicts.length > 0 && activeLaneCount < minLanes) {
     return {
@@ -968,8 +985,19 @@ export function shouldBypassLaneDiversityHardGate(opts: {
  */
 export function shouldBypassSpecializationAdmissionGate(opts: {
   laneDiversityBypassReason: string | null;
-  capabilityPoolResult: any;
+  capabilityPoolResult: Record<string, unknown> | null;
+  workerTopology?: { continuation?: { preservesMultiLaneAdmission?: boolean; admittedLaneCount?: number; remainingLaneCount?: number; missingLanes?: string[] } | null } | null;
+  admittedWorkerTopology?: { laneCount?: number } | null;
 }): { bypass: boolean; reason: string | null } {
+  const continuation = opts?.workerTopology?.continuation;
+  const admittedLaneCount = Number(opts?.admittedWorkerTopology?.laneCount ?? continuation?.admittedLaneCount ?? 0);
+  if (continuation?.preservesMultiLaneAdmission === true && admittedLaneCount > 1) {
+    const missingLanes = Array.isArray(continuation?.missingLanes) ? continuation.missingLanes.join(",") : "";
+    return {
+      bypass: true,
+      reason: `admitted_multi_lane_specialization_continuation:admitted=${admittedLaneCount};remaining=${Number(continuation?.remainingLaneCount ?? 0)};missing=${missingLanes || "none"}`,
+    };
+  }
   if (
     String(opts?.laneDiversityBypassReason || "") ===
     "same_lane_conflicts_will_serialize_into_distinct_batches"
@@ -1181,9 +1209,19 @@ export function buildCycleWorkerResultRow(batch: any, workerResult: any): {
  * Exported for integration tests and any callers that need the dispatch decision
  * surface without running a full orchestration cycle.
  */
-export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycleId = "", driftReport: ArchitectureDriftReport | null = null): Promise<GovernanceBlockDecision> {
+export async function evaluatePreDispatchGovernanceGate(
+  config,
+  plans = [],
+  cycleId = "",
+  driftReport: ArchitectureDriftReport | null = null,
+  opts: { admittedWorkerTopology?: WorkerTopologyContract | null } = {},
+): Promise<GovernanceBlockDecision> {
   const stateDir = config?.paths?.stateDir || "state";
   const normalizedPlans = Array.isArray(plans) ? plans : [];
+  const admittedWorkerTopology = opts?.admittedWorkerTopology || null;
+  const continuationTopology = buildWorkerTopologyContract(normalizedPlans, {
+    admittedWorkerTopology,
+  });
 
   // Bind deterministic named verification targets before any dispatch admission
   // checks so every downstream gate evaluates the canonical verification surface.
@@ -1577,19 +1615,33 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
   // ── Lane diversity gate ───────────────────────────────────────────────────
   // Runs in pre-dispatch governance so both standard and resume dispatch paths
   // block before wave-1 using a canonical block reason contract.
+  let laneDiversityBypassReason: string | null = null;
   const diversityMinLanesRaw = Number(config?.workerPool?.minLanes);
   const diversityMinLanes = Number.isFinite(diversityMinLanesRaw) && diversityMinLanesRaw > 1
     ? Math.floor(diversityMinLanesRaw)
     : null;
-  if (diversityMinLanes !== null && normalizedPlans.length >= diversityMinLanes) {
+  if (diversityMinLanes !== null && normalizedPlans.length > 0) {
     let diversityMsg = "";
     let diversityBlocked = false;
     try {
       const diversityPool = assignWorkersToPlans(normalizedPlans, config);
       const diversityResult = enforceLaneDiversity(diversityPool, { minLanes: diversityMinLanes });
       if (!diversityResult.meetsMinimum) {
-        diversityBlocked = true;
-        diversityMsg = String(diversityResult.warning || "insufficient lane diversity");
+        const diversityBypass = shouldBypassLaneDiversityHardGate({
+          plans: normalizedPlans,
+          minLanes: diversityMinLanes,
+          capabilityPoolResult: diversityPool,
+          laneConflicts: detectLaneConflicts(diversityPool.assignments),
+          workerTopology: continuationTopology,
+          admittedWorkerTopology,
+        });
+        if (diversityBypass.bypass) {
+          laneDiversityBypassReason = diversityBypass.reason;
+          warn(`[orchestrator] lane diversity gate bypassed for continuation topology: ${String(diversityBypass.reason || "unknown_reason")}`);
+        } else {
+          diversityBlocked = true;
+          diversityMsg = String(diversityResult.warning || "insufficient lane diversity");
+        }
       }
     } catch (diversityErr) {
       diversityBlocked = true;
@@ -1702,9 +1754,18 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
         topologyFeasibility,
       );
       const laneROIAdmission = computeLaneROIAdmission(laneTelemetrySignalsForAdmission);
+      const specializationBypass = shouldBypassSpecializationAdmissionGate({
+        laneDiversityBypassReason,
+        capabilityPoolResult: poolSample,
+        workerTopology: continuationTopology,
+        admittedWorkerTopology,
+      });
+      if (specializationBypass.bypass) {
+        warn(`[orchestrator] specialization admission gate bypassed for continuation topology: ${String(specializationBypass.reason || "unknown_reason")}`);
+      }
 
-      const specializationBlocked = admissionResult.blocked && !laneROIAdmission.admitted;
-      const roiBlocked = !laneROIAdmission.admitted && topologyFeasibility.feasible;
+      const specializationBlocked = !specializationBypass.bypass && admissionResult.blocked && !laneROIAdmission.admitted;
+      const roiBlocked = !specializationBypass.bypass && !laneROIAdmission.admitted && topologyFeasibility.feasible;
       const blockedReason = roiBlocked
         ? `${laneROIAdmission.reason}; shareGate=${admissionResult.reason || "pass"}`
         : admissionResult.reason;
@@ -2219,6 +2280,17 @@ function extractPlansFromWorkerBatches(workerBatches: any[]): any[] {
   ));
 }
 
+function resolveAdmittedWorkerTopology(workerBatches: any[]): WorkerTopologyContract | null {
+  if (!Array.isArray(workerBatches) || workerBatches.length === 0) return null;
+  const explicitTopology = workerBatches.find((batch) => batch?.workerTopology && typeof batch.workerTopology === "object")?.workerTopology;
+  if (explicitTopology && typeof explicitTopology === "object") {
+    return cloneCheckpointSnapshot(explicitTopology);
+  }
+  const topologyPlans = extractPlansFromWorkerBatches(workerBatches);
+  if (topologyPlans.length === 0) return null;
+  return buildWorkerTopologyContract(topologyPlans);
+}
+
 function getCheckpointWorkerBatchesSnapshot(checkpoint: any): any[] {
   return Array.isArray(checkpoint?.workerBatchesSnapshot)
     ? checkpoint.workerBatchesSnapshot
@@ -2229,6 +2301,13 @@ function getCheckpointDispatchPlanSnapshot(checkpoint: any): any[] {
   return Array.isArray(checkpoint?.dispatchPlanSnapshot)
     ? checkpoint.dispatchPlanSnapshot
     : [];
+}
+
+function getCheckpointAdmittedWorkerTopology(checkpoint: any): WorkerTopologyContract | null {
+  if (checkpoint?.admittedWorkerTopology && typeof checkpoint.admittedWorkerTopology === "object") {
+    return checkpoint.admittedWorkerTopology;
+  }
+  return resolveAdmittedWorkerTopology(getCheckpointWorkerBatchesSnapshot(checkpoint));
 }
 
 export async function evaluateDispatchResumeReadiness(config): Promise<{
@@ -2362,6 +2441,7 @@ async function beginDispatchCheckpoint(
 ) {
   const nowIso = new Date().toISOString();
   const planSetSignature = computePlanSetSignature(plans);
+  const admittedWorkerTopology = resolveAdmittedWorkerTopology(Array.isArray(plans) ? plans : []);
   const checkpoint = initializeRunSegmentState({
     schemaVersion: 2,
     status: "dispatching",
@@ -2377,6 +2457,7 @@ async function beginDispatchCheckpoint(
     reviewerPromptLineage: clonePromptLineageState(opts?.reviewerPromptLineage),
     dispatchPlanSnapshot: cloneCheckpointSnapshot(extractPlansFromWorkerBatches(Array.isArray(plans) ? plans : [])),
     workerBatchesSnapshot: cloneCheckpointSnapshot(Array.isArray(plans) ? plans : []),
+    admittedWorkerTopology: cloneCheckpointSnapshot(admittedWorkerTopology),
   }, {
     spanBatches: Number(config?.runtime?.runSegmentBatchSpan || RUN_SEGMENT_BATCH_SPAN_DEFAULT),
     historyMax: Number(config?.runtime?.runSegmentHistoryMax || RUN_SEGMENT_HISTORY_MAX_DEFAULT),
@@ -2593,16 +2674,30 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
     await completeDispatchCheckpoint(config, checkpoint);
     return false;
   }
+  const remainingWorkerBatches = workerBatches.slice(startIndex);
+  const remainingPlans = extractPlansFromWorkerBatches(remainingWorkerBatches);
+  const admittedWorkerTopologyForResume = getCheckpointAdmittedWorkerTopology(checkpoint) || resolveAdmittedWorkerTopology(workerBatches);
 
   // Pre-dispatch governance gate — same checks as runSingleCycle to prevent
   // resuming into a frozen/canary-breached/guardrail-paused state.
   const resumeCycleId = `resume-${Date.now()}`;
   try {
-    const gateDecision = await evaluatePreDispatchGovernanceGate(config, plans, resumeCycleId);
+    const gateDecision = await evaluatePreDispatchGovernanceGate(
+      config,
+      remainingPlans,
+      resumeCycleId,
+      null,
+      { admittedWorkerTopology: admittedWorkerTopologyForResume },
+    );
     emitEvent(EVENTS.GOVERNANCE_GATE_EVALUATED, EVENT_DOMAIN.GOVERNANCE, resumeCycleId, {
       blocked: gateDecision.blocked,
       reason: gateDecision.reason || null,
-      inputSnapshot: { planCount: plans.length, resumedFromCheckpoint: true, startIndex }
+      inputSnapshot: {
+        planCount: remainingPlans.length,
+        admittedPlanCount: plans.length,
+        resumedFromCheckpoint: true,
+        startIndex,
+      }
     });
     if (gateDecision.blocked) {
       const reasonMsg = gateDecision.dispatchBlockReason || gateDecision.reason || "pre_dispatch_gate_blocked";
