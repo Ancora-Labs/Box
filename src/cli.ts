@@ -117,9 +117,27 @@ function hasArgFlag(flag: string): boolean {
   return process.argv.includes(flag);
 }
 
-function printTargetStatus(modeSummary: string, sessionSummary: string): void {
+function printTargetStatus(modeSummary: string, sessionSummary: string, readinessSummary?: string | null): void {
   console.log(`[box target] mode=${modeSummary}`);
   console.log(`[box target] session=${sessionSummary}`);
+  if (readinessSummary) {
+    console.log(`[box target] readiness=${readinessSummary}`);
+  }
+}
+
+async function summarizeTargetReadinessState(config: Config): Promise<string | null> {
+  const filePath = path.join(config.paths.stateDir, "last_target_project_readiness.json");
+  try {
+    if (!existsSync(filePath)) return null;
+    const raw = JSON.parse(readFileSync(filePath, "utf8"));
+    const status = String(raw?.status || "unknown");
+    const projectReadiness = String(raw?.dimensions?.projectReadiness?.status || "unknown");
+    const researchSaturation = String(raw?.dimensions?.researchSaturation?.status || "unknown");
+    const blockers = Array.isArray(raw?.blockers) ? raw.blockers.join(",") : "none";
+    return `status=${status} | projectReadiness=${projectReadiness} | researchSaturation=${researchSaturation} | blockers=${blockers || "none"}`;
+  } catch {
+    return null;
+  }
 }
 
 function printProductHeader(title: string, subtitle?: string | null): void {
@@ -674,8 +692,8 @@ function buildInteractiveManifest(
     },
     objective: {
       summary: objectiveSummary,
-      desiredOutcome: `${repoName || repoUrl} becomes planning-ready for target delivery`,
-      acceptanceCriteria: ["clarified", "planning-ready"],
+      desiredOutcome: `${repoName || repoUrl} reaches single_target_project_readiness for delivery`,
+      acceptanceCriteria: ["clarified", "single_target_project_readiness"],
     },
     constraints: {
       protectedPaths: [],
@@ -898,7 +916,8 @@ async function main(): Promise<void> {
       const session = await createTargetSession(manifest, config);
       printTargetStatus(
         summarizePlatformModeState(await loadPlatformModeState(config)),
-        summarizeActiveTargetSession(session)
+        summarizeActiveTargetSession(session),
+        await summarizeTargetReadinessState(config),
       );
       return;
     }
@@ -906,7 +925,8 @@ async function main(): Promise<void> {
     if (subCommand === "status") {
       printTargetStatus(
         summarizePlatformModeState(await loadPlatformModeState(config)),
-        summarizeActiveTargetSession(await loadActiveTargetSession(config))
+        summarizeActiveTargetSession(await loadActiveTargetSession(config)),
+        await summarizeTargetReadinessState(config),
       );
       return;
     }
@@ -924,7 +944,8 @@ async function main(): Promise<void> {
       });
       printTargetStatus(
         summarizePlatformModeState(await loadPlatformModeState(config)),
-        summarizeActiveTargetSession(session)
+        summarizeActiveTargetSession(session),
+        await summarizeTargetReadinessState(config),
       );
       return;
     }
@@ -948,7 +969,8 @@ async function main(): Promise<void> {
       console.log(`[box target] archived=${archived.sessionId} stage=${archived.currentStage}`);
       printTargetStatus(
         summarizePlatformModeState(await loadPlatformModeState(config)),
-        summarizeActiveTargetSession(await loadActiveTargetSession(config))
+        summarizeActiveTargetSession(await loadActiveTargetSession(config)),
+        await summarizeTargetReadinessState(config),
       );
       return;
     }
@@ -971,7 +993,8 @@ async function main(): Promise<void> {
       });
       printTargetStatus(
         summarizePlatformModeState(await loadPlatformModeState(config)),
-        summarizeActiveTargetSession(result.session)
+        summarizeActiveTargetSession(result.session),
+        await summarizeTargetReadinessState(config),
       );
       printClarificationState({
         session: result.session,

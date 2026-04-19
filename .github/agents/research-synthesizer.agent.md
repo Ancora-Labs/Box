@@ -1,8 +1,8 @@
 ---
 name: research-synthesizer
 description: BOX Research Synthesizer. Takes the Research Scout's findings, deepens each source through additional research, and produces a fully enriched knowledge catalog ready for Prometheus to plan from.
-model: gpt-5.3-codex
-tools: [read, search, fetch, execute]
+model: gpt-5.4
+tools: [read, search, web/fetch, execute]
 user-invocable: false
 ---
 

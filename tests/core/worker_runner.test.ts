@@ -10,6 +10,7 @@ import {
   buildConversationContext,
   buildWorkerRuntimeLineage,
   formatLiveWorkerLogChunk,
+  formatLiveWorkerLogStatefulChunk,
   parseWorkerResponse,
   extractStreamingWorkerResultMarker,
   shouldTreatAbortedWorkerRunAsTerminalResult,
@@ -265,7 +266,7 @@ describe("parseWorkerResponse", () => {
 });
 
 describe("target-aware worker live log formatting", () => {
-  it("stamps worker live log lines with mode, role, projectId, and sessionId in target mode", () => {
+  it("moves worker metadata to a compact suffix while preserving target context", () => {
     const config = {
       platformModeState: {
         currentMode: "single_target_delivery",
@@ -278,13 +279,70 @@ describe("target-aware worker live log formatting", () => {
 
     const stamp = buildLiveWorkerLogStamp(config, "integration-worker");
     const formatted = formatLiveWorkerLogChunk(config, "integration-worker", "line one\nline two\n");
+    const lines = formatted.trim().split("\n");
 
-    assert.ok(stamp.includes("mode=single_target_delivery"));
-    assert.ok(stamp.includes("projectId=target_portal"));
-    assert.ok(stamp.includes("sessionId=sess_123"));
-    assert.ok(formatted.includes("role=integration-worker"));
-    assert.ok(formatted.includes("line one"));
-    assert.ok(formatted.includes("line two"));
+    assert.equal(stamp, "[mode=target]");
+    assert.ok(lines[0].startsWith("line one"));
+    assert.ok(lines[1].startsWith("line two"));
+    assert.ok(lines[0].endsWith("[mode=target]"));
+    assert.ok(lines[1].endsWith("[mode=target]"));
+  });
+
+  it("buffers tokenized stream chunks until a readable sentence is available", () => {
+    const config = {
+      platformModeState: {
+        currentMode: "single_target_delivery",
+      },
+      activeTargetSession: {
+        projectId: "target_portal",
+        sessionId: "sess_123",
+      },
+    };
+
+    const first = formatLiveWorkerLogStatefulChunk(config, "quality-worker", "The command appears", "");
+    const second = formatLiveWorkerLogStatefulChunk(config, "quality-worker", " to be hanging", first.remainder);
+    const third = formatLiveWorkerLogStatefulChunk(config, "quality-worker", " after 300 seconds.", second.remainder);
+
+    assert.equal(first.formatted, "");
+    assert.equal(second.formatted, "");
+    assert.equal(third.remainder, "");
+    assert.ok(third.formatted.includes("The command appears to be hanging after 300 seconds."));
+    assert.ok(third.formatted.includes("[mode=target]"));
+    assert.ok(!third.formatted.includes("quality-worker"));
+  });
+
+  it("does not emit metadata-only lines for blank log chunks", () => {
+    const config = {
+      platformModeState: {
+        currentMode: "single_target_delivery",
+      },
+      activeTargetSession: {
+        projectId: "target_portal",
+        sessionId: "sess_123",
+      },
+    };
+
+    const formatted = formatLiveWorkerLogChunk(config, "quality-worker", "\n");
+    assert.equal(formatted, "");
+  });
+
+  it("keeps tool command detail lines plain while showing mode on action headers", () => {
+    const config = {
+      platformModeState: {
+        currentMode: "single_target_delivery",
+      },
+      activeTargetSession: {
+        projectId: "target_portal",
+        sessionId: "sess_123",
+      },
+    };
+
+    const formatted = formatLiveWorkerLogChunk(config, "quality-worker", "● Run test (shell)\n  │ npm test\n  └ 4 lines...\n");
+    const lines = formatted.trim().split("\n");
+
+    assert.ok(lines[0].endsWith("[mode=target]"));
+    assert.equal(lines[1], "  │ npm test");
+    assert.equal(lines[2], "  └ 4 lines...");
   });
 });
 

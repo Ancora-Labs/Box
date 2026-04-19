@@ -40,6 +40,35 @@ describe("buildAgentArgs", () => {
     assert.ok(args.includes("gpt-5.3-codex"));
   });
 
+  it("leaves model selection to Copilot when configured as auto", () => {
+    const args = buildAgentArgs({
+      agentSlug: "research-scout",
+      prompt: "find strong sources",
+      model: "auto",
+      allowAll: true,
+    });
+
+    assert.ok(!args.includes("auto"));
+    assert.ok(!args.includes("--model"));
+    assert.ok(args.includes("--agent"));
+    assert.ok(args.includes("research-scout"));
+  });
+
+  it("skips --agent when the execution workspace does not contain the agent file", () => {
+    const args = buildAgentArgs({
+      agentSlug: "quality-worker",
+      prompt: "continue the task",
+      model: "gpt-5.4",
+      runContract: {
+        executionCwd: "C:\\__box_missing_agent_workspace__",
+      },
+    });
+
+    assert.ok(!args.includes("--agent"));
+    assert.ok(args.includes("--model"));
+    assert.ok(args.includes("gpt-5.4"));
+  });
+
   it("blocks broad allow-all when the agent profile is no_tools", () => {
     const args = buildAgentArgs({
       agentSlug: "prometheus",

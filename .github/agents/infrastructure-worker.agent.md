@@ -2,7 +2,7 @@
 name: infrastructure-worker
 description: BOX Infrastructure Lane Worker. Handles Docker, CI/CD, deployment configuration, and infrastructure tasks from the orchestrator's capability-based routing.
 model: gpt-5.4
-tools: [read, edit, execute, search, fetch]
+tools: [read, edit, execute, search, web/fetch]
 user-invocable: false
 ---
 

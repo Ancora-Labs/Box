@@ -549,6 +549,8 @@ describe("PACKET_VIOLATION_CODE — deterministic violation taxonomy", () => {
       "MISSING_CAPACITY_DELTA", "INVALID_CAPACITY_DELTA",
       "MISSING_REQUEST_ROI", "INVALID_REQUEST_ROI",
       "MISSING_IMPLEMENTATION_EVIDENCE", "MISSING_CAPACITY_FIRST_JUSTIFICATION",
+      "INTENT_REQUIREMENT_SOFTENED",
+      "MEDIA_REQUIREMENT_SOFTENED",
     ];
     for (const key of expectedCodes) {
       assert.equal(typeof PACKET_VIOLATION_CODE[key], "string", `${key} must be a string`);
@@ -1367,7 +1369,7 @@ describe("validatePlanContract — decomposition caps and ambiguity", () => {
     assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.CRITICAL);
   });
 
-  it("rejects redundant packets without measurable capacity-first justification", () => {
+  it("warns on weak capacity-first justification when grounded evidence exists", () => {
     const result = validatePlanContract(baseValidPlan({
       implementationStatus: "implemented_correctly",
       implementationEvidence: ["src/core/prometheus.ts"],
@@ -1375,7 +1377,9 @@ describe("validatePlanContract — decomposition caps and ambiguity", () => {
       requestROI: 1,
     }));
     const v = result.violations.find(x => x.code === PACKET_VIOLATION_CODE.MISSING_CAPACITY_FIRST_JUSTIFICATION);
-    assert.ok(v, "must reject redundant packet without strong capacity-first justification");
+    assert.ok(v, "must flag weak capacity-first justification");
+    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.WARNING);
+    assert.equal(result.valid, true, "grounded packet should remain reviewable instead of fail-closing the cycle");
   });
 
   it("MAX_ACCEPTANCE_CRITERIA_PER_TASK is 10", () => {
@@ -1384,6 +1388,72 @@ describe("validatePlanContract — decomposition caps and ambiguity", () => {
 
   it("MAX_FILES_IN_SCOPE_PER_TASK is 30", () => {
     assert.equal(MAX_FILES_IN_SCOPE_PER_TASK, 30);
+  });
+});
+
+describe("validatePlanContract — protected intent preservation", () => {
+  function baseIntentPlan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      task: "Implement a premium production-grade customer experience with real integrations and polished trust signals",
+      role: "evolution-worker",
+      wave: 1,
+      verification: "tests/core/plan_contract_validator.test.ts — test: protected intent preservation",
+      dependencies: [],
+      acceptance_criteria: [
+        "The delivered surface preserves the operator's premium quality bar rather than a cheap fallback",
+        "User-facing trust and realism expectations remain intact in the shipped experience",
+      ],
+      capacityDelta: 0.2,
+      requestROI: 2.4,
+      ...overrides,
+    };
+  }
+
+  it("rejects silent downgrade from protected intent into placeholder/mock/demo output", () => {
+    const result = validatePlanContract(baseIntentPlan({
+      task: "Build a premium onboarding flow with real GitHub integration and polished UX",
+      after_state: "Delivers a demo-only mock flow with placeholder data and simplified screens instead of the promised production experience",
+      acceptance_criteria: [
+        "A mocked demo looks acceptable for now",
+        "Placeholder content is enough to simulate the idea",
+      ],
+    }));
+
+    const v = result.violations.find(x => x.code === PACKET_VIOLATION_CODE.INTENT_REQUIREMENT_SOFTENED);
+    assert.ok(v, "silent downgrade must emit INTENT_REQUIREMENT_SOFTENED");
+    assert.equal(v!.severity, PLAN_VIOLATION_SEVERITY.CRITICAL);
+    assert.equal(result.valid, false, "silent downgrade must make the plan invalid");
+  });
+
+  it("negative path: allows an explicitly temporary fallback when the limitation is disclosed and the contract is preserved", () => {
+    const result = validatePlanContract(baseIntentPlan({
+      task: "Implement a premium onboarding flow while preserving the final production integration contract",
+      after_state: "Temporarily uses a documented mock token exchange only until external credentials arrive, while preserving the real API contract and shipping path",
+      acceptance_criteria: [
+        "The temporary fallback is explicitly disclosed with a blocker reason and follow-up path",
+        "The real integration contract and premium UX target remain preserved rather than silently downgraded",
+      ],
+    }));
+
+    assert.equal(
+      result.violations.find(v => v.code === PACKET_VIOLATION_CODE.INTENT_REQUIREMENT_SOFTENED),
+      undefined,
+      "explicit temporary fallback with preserved contract must not be treated as silent downgrade",
+    );
+  });
+
+  it("keeps media-specific regressions covered under the general protected-intent rule", () => {
+    const result = validatePlanContract(baseIntentPlan({
+      task: "Use high-quality placeholder imagery for the restaurant landing page hero and chef story",
+      after_state: "Landing page uses placeholder food imagery instead of licensed photography assets",
+      acceptance_criteria: [
+        "Placeholder hero art looks premium",
+        "Chef story uses placeholder imagery",
+      ],
+    }));
+
+    const v = result.violations.find(x => x.code === PACKET_VIOLATION_CODE.INTENT_REQUIREMENT_SOFTENED);
+    assert.ok(v, "media drift must still be caught by the general intent guard");
   });
 });
 

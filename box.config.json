@@ -45,6 +45,7 @@
     ],
     "disableWaveParallelDispatch": false,
     "dashboardEnabled": false,
+    "autoOpenTargetDelivery": false,
     "prometheusAnalysisFreshnessMinutes": 60,
     "jesusTimeoutMs": 1800000,
     "jesusDisableTier1": true,
@@ -159,6 +160,12 @@
       "maxPendingBenchmarkRatio": 0.4,
       "benchmarkPendingGraceHours": 6,
       "maxOpenBacklogRatio": 0.25
+    },
+    "singleTargetProjectReadiness": {
+      "thresholds": {
+        "stableSampleMin": 3,
+        "maxGrowthSignalsInStableWindow": 0
+      }
     }
   },
   "roadmap": {
@@ -185,6 +192,18 @@
       "id": "quality-reviewer",
       "name": "Athena",
       "model": "gpt-5.4",
+      "provider": "copilot"
+    },
+    "researchScout": {
+      "id": "research-scout",
+      "name": "research-scout",
+      "model": "gpt-5.3-codex",
+      "provider": "copilot"
+    },
+    "researchSynthesizer": {
+      "id": "research-synthesizer",
+      "name": "research-synthesizer",
+      "model": "gpt-5.3-codex",
       "provider": "copilot"
     },
     "workers": {

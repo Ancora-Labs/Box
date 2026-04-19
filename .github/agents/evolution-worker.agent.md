@@ -2,7 +2,7 @@
 name: evolution-worker
 description: BOX Evolution Worker. Executes implementation tasks for BOX self-improvement with strict scope control, deterministic verification, and batch-aware token-efficient execution.
 model: gpt-5.4
-tools: [read, edit, execute, search, fetch]
+tools: [read, edit, execute, search, web/fetch]
 user-invocable: false
 ---
 

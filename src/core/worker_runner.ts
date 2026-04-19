@@ -1494,23 +1494,33 @@ function getLiveLogPath(config, roleName) {
   return path.join(stateDir, `live_worker_${safeRole}.log`);
 }
 
+function compactLiveWorkerMode(mode: unknown) {
+  const normalized = String(mode || "self_dev").trim() || "self_dev";
+  if (normalized === "single_target_delivery") return "target";
+  if (normalized === "self_dev") return "self";
+  return normalized;
+}
+
+function shouldAnnotateLiveWorkerLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^\s*[│└]/.test(line)) return false;
+  if (/^-{8,}$/.test(trimmed)) return false;
+  return true;
+}
+
+function shouldFlushLiveWorkerRemainder(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/[.!?]$/.test(trimmed)) return true;
+  if (/^(?:●|✔|✅|✗|└|│|\[stderr\]|\[stdout\])/m.test(trimmed) && trimmed.length >= 24) return true;
+  return trimmed.length >= 160;
+}
+
 export function buildLiveWorkerLogStamp(config, roleName) {
-  const timestamp = new Date().toISOString();
+  void roleName;
   const currentMode = String(config?.platformModeState?.currentMode || "self_dev").trim() || "self_dev";
-  const activeTargetSession = config?.activeTargetSession && typeof config.activeTargetSession === "object"
-    ? config.activeTargetSession
-    : null;
-  const normalizedRole = String(roleName || "worker");
-  const parts = [
-    `[WORKER:${normalizedRole}]`,
-    `[role=${normalizedRole}]`,
-    `[mode=${currentMode}]`,
-  ];
-  if (currentMode === "single_target_delivery" && activeTargetSession?.projectId && activeTargetSession?.sessionId) {
-    parts.push(`[projectId=${String(activeTargetSession.projectId).trim()}]`);
-    parts.push(`[sessionId=${String(activeTargetSession.sessionId).trim()}]`);
-  }
-  return `[${timestamp}] ${parts.join(" ")}`;
+  return `[mode=${compactLiveWorkerMode(currentMode)}]`;
 }
 
 export function formatLiveWorkerLogChunk(config, roleName, text) {
@@ -1520,10 +1530,39 @@ export function formatLiveWorkerLogChunk(config, roleName, text) {
     if (!line && index === chunks.length - 1) {
       return "";
     }
-    return `${stamp} ${line}`;
+    const visibleLine = line.trimEnd();
+    if (!visibleLine.trim()) return "";
+    return shouldAnnotateLiveWorkerLine(visibleLine)
+      ? `${visibleLine} ${stamp}`
+      : visibleLine;
   }).join("\n");
-  if (!formatted) return "";
+  if (!formatted.trim()) return "";
   return formatted.endsWith("\n") ? formatted : `${formatted}\n`;
+}
+
+export function formatLiveWorkerLogStatefulChunk(config, roleName, text, previousRemainder = "") {
+  const combined = `${String(previousRemainder || "")}${String(text || "")}`.replace(/\r\n/g, "\n");
+  if (!combined) {
+    return { formatted: "", remainder: "" };
+  }
+
+  const pieces = combined.split("\n");
+  let remainder = pieces.pop() ?? "";
+  const completeSegments = pieces;
+
+  if (shouldFlushLiveWorkerRemainder(remainder)) {
+    completeSegments.push(remainder);
+    remainder = "";
+  }
+
+  const formatted = completeSegments.length > 0
+    ? formatLiveWorkerLogChunk(config, roleName, completeSegments.join("\n"))
+    : "";
+
+  return {
+    formatted,
+    remainder,
+  };
 }
 
 export async function captureRerereState(repoPath: string): Promise<string[]> {
@@ -1830,9 +1869,22 @@ async function persistLegacyWorkerSessionArtifacts(
   }
 }
 
+const liveWorkerLogRemainders = new Map<string, string>();
+
 async function appendLiveWorkerLog(config, logPath, roleName, text) {
   await fs.mkdir(path.dirname(logPath), { recursive: true });
-  await fs.appendFile(logPath, formatLiveWorkerLogChunk(config, roleName, text), "utf8");
+  const key = path.resolve(logPath);
+  const previousRemainder = liveWorkerLogRemainders.get(key) || "";
+  const { formatted, remainder } = formatLiveWorkerLogStatefulChunk(config, roleName, text, previousRemainder);
+
+  if (remainder) {
+    liveWorkerLogRemainders.set(key, remainder);
+  } else {
+    liveWorkerLogRemainders.delete(key);
+  }
+
+  if (!formatted) return;
+  await fs.appendFile(logPath, formatted, "utf8");
 }
 
 // ── Find worker config by role name ─────────────────────────────────────────
@@ -3557,6 +3609,10 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     agentHookCoverage: agentProfile.hookCoverage,
   };
   const allowAllTools = effectiveSessionInputPolicy === "allow_all";
+  const executionAwareRunContract = {
+    ...(runContract || {}),
+    executionCwd: workerExecutionCwd,
+  };
   const args = buildAgentArgs({
     agentSlug,
     prompt: conversationContext,
@@ -3565,7 +3621,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     allowAll: allowAllTools,
     noAskUser: allowAllTools,
     maxContinues: undefined,
-    runContract,
+    runContract: executionAwareRunContract,
   });
 
   // Compute timeout: config.runtime.workerTimeoutMinutes → ms.
@@ -3726,7 +3782,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       allowAll: allowAllTools,
       noAskUser: allowAllTools,
       maxContinues: undefined,
-      runContract,
+      runContract: executionAwareRunContract,
     });
     await appendProgress(config, `[WORKER:${roleName}] Agent slug ${agentSlug} unavailable in execution cwd — retrying once without --agent using embedded persona`);
     result = await executeWorkerModelCall(fallbackArgs);

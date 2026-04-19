@@ -127,6 +127,16 @@ export const PACKET_VIOLATION_CODE = Object.freeze({
   /** Low-leverage or redundant packets must include measurable capacity-first justification. */
   MISSING_CAPACITY_FIRST_JUSTIFICATION: "missing_capacity_first_justification",
   /**
+   * Plan silently softens an explicit operator requirement or quality bar into a
+   * cheaper substitute (placeholder, mock, demo-only flow, simplified stand-in).
+   */
+  INTENT_REQUIREMENT_SOFTENED: "intent_requirement_softened",
+  /**
+   * Backward-compatible alias for media-specific drift; kept because media is one
+   * concrete example of the broader intent-softening failure class.
+   */
+  MEDIA_REQUIREMENT_SOFTENED: "intent_requirement_softened",
+  /**
    * Plan is tagged as backed by stale diagnostics data and lacks independent
    * justification.  Stale-backed plans must be quarantined until diagnostics
    * are refreshed or the plan provides independent evidence.
@@ -789,6 +799,84 @@ export function isCycleSpecificExclusionJustification(value: string): boolean {
   return String(value || "").trim().length >= MANDATORY_EXCLUSION_JUSTIFICATION_MIN_LENGTH;
 }
 
+const PROTECTED_INTENT_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  /\bpremium\b/i,
+  /\bproduction(?:-grade)?\b/i,
+  /\bpolished\b/i,
+  /\btrust(?:-building|\s+signals?)\b/i,
+  /\breal(?:-time)?\b/i,
+  /\breal\s+(?:api|integration|payment|auth|data|photo(?:s|graphy)?)\b/i,
+  /\bfull\s+(?:integration|experience|flow)\b/i,
+  /\b(?:food|dish|menu|restaurant|cafe|bakery|chef|checkout|payment|auth|onboarding)\b/i,
+  /\b(?:landing\s*page|hero|gallery|testimonial|story|brand)\b/i,
+]);
+
+const DOWNGRADE_SUBSTITUTE_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  /\bplaceholder(?:s)?\b/i,
+  /\bmock(?:ed|ing|s|up)?\b/i,
+  /\bstub(?:bed|s)?\b/i,
+  /\bdemo(?:-only)?\b/i,
+  /\bfake\b/i,
+  /\bdummy\b/i,
+  /\blorem(?:\s+ipsum|\s+picsum)?\b/i,
+  /\bsimplif(?:y|ied)\b/i,
+  /\bminimal\s+version\b/i,
+  /\bstand-?ins?\b/i,
+  /\bhardcoded\s+(?:sample|samples|data)\b/i,
+  /\bgeneric\s+(?:illustration|illustrations|content|imagery)\b/i,
+]);
+
+const EXPLICIT_FALLBACK_DISCLOSURE_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  /\btemporary\b/i,
+  /\btemporarily\b/i,
+  /\binterim\b/i,
+  /\bshort-?term\b/i,
+  /\buntil\b/i,
+  /\bblocked\s+by\b/i,
+  /\bexternal\s+(?:dependency|credentials|approval|token|service)\b/i,
+  /\bfollow-?up\b/i,
+  /\bunblock\b/i,
+  /\bphase\s*[0-9]+\b/i,
+  /\bpreserv(?:e|ing)\s+the\s+(?:real|final|production)\s+(?:contract|path|integration|experience)\b/i,
+  /\bdocumented\s+fallback\b/i,
+]);
+
+function extractPlanIntentText(plan: any): string {
+  const values: string[] = [
+    plan?.title,
+    plan?.task,
+    plan?.scope,
+    plan?.before_state,
+    plan?.after_state,
+    plan?.verification,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+
+  if (Array.isArray(plan?.acceptance_criteria)) {
+    for (const item of plan.acceptance_criteria) {
+      const text = String(item || "").trim();
+      if (text) values.push(text);
+    }
+  }
+
+  return values.join("\n");
+}
+
+function isSilentIntentDowngrade(plan: any): boolean {
+  const text = extractPlanIntentText(plan);
+  if (!text) return false;
+
+  const hasProtectedIntent = PROTECTED_INTENT_PATTERNS.some((pattern) => pattern.test(text));
+  if (!hasProtectedIntent) return false;
+
+  const hasDowngradeSignal = DOWNGRADE_SUBSTITUTE_PATTERNS.some((pattern) => pattern.test(text));
+  if (!hasDowngradeSignal) return false;
+
+  const disclosedTemporaryFallback = EXPLICIT_FALLBACK_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(text));
+  if (disclosedTemporaryFallback) return false;
+
+  return true;
+}
+
 export function normalizeLeverageRank(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
   const canonical: string[] = [];
@@ -1083,6 +1171,15 @@ export function validatePlanContract(plan): { valid: boolean; violations: PlanVi
     }
   }
 
+  if (isSilentIntentDowngrade(plan)) {
+    violations.push({
+      field: "protectedIntent",
+      message: "Plan silently downgrades an explicit operator requirement or quality bar into a cheaper substitute. Temporary fallbacks are allowed only when they are clearly disclosed with the blocker reason and preserve the promised outcome class.",
+      severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+      code: PACKET_VIOLATION_CODE.INTENT_REQUIREMENT_SOFTENED,
+    });
+  }
+
   // Decomposition cap: files-in-scope ceiling.
   const inScopeFiles: unknown[] | null = Array.isArray(plan.filesInScope)
     ? plan.filesInScope
@@ -1172,8 +1269,8 @@ export function validatePlanContract(plan): { valid: boolean; violations: PlanVi
     if (!hasCapacityFirstJustification) {
       violations.push({
         field: "capacityDelta/requestROI",
-        message: "Low-leverage or redundant packets require measurable capacity-first justification (capacityDelta>0 and requestROI>1).",
-        severity: PLAN_VIOLATION_SEVERITY.CRITICAL,
+        message: "Low-leverage or redundant packets should include measurable capacity-first justification (capacityDelta>0 and requestROI>1). When grounded evidence exists, keep the packet reviewable and surface this as a warning rather than fail-closing the cycle.",
+        severity: PLAN_VIOLATION_SEVERITY.WARNING,
         code: PACKET_VIOLATION_CODE.MISSING_CAPACITY_FIRST_JUSTIFICATION,
       });
     }

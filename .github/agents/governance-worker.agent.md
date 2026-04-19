@@ -2,7 +2,7 @@
 name: governance-worker
 description: BOX Governance Lane Worker. Handles policy engine changes, governance freeze logic, canary rules, state contract validation, and security-sensitive changes from the orchestrator's capability-based routing.
 model: gpt-5.4
-tools: [read, edit, execute, search, fetch]
+tools: [read, edit, execute, search, web/fetch]
 user-invocable: false
 ---
 

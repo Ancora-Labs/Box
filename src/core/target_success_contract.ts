@@ -2,7 +2,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { spawnAsync, writeJson } from "./fs_utils.js";
+import { readJson, spawnAsync, writeJson } from "./fs_utils.js";
 import { agentFileExists, appendAgentLiveLog, appendAgentLiveLogDetail, buildAgentArgs, parseAgentOutput, writeAgentDebugFile } from "./agent_loader.js";
 import { appendProgress } from "./state_tracker.js";
 import { getTargetCompletionPath, getTargetSessionPath, loadActiveTargetSession } from "./target_session_state.js";
@@ -14,6 +14,13 @@ export const TARGET_SUCCESS_CONTRACT_STATUS = Object.freeze({
 });
 
 const NON_BLOCKING_ACCEPTANCE_CRITERIA = new Set(["clarified", "planning-ready"]);
+const PROJECT_READINESS_ACCEPTANCE_CRITERIA = new Set([
+  "single_target_project_readiness",
+  "target_project_readiness",
+  "project_readiness",
+  "best_possible_delivery",
+  "saturated_best_effort_delivery",
+]);
 const STOPWORDS = new Set([
   "a", "an", "and", "app", "be", "build", "completed", "correctly", "for", "has", "have", "i", "in",
   "is", "it", "list", "main", "of", "on", "or", "project", "simple", "the", "to", "want", "working",
@@ -21,6 +28,26 @@ const STOPWORDS = new Set([
 
 const PRODUCT_PRESENTER_AGENT_SLUG = "product-presenter";
 const DEBUG_WORKER_FILE_PATTERN = /^debug_worker_[A-Za-z0-9_-]+\.txt$/;
+const PROJECT_READINESS_LEDGER_FILE = "project_readiness_ledger.json";
+const PROJECT_READINESS_REPORT_FILE = "project_readiness_report.json";
+const DEFAULT_PROJECT_READINESS_THRESHOLDS = Object.freeze({
+  stableSampleMin: 3,
+  maxGrowthSignalsInStableWindow: 0,
+});
+
+function resolveProjectReadinessThresholds(config: any) {
+  const raw = config?.runtime?.singleTargetProjectReadiness?.thresholds || {};
+  const stableSampleMin = Number.isFinite(Number(raw?.stableSampleMin))
+    ? Math.max(2, Math.floor(Number(raw.stableSampleMin)))
+    : DEFAULT_PROJECT_READINESS_THRESHOLDS.stableSampleMin;
+  const maxGrowthSignalsInStableWindow = Number.isFinite(Number(raw?.maxGrowthSignalsInStableWindow))
+    ? Math.max(0, Math.floor(Number(raw.maxGrowthSignalsInStableWindow)))
+    : DEFAULT_PROJECT_READINESS_THRESHOLDS.maxGrowthSignalsInStableWindow;
+  return {
+    stableSampleMin,
+    maxGrowthSignalsInStableWindow,
+  };
+}
 
 const DELIVERY_ROLE_PRIORITY: Record<string, number> = Object.freeze({
   "evolution-worker": 400,
@@ -204,6 +231,237 @@ function resolveEffectiveHumanInputs(session: any) {
   return { pendingHumanInputs, ignoredHumanInputs };
 }
 
+function getBlockingAcceptanceCriteria(session: any): string[] {
+  return (Array.isArray(session?.objective?.acceptanceCriteria) ? session.objective.acceptanceCriteria : [])
+    .map((entry: unknown) => String(entry || "").trim().toLowerCase())
+    .filter((entry: string) => entry && !NON_BLOCKING_ACCEPTANCE_CRITERIA.has(entry));
+}
+
+function requiresProjectReadiness(session: any): boolean {
+  const blockingCriteria = getBlockingAcceptanceCriteria(session);
+  return blockingCriteria.some((entry) => PROJECT_READINESS_ACCEPTANCE_CRITERIA.has(entry))
+    || session?.feedback?.pendingResearchRefresh === true;
+}
+
+function isResearchArtifactAlignedToSession(raw: any, session: any): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const targetSession = raw?.targetSession;
+  if (!targetSession || typeof targetSession !== "object") return false;
+
+  const expectedProjectId = String(session?.projectId || "").trim();
+  const expectedSessionId = String(session?.sessionId || "").trim();
+  const actualProjectId = String((targetSession as any)?.projectId || "").trim();
+  const actualSessionId = String((targetSession as any)?.sessionId || "").trim();
+
+  if (expectedProjectId && actualProjectId && actualProjectId !== expectedProjectId) return false;
+  if (expectedSessionId && actualSessionId && actualSessionId !== expectedSessionId) return false;
+  return Boolean(actualProjectId || actualSessionId);
+}
+
+function getProjectReadinessLedgerPath(stateDir: string, session: any): string | null {
+  const projectId = String(session?.projectId || "").trim();
+  const sessionId = String(session?.sessionId || "").trim();
+  if (!projectId || !sessionId) return null;
+  return path.join(getTargetSessionPath(stateDir, projectId, sessionId), PROJECT_READINESS_LEDGER_FILE);
+}
+
+function isStableResearchSample(sample: any): boolean {
+  return sample?.pendingRefresh !== true
+    && sample?.scoutAligned === true
+    && sample?.synthesisAligned === true
+    && Number(sample?.sourceCount || 0) > 0
+    && sample?.coveragePassed === true
+    && sample?.refreshRecommended !== true
+    && (Number(sample?.totalPairs || 0) === 0 || sample?.topicSiteSaturated === true);
+}
+
+async function appendProjectReadinessSample(stateDir: string, session: any, sample: Record<string, unknown>) {
+  const ledgerPath = getProjectReadinessLedgerPath(stateDir, session);
+  if (!ledgerPath) {
+    return { ledgerPath: null, samples: [] as any[] };
+  }
+
+  await fs.mkdir(path.dirname(ledgerPath), { recursive: true }).catch(() => {});
+  const current = await readJson(ledgerPath, {
+    schemaVersion: 1,
+    projectId: String(session?.projectId || ""),
+    sessionId: String(session?.sessionId || ""),
+    samples: [],
+  });
+  const samples = Array.isArray(current?.samples) ? current.samples.slice(-24) : [];
+  const signature = String(sample?.signature || "").trim();
+  const lastSignature = String(samples[samples.length - 1]?.signature || "").trim();
+
+  if (signature && signature !== lastSignature) {
+    samples.push(sample);
+    await writeJson(ledgerPath, {
+      schemaVersion: 1,
+      projectId: String(session?.projectId || ""),
+      sessionId: String(session?.sessionId || ""),
+      updatedAt: new Date().toISOString(),
+      samples: samples.slice(-24),
+    });
+  }
+
+  return { ledgerPath, samples: samples.slice(-24) };
+}
+
+function computeResearchHistoryEvidence(samples: any[], thresholds: { stableSampleMin: number; maxGrowthSignalsInStableWindow: number; }) {
+  const stableStreak: any[] = [];
+  for (let index = samples.length - 1; index >= 0; index -= 1) {
+    const sample = samples[index];
+    if (!isStableResearchSample(sample)) break;
+    stableStreak.unshift(sample);
+  }
+
+  const recentWindow = stableStreak.slice(-thresholds.stableSampleMin);
+  const historyEnough = recentWindow.length >= thresholds.stableSampleMin;
+  let noveltyDecayed = false;
+  let growthSignals = 0;
+
+  if (historyEnough) {
+    for (let index = 1; index < recentWindow.length; index += 1) {
+      const prev = recentWindow[index - 1] || {};
+      const next = recentWindow[index] || {};
+      const grew = Number(next.sourceCount || 0) > Number(prev.sourceCount || 0)
+        || Number(next.topicCount || 0) > Number(prev.topicCount || 0)
+        || Number(next.completedPairs || 0) > Number(prev.completedPairs || 0)
+        || Number(next.totalPairs || 0) > Number(prev.totalPairs || 0);
+      if (grew) growthSignals += 1;
+    }
+    noveltyDecayed = growthSignals <= thresholds.maxGrowthSignalsInStableWindow;
+  }
+
+  return {
+    sampleCount: samples.length,
+    stableSampleCount: stableStreak.length,
+    historyEnough,
+    noveltyDecayed,
+    growthSignals,
+  };
+}
+
+async function evaluateResearchSaturationDimension(stateDir: string, session: any, config: any) {
+  const required = requiresProjectReadiness(session);
+  const pendingRefresh = session?.feedback?.pendingResearchRefresh === true;
+  const [scoutOutput, synthesis, topicSiteState] = await Promise.all([
+    readJson(path.join(stateDir, "research_scout_output.json"), null),
+    readJson(path.join(stateDir, "research_synthesis.json"), null),
+    readJson(path.join(stateDir, "research_scout_topic_site_status.json"), { entries: [] }),
+  ]);
+
+  const scoutAligned = isResearchArtifactAlignedToSession(scoutOutput, session);
+  const synthesisAligned = isResearchArtifactAlignedToSession(synthesis, session);
+  const sourceCount = Math.max(0, Number(scoutOutput?.sourceCount ?? synthesis?.scoutSourceCount ?? 0));
+  const topicCount = Math.max(0, Number(synthesis?.topicCount ?? 0));
+  const refreshRecommended = synthesis?.qualityGate?.refreshRecommended === true;
+  const coveragePassed = synthesis?.qualityGate?.coverage?.passed === true;
+  const missingObligations = Array.isArray(synthesis?.qualityGate?.coverage?.missingObligations)
+    ? synthesis.qualityGate.coverage.missingObligations.map((entry: unknown) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  const topicEntries = Array.isArray(topicSiteState?.entries) ? topicSiteState.entries : [];
+  const totalPairs = topicEntries.length;
+  const completedPairs = topicEntries.filter((entry: any) => String(entry?.status || "") === "completed").length;
+  const topicSiteSaturated = totalPairs > 0 && completedPairs >= totalPairs;
+  const saturationSignals = [
+    sourceCount > 0 ? "sources_collected" : "",
+    coveragePassed ? "coverage_complete" : "",
+    !refreshRecommended ? "refresh_not_recommended" : "",
+    topicSiteSaturated ? "topic_sites_exhausted" : "",
+  ].filter(Boolean);
+
+  const sample = {
+    recordedAt: new Date().toISOString(),
+    signature: [
+      String(scoutOutput?.scoutedAt || "none"),
+      String(synthesis?.synthesizedAt || "none"),
+      String(sourceCount),
+      String(topicCount),
+      String(coveragePassed),
+      String(refreshRecommended),
+      String(pendingRefresh),
+      String(completedPairs),
+      String(totalPairs),
+    ].join("|"),
+    sourceCount,
+    topicCount,
+    coveragePassed,
+    refreshRecommended,
+    pendingRefresh,
+    scoutAligned,
+    synthesisAligned,
+    completedPairs,
+    totalPairs,
+    topicSiteSaturated,
+  };
+
+  const thresholds = resolveProjectReadinessThresholds(config);
+  const ledger = await appendProjectReadinessSample(stateDir, session, sample);
+  const history = computeResearchHistoryEvidence(ledger.samples, thresholds);
+
+  const satisfied = isStableResearchSample(sample)
+    && history.historyEnough
+    && history.noveltyDecayed;
+
+  const status = satisfied
+    ? "satisfied"
+    : required || pendingRefresh || scoutAligned || synthesisAligned || sourceCount > 0
+      ? "missing"
+      : "not_applicable";
+
+  return {
+    status,
+    evidence: {
+      required,
+      pendingRefresh,
+      scoutAligned,
+      synthesisAligned,
+      sourceCount,
+      topicCount,
+      refreshRecommended,
+      coveragePassed,
+      missingObligations,
+      completedPairs,
+      totalPairs,
+      saturationSignals,
+      historyEnough: history.historyEnough,
+      stableSampleCount: history.stableSampleCount,
+      sampleCount: history.sampleCount,
+      noveltyDecayed: history.noveltyDecayed,
+      growthSignals: history.growthSignals,
+      ledgerPath: ledger.ledgerPath,
+      thresholds,
+    },
+  };
+}
+
+function evaluateProjectReadinessDimension(
+  session: any,
+  delivery: any,
+  releaseVerification: any,
+  intentCore: any,
+  researchSaturation: any,
+) {
+  const required = requiresProjectReadiness(session);
+  const coreSatisfied = delivery?.status === "satisfied"
+    && releaseVerification?.status === "satisfied"
+    && intentCore?.status === "satisfied";
+  const satisfied = coreSatisfied
+    && (researchSaturation?.status === "satisfied" || (!required && researchSaturation?.status === "not_applicable"));
+
+  return {
+    status: satisfied ? "satisfied" : (required || researchSaturation?.status !== "not_applicable" ? "missing" : "not_applicable"),
+    evidence: {
+      required,
+      coreSatisfied,
+      deliveryStatus: delivery?.status || "missing",
+      releaseStatus: releaseVerification?.status || "missing",
+      intentStatus: intentCore?.status || "missing",
+      researchStatus: researchSaturation?.status || "missing",
+    },
+  };
+}
+
 function evaluateDeliveryDimension(
   session: any,
   evolutionEvidence: ReturnType<typeof parseWorkerEvidence>,
@@ -277,9 +535,8 @@ function evaluateIntentDimension(session: any, evidenceText: string, deliverySat
     }
     return normalizeText(evidenceText).includes(normalizedFlow);
   });
-  const blockingAcceptanceCriteria = (Array.isArray(session?.objective?.acceptanceCriteria) ? session.objective.acceptanceCriteria : [])
-    .map((entry: unknown) => String(entry || "").trim())
-    .filter((entry: string) => entry && !NON_BLOCKING_ACCEPTANCE_CRITERIA.has(entry.toLowerCase()));
+  const blockingAcceptanceCriteria = getBlockingAcceptanceCriteria(session)
+    .filter((entry: string) => !PROJECT_READINESS_ACCEPTANCE_CRITERIA.has(entry));
   const acceptanceCriteriaSatisfied = blockingAcceptanceCriteria.every((criteria: string) => normalizeText(evidenceText).includes(normalizeText(criteria)));
   const satisfied = objectiveSatisfied && mustHaveFlowSatisfied && acceptanceCriteriaSatisfied;
 
@@ -1459,6 +1716,7 @@ export async function performTargetDeliveryHandoff(
   opts: {
     openTarget?: (target: string) => Promise<any>;
     resolvePresentation?: (input: any) => Promise<any>;
+    forceAutoOpen?: boolean;
   } = {},
 ) {
   const stateDir = config?.paths?.stateDir || "state";
@@ -1490,12 +1748,16 @@ export async function performTargetDeliveryHandoff(
     title: "Execution Plan",
     content: JSON.stringify(delivery?.execution || null, null, 2),
   });
-  const autoOpen = delivery?.autoOpenEligible || ["serve_and_open", "open_direct", "open_url"].includes(String(delivery?.execution?.mode || ""))
+  const autoOpenEnabled = opts.forceAutoOpen === true || config?.runtime?.autoOpenTargetDelivery === true;
+  const hasOpenableSurface = delivery?.autoOpenEligible || ["serve_and_open", "open_direct", "open_url"].includes(String(delivery?.execution?.mode || ""));
+  const autoOpen = autoOpenEnabled && hasOpenableSurface
     ? await executePresentationAction(delivery, openTargetFn)
     : {
         attempted: false,
         opened: false,
-        reason: delivery?.primaryLocation ? "auto_open_not_supported_for_surface" : "no_openable_target",
+        reason: !hasOpenableSurface
+          ? delivery?.primaryLocation ? "auto_open_not_supported_for_surface" : "no_openable_target"
+          : "auto_open_disabled",
         execution: delivery?.execution || null,
       };
   appendAgentLiveLogDetail(config, {
@@ -1540,6 +1802,8 @@ export async function evaluateTargetSuccessContract(config: any, providedSession
       blockers: ["no_active_target_session"],
       pendingHumanInputs: [],
       ignoredHumanInputs: [],
+      objectiveSummary: null,
+      delivery: null,
       dimensions: {},
     };
   }
@@ -1570,15 +1834,25 @@ export async function evaluateTargetSuccessContract(config: any, providedSession
     releaseVerification.status === "satisfied",
   );
   const preferences = evaluatePreferenceDimension(session, evidenceText);
+  const researchSaturation = await evaluateResearchSaturationDimension(stateDir, session, config);
+  const projectReadiness = evaluateProjectReadinessDimension(
+    session,
+    delivery,
+    releaseVerification,
+    intentCore,
+    researchSaturation,
+  );
   const { pendingHumanInputs, ignoredHumanInputs } = resolveEffectiveHumanInputs(session);
   const blockers: string[] = [];
   if (delivery.status !== "satisfied") blockers.push("delivery_evidence_missing");
   if (releaseVerification.status !== "satisfied") blockers.push("release_signoff_missing");
   if (intentCore.status !== "satisfied") blockers.push("intent_alignment_unverified");
+  if (projectReadiness.status === "missing" && projectReadiness.evidence.required) blockers.push("project_readiness_unverified");
   if (pendingHumanInputs.length > 0) blockers.push("human_input_pending");
 
   let status: string = TARGET_SUCCESS_CONTRACT_STATUS.OPEN;
-  if (delivery.status === "satisfied" && releaseVerification.status === "satisfied" && intentCore.status === "satisfied") {
+  const readinessSatisfied = projectReadiness.status === "satisfied" || projectReadiness.status === "not_applicable";
+  if (delivery.status === "satisfied" && releaseVerification.status === "satisfied" && intentCore.status === "satisfied" && readinessSatisfied) {
     status = pendingHumanInputs.length > 0
       ? TARGET_SUCCESS_CONTRACT_STATUS.FULFILLED_WITH_HANDOFF
       : TARGET_SUCCESS_CONTRACT_STATUS.FULFILLED;
@@ -1586,7 +1860,7 @@ export async function evaluateTargetSuccessContract(config: any, providedSession
 
   const deliveryHandoff = buildFallbackDelivery(config, session, qualityEvidence, status);
 
-  return {
+  const result = {
     schemaVersion: 1,
     status,
     evaluatedAt: new Date().toISOString(),
@@ -1606,8 +1880,24 @@ export async function evaluateTargetSuccessContract(config: any, providedSession
       intentCore,
       preferences,
       evidenceAlignment,
+      researchSaturation,
+      projectReadiness,
     },
   };
+
+  try {
+    await writeJson(path.join(stateDir, "last_target_project_readiness.json"), result);
+    if (session?.projectId && session?.sessionId) {
+      await writeJson(
+        path.join(getTargetSessionPath(stateDir, String(session.projectId), String(session.sessionId)), PROJECT_READINESS_REPORT_FILE),
+        result,
+      );
+    }
+  } catch {
+    // best-effort persistence; evaluation result remains authoritative in memory
+  }
+
+  return result;
 }
 
 export async function persistTargetSuccessContract(config: any, report: any) {

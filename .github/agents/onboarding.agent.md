@@ -2,7 +2,7 @@
 name: onboarding
 description: BOX Onboarding Agent. Runs deterministic target precheck, classifies repo/workspace state, and routes each target into the correct clarification session before planning begins.
 model: gpt-5.4
-tools: [read, search, fetch, execute]
+tools: [read, search, web/fetch, execute]
 box_session_input_policy: auto
 box_hook_coverage: required
 user-invocable: false

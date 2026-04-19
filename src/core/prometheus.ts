@@ -5579,6 +5579,7 @@ These rules are enforced by the quality gate. Violations cause plan rejection:
 11. **analysis-role ban in executable packets**: Do NOT emit role values "prometheus", "athena", or "jesus" in plans[].role. Those are analysis/review roles, not implementation workers.
 12. **low-leverage or redundant packet contract**: If leverage_rank has fewer than 2 dimensions, or the task/implementationStatus implies already-implemented, redundant, duplicate, or no-op work, the packet MUST include explicit implementationEvidence and MUST be capacity-first (capacityDelta>0 and requestROI>1). Otherwise the contract validator rejects it.
 13. **stale diagnostics quarantine**: Do NOT open a packet that is backed only by stale diagnostics. If diagnostics are stale, either cite independent implementationEvidence / novelty-backed proof or omit the packet entirely. Packets tagged stale_diagnostics_backed are rejected before dispatch.
+14. **intent preservation**: Treat explicit operator requirements as protected constraints. Do NOT silently soften the requested quality bar, realism, integration depth, or user-facing scope into placeholders, mocks, demo-only flows, or cheap substitutes. If a temporary fallback is unavoidable, disclose it explicitly with the blocker reason and preserve the promised outcome class.
 
 Write the entire response in English only.
 If you include recommendations, rank them by capacity-increase leverage, not by fear or surface risk alone.
@@ -5771,6 +5772,8 @@ ACTIVE TARGET WORKSPACE: ${promptRepoPath}
    - Use diagnostics freshness metadata (freshness.staleAfterMs + timestamp fields) and do NOT treat stale diagnostics entries as live planning truth.
 3. Inspect the isolated target workspace and target-session artifacts needed to plan delivery. Do NOT browse BOX src/core or propose BOX-internal work while single-target delivery mode is active.
 4. Produce a delivery plan only for the active target session following the operator objective and session gates.
+   - Do NOT silently downgrade explicit user intent into placeholders, mocks, demo-only flows, or reduced-quality substitutes.
+   - If a temporary fallback is unavoidable, say so explicitly, include the blocker reason, and preserve the final intended outcome class in the plan.
 5. Your plan MUST end with a JSON companion block wrapped in ===DECISION=== / ===END=== markers containing a plans array.`;
   }
 

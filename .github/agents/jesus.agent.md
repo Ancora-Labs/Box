@@ -2,7 +2,7 @@
 name: jesus
 description: BOX system CEO AI supervisor. Strategic decision-maker. Reads system state once per cycle and decides what the system should do next. Tells Prometheus what to focus on.
 model: claude-sonnet-4.6
-tools: [read, search, fetch]
+tools: [read, search, web/fetch]
 user-invocable: false
 ---
 

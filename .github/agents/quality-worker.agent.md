@@ -2,7 +2,7 @@
 name: quality-worker
 description: BOX Quality Lane Worker. Handles test infrastructure, QA, coverage, and quality-assurance tasks from the orchestrator's capability-based routing. Operates on the BOX codebase itself.
 model: gpt-5.4
-tools: [read, edit, execute, search, fetch]
+tools: [read, edit, execute, search, web/fetch]
 user-invocable: false
 ---
 

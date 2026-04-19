@@ -56,6 +56,103 @@ function buildStampedWorkerHeader(session: any, workspacePath?: string) {
   ].join("\n");
 }
 
+async function writeResearchState(config: any, session: any, opts: {
+  refreshRecommended?: boolean;
+  coveragePassed?: boolean;
+  sourceCount?: number;
+  completedPairs?: number;
+  totalPairs?: number;
+  scoutAt?: string;
+  synthAt?: string;
+  topicCount?: number;
+} = {}) {
+  const refreshRecommended = opts.refreshRecommended === true;
+  const coveragePassed = opts.coveragePassed !== false;
+  const sourceCount = Number(opts.sourceCount ?? 8);
+  const topicCount = Number(opts.topicCount ?? 2);
+  const totalPairs = Math.max(1, Number(opts.totalPairs ?? 3));
+  const completedPairs = Math.max(0, Math.min(totalPairs, Number(opts.completedPairs ?? totalPairs)));
+  const scoutAt = String(opts.scoutAt || new Date().toISOString());
+  const synthAt = String(opts.synthAt || scoutAt);
+
+  await fs.writeFile(path.join(config.paths.stateDir, "research_scout_output.json"), JSON.stringify({
+    success: true,
+    sourceCount,
+    scoutedAt: scoutAt,
+    sources: Array.from({ length: sourceCount }, (_, index) => ({
+      title: `Source ${index + 1}`,
+      url: `https://example.com/source-${index + 1}`,
+      topicTags: ["visual_design", "trust_signals"],
+    })),
+    targetSession: {
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+    },
+    coveragePlan: {
+      obligations: ["visual_design", "trust_signals"],
+      targetSourceCount: 6,
+    },
+  }, null, 2), "utf8");
+
+  await fs.writeFile(path.join(config.paths.stateDir, "research_synthesis.json"), JSON.stringify({
+    success: true,
+    synthesizedAt: synthAt,
+    topicCount,
+    topics: [
+      { topic: "visual_design", sources: [{ prometheusReadySummary: "Use premium hierarchy and card spacing." }] },
+      { topic: "trust_signals", sources: [{ prometheusReadySummary: "Use testimonials, FAQ, and strong CTA trust cues." }] },
+    ],
+    targetSession: {
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+    },
+    qualityGate: {
+      passed: coveragePassed,
+      retried: false,
+      topicDensities: [
+        { topic: "visual_design", actionableCount: 1, passed: true },
+        { topic: "trust_signals", actionableCount: 1, passed: true },
+      ],
+      quarantinedTopics: [],
+      degradedPlanningMode: false,
+      planningMode: "normal",
+      coverage: {
+        passed: coveragePassed,
+        missingObligations: coveragePassed ? [] : ["visual_design"],
+      },
+      refreshRecommended,
+    },
+  }, null, 2), "utf8");
+
+  await fs.writeFile(path.join(config.paths.stateDir, "research_scout_topic_site_status.json"), JSON.stringify({
+    updatedAt: new Date().toISOString(),
+    entries: Array.from({ length: totalPairs }, (_, index) => ({
+      site: `example-${index + 1}.com`,
+      topic: index < completedPairs ? "visual_design" : "trust_signals",
+      status: index < completedPairs ? "completed" : "in_progress",
+      uniqueSourceCount: 3,
+      lastSeenAt: new Date().toISOString(),
+      completedAt: index < completedPairs ? new Date().toISOString() : undefined,
+    })),
+  }, null, 2), "utf8");
+}
+
+async function seedProjectReadinessLedger(config: any, session: any, samples: Array<{
+  scoutAt: string;
+  synthAt: string;
+  sourceCount?: number;
+  topicCount?: number;
+  coveragePassed?: boolean;
+  refreshRecommended?: boolean;
+  completedPairs?: number;
+  totalPairs?: number;
+}>) {
+  for (const sample of samples) {
+    await writeResearchState(config, session, sample);
+    await evaluateTargetSuccessContract(config, session);
+  }
+}
+
 describe("target_success_contract", () => {
   let tempRoot: string;
   let config: any;
@@ -116,6 +213,156 @@ describe("target_success_contract", () => {
     assert.equal(report.status, TARGET_SUCCESS_CONTRACT_STATUS.OPEN);
     assert.ok(report.blockers.includes("release_signoff_missing"));
     assert.equal(isTargetSuccessContractTerminal(report), false);
+  });
+
+  it("keeps the contract open when single_target_project_readiness is still pending", async () => {
+    const workspacePath = path.join(tempRoot, "pending-readiness-workspace");
+    await fs.mkdir(workspacePath, { recursive: true });
+    const session = {
+      ...buildSession(),
+      workspace: { path: workspacePath },
+      objective: {
+        summary: "build the best possible premium food landing page",
+        acceptanceCriteria: ["clarified", "single_target_project_readiness"],
+      },
+      feedback: {
+        pendingResearchRefresh: true,
+      },
+    };
+
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_evolution-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=the premium landing page is already live on main and tests pass",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_quality-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "DELIVERED: Premium landing page is live on main.",
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged-on-main",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=Verified build, lint, and release checks passed for the premium landing page.",
+    ].join("\n"), "utf8");
+
+    const report = await evaluateTargetSuccessContract(config, session);
+    assert.equal(report.status, TARGET_SUCCESS_CONTRACT_STATUS.OPEN);
+    assert.ok(report.blockers.includes("project_readiness_unverified"));
+  });
+
+  it("keeps readiness open when only one saturated research sample exists", async () => {
+    const workspacePath = path.join(tempRoot, "single-sample-readiness-workspace");
+    await fs.mkdir(workspacePath, { recursive: true });
+    const session = {
+      ...buildSession(),
+      workspace: { path: workspacePath },
+      objective: {
+        summary: "build the best possible premium food landing page",
+        acceptanceCriteria: ["clarified", "single_target_project_readiness"],
+      },
+      feedback: {
+        pendingResearchRefresh: false,
+      },
+    };
+
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_evolution-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=the premium landing page is already live on main and tests pass",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_quality-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "DELIVERED: Premium landing page is live on main.",
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged-on-main",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=Verified build, lint, and release checks passed for the premium landing page.",
+    ].join("\n"), "utf8");
+    await writeResearchState(config, session, {
+      refreshRecommended: false,
+      coveragePassed: true,
+      sourceCount: 8,
+      completedPairs: 3,
+      totalPairs: 3,
+      scoutAt: "2026-04-19T08:00:00.000Z",
+      synthAt: "2026-04-19T08:01:00.000Z",
+    });
+
+    const report = await evaluateTargetSuccessContract(config, session);
+    assert.equal(report.status, TARGET_SUCCESS_CONTRACT_STATUS.OPEN);
+    assert.equal(report.dimensions.researchSaturation.status, "missing");
+    assert.equal(report.dimensions.researchSaturation.evidence.historyEnough, false);
+  });
+
+  it("marks the contract fulfilled when scoped research saturation is stable across multiple cycles", async () => {
+    const workspacePath = path.join(tempRoot, "ready-research-workspace");
+    await fs.mkdir(workspacePath, { recursive: true });
+    const session = {
+      ...buildSession(),
+      workspace: { path: workspacePath },
+      objective: {
+        summary: "build the best possible premium food landing page",
+        acceptanceCriteria: ["clarified", "single_target_project_readiness"],
+      },
+      feedback: {
+        pendingResearchRefresh: false,
+      },
+    };
+
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_evolution-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=the premium landing page is already live on main and tests pass",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_quality-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "DELIVERED: Premium landing page is live on main.",
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged-on-main",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=Verified build, lint, and release checks passed for the premium landing page.",
+    ].join("\n"), "utf8");
+
+    await seedProjectReadinessLedger(config, session, [
+      {
+        refreshRecommended: false,
+        coveragePassed: true,
+        sourceCount: 8,
+        completedPairs: 3,
+        totalPairs: 3,
+        scoutAt: "2026-04-19T08:00:00.000Z",
+        synthAt: "2026-04-19T08:01:00.000Z",
+      },
+      {
+        refreshRecommended: false,
+        coveragePassed: true,
+        sourceCount: 8,
+        completedPairs: 3,
+        totalPairs: 3,
+        scoutAt: "2026-04-19T09:00:00.000Z",
+        synthAt: "2026-04-19T09:01:00.000Z",
+      },
+      {
+        refreshRecommended: false,
+        coveragePassed: true,
+        sourceCount: 8,
+        completedPairs: 3,
+        totalPairs: 3,
+        scoutAt: "2026-04-19T10:00:00.000Z",
+        synthAt: "2026-04-19T10:01:00.000Z",
+      },
+    ]);
+
+    const report = await evaluateTargetSuccessContract(config, session);
+    assert.equal(report.status, TARGET_SUCCESS_CONTRACT_STATUS.FULFILLED);
+    assert.equal(report.dimensions.projectReadiness.status, "satisfied");
+    assert.equal(report.dimensions.researchSaturation.status, "satisfied");
+    assert.equal(report.dimensions.researchSaturation.evidence.historyEnough, true);
   });
 
   it("does not auto-fulfill a fresh existing-repo session from already-merged evidence", async () => {
@@ -353,6 +600,7 @@ describe("target_success_contract", () => {
 
     const targets: string[] = [];
     const handoff = await performTargetDeliveryHandoff(config, report, {
+      forceAutoOpen: true,
       resolvePresentation: async () => ({
         status: "ready_to_open",
         locationType: "local_path",
@@ -453,6 +701,7 @@ describe("target_success_contract", () => {
     const report = await evaluateTargetSuccessContract(config, session);
     const targets: string[] = [];
     const handoff = await performTargetDeliveryHandoff(config, report, {
+      forceAutoOpen: true,
       resolvePresentation: async () => ({
         status: "documented",
         locationType: "repo",
@@ -474,6 +723,55 @@ describe("target_success_contract", () => {
     assert.equal(handoff.delivery.openTarget, indexPath);
     assert.equal(handoff.delivery.preserveWorkspace, true);
     assert.equal(handoff.delivery.resolutionSource, "product_presenter_ai_preview_overridden");
+  });
+
+  it("does not auto-open the browser during handoff unless explicitly enabled", async () => {
+    const workspacePath = path.join(tempRoot, "delivered-workspace-no-auto-open");
+    await fs.mkdir(workspacePath, { recursive: true });
+    const indexPath = path.join(workspacePath, "index.html");
+    await fs.writeFile(indexPath, "<html><body>todo</body></html>", "utf8");
+    const session = {
+      ...buildSession(),
+      workspace: { path: workspacePath },
+    };
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_evolution-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=the app was already merged on main, and current main passes build, lint, and targeted todo app tests without further edits",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(config.paths.stateDir, "debug_worker_quality-worker.txt"), [
+      buildStampedWorkerHeader(session, workspacePath),
+      "DELIVERED: To-do list app is live on main. Open index.html in any browser. No build step. Session ready to close.",
+      "BOX_STATUS=skipped",
+      "BOX_SKIP_REASON=already-merged-on-main",
+      "BOX_MERGED_SHA=8ac7ee06035bb0273801dcb4baa4c72d090b6460",
+      "BOX_ACTUAL_OUTCOME=Verified live main already contains the simple to-do list app and all six release checks passed without requiring new changes.",
+    ].join("\n"), "utf8");
+
+    const report = await evaluateTargetSuccessContract(config, session);
+    const targets: string[] = [];
+    const handoff = await performTargetDeliveryHandoff(config, report, {
+      resolvePresentation: async () => ({
+        status: "ready_to_open",
+        locationType: "local_path",
+        primaryLocation: indexPath,
+        openTarget: indexPath,
+        preserveWorkspace: true,
+        instructions: ["Inspect the local preview manually."],
+        userMessage: "Product ready in the local workspace.",
+      }),
+      openTarget: async (target: string) => {
+        targets.push(target);
+        return { attempted: true, opened: true, reason: null };
+      },
+    });
+
+    assert.deepEqual(targets, []);
+    assert.equal(handoff.autoOpen.attempted, false);
+    assert.equal(handoff.autoOpen.reason, "auto_open_disabled");
+    assert.equal(handoff.delivery.openTarget, indexPath);
   });
 
   it("uses an explicit deployed preview URL as the conservative fallback", async () => {

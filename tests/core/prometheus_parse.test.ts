@@ -1880,6 +1880,8 @@ describe("single-target prompt isolation helpers", () => {
     assert.match(workflow, /isolated target workspace/i);
     assert.match(workflow, /ACTIVE TARGET WORKSPACE: C:\\isolated\\target-workspace/);
     assert.match(workflow, /Do NOT browse BOX src\/core/i);
+    assert.match(workflow, /Do NOT silently downgrade explicit user intent/i);
+    assert.match(workflow, /placeholders, mocks, demo-only flows/i);
     assert.doesNotMatch(workflow, /browse src\/core\/, src\/workers\/, src\/types\//i);
   });
 });
@@ -6492,6 +6494,39 @@ describe("analyzePlanContractGateOutcome", () => {
     assert.deepEqual(outcome.blockedViolationCodes, [
       PACKET_VIOLATION_CODE.MISSING_IMPLEMENTATION_EVIDENCE,
     ]);
+  });
+
+  it("keeps Athena reachable when every remaining issue is warn-only capacity-first weakness", () => {
+    const outcome = analyzePlanContractGateOutcome({
+      totalPlans: 2,
+      results: [
+        {
+          planIndex: 0,
+          valid: true,
+          violations: [
+            {
+              code: PACKET_VIOLATION_CODE.MISSING_CAPACITY_FIRST_JUSTIFICATION,
+              severity: PLAN_VIOLATION_SEVERITY.WARNING,
+            },
+          ],
+        },
+        {
+          planIndex: 1,
+          valid: true,
+          violations: [
+            {
+              code: PACKET_VIOLATION_CODE.MISSING_CAPACITY_FIRST_JUSTIFICATION,
+              severity: PLAN_VIOLATION_SEVERITY.WARNING,
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(outcome.criticalInvalidCount, 0);
+    assert.equal(outcome.allPlansBlocked, false);
+    assert.deepEqual(outcome.blockedPlanIndices, []);
+    assert.deepEqual(outcome.blockedViolationCodes, []);
   });
 });
 

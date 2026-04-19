@@ -1,7 +1,284 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-04-16T19:26:04.196Z",
+  "updatedAt": "2026-04-19T19:15:36.137Z",
   "entries": [
+    {
+      "cycleId": "2026-04-19T18:29:20.996Z",
+      "evaluatedAt": "2026-04-19T19:15:36.137Z",
+      "schemaVersion": 1,
+      "recommendations": [
+        {
+          "id": "rec-motion-safe-interaction-and-image-delive-0",
+          "topic": "Motion-safe interaction and image delivery",
+          "summary": "1. Which implementation surface changes? `src/main.tsx`, `src/App.tsx`, `src/components/Navbar.tsx`, `src/components/MobileMenu.tsx`, and `src/components/Hero.tsx`.\n2. What exactly changes? Add a top-level `MotionConfig reducedMotion=\"user\"`, then branch menu and hero animation variants with `useRed",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-responsive-structure-and-semantic-naviga-1",
+          "topic": "Responsive structure and semantic navigation",
+          "summary": "1. Which implementation surface changes? `index.html`, `src/styles/global.css`, `src/styles/layout.css`, `src/components/Navbar.tsx`, `src/components/Categories.tsx`, `src/components/FeaturedDishes.tsx`, and `src/components/Testimonials.tsx`.\n2. What exactly changes? Add the viewport meta tag, imple",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-spa-stack-and-deterministic-test-harness-2",
+          "topic": "SPA stack and deterministic test harness",
+          "summary": "1. Which implementation surface changes? `package.json`, `index.html`, `src/main.tsx`, `src/App.tsx`, and `src/routes\\*`.\n2. What exactly changes? Bootstrap the target repo as a client-rendered React SPA with Vite-backed routing, keep the initial product to a single landing-page route, and avoid ser",
+          "implementationStatus": "implemented_correctly",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "auto-resolved@2026-04-19T19:15:36.133Z: linked synthesis_sources match",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-premium-perception-as-a-product-requirem-3",
+          "topic": "Premium perception as a product requirement",
+          "summary": "1. Which implementation surface changes? `src/styles/tokens.css`, `src/styles/global.css`, `src/components/Hero.tsx`, `src/components/Categories.tsx`, `src/components/FeaturedDishes.tsx`, `src/components/Testimonials.tsx`, and `src/components/CTA.tsx`.\n2. What exactly changes? Define a deliberate vi",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-scout-package-narration-4",
+          "topic": "Scout package narration",
+          "summary": "Relevance: LOW - no clear BOX integration path. Reason: This source is a packaging artifact from the scout run, not a research source Prometheus should plan against.",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        }
+      ]
+    },
+    {
+      "cycleId": "2026-04-19T17:47:40.617Z",
+      "evaluatedAt": "2026-04-19T18:15:17.965Z",
+      "schemaVersion": 1,
+      "recommendations": [
+        {
+          "id": "rec-accessible-navigation-and-faq-disclosure-0",
+          "topic": "Accessible navigation and FAQ disclosure patterns",
+          "summary": "1. **Which implementation surface changes?** `src/components/Navbar.tsx`, `src/components/MobileNav.tsx`, `src/hooks/useDisclosureGroup.ts`, `tests/e2e/navigation.spec.ts`.\n2. **What exactly changes?** Build the navbar and mobile menu as disclosure groups inside a named `<nav>`, keep one group open ",
+          "implementationStatus": "pending",
+          "benchmarkScore": null,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-responsive-media-adaptive-styles-and-vie-1",
+          "topic": "Responsive media, adaptive styles, and viewport verification",
+          "summary": "1. **Which implementation surface changes?** `index.html`, `src/components/Hero.tsx`, `src/components/FeaturedDishes.tsx`, `src/components/ChefStory.tsx`, `public/images/*`, `tests/e2e/responsive-images.spec.ts`.\n2. **What exactly changes?** Implement hero and chef media with `<picture>` for mobile-",
+          "implementationStatus": "pending",
+          "benchmarkScore": null,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-carousel-restraint-and-motion-stable-her-2",
+          "topic": "Carousel restraint and motion-stable hero/testimonial delivery",
+          "summary": "1. **Which implementation surface changes?** `src/components/Hero.tsx`, `src/components/Testimonials.tsx`, `tests/e2e/home.spec.ts`, `tests/e2e/motion.spec.ts`.\n2. **What exactly changes?** Do not implement the initial hero or testimonials as autoplaying carousels; render a static hero composition a",
+          "implementationStatus": "pending",
+          "benchmarkScore": null,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-trust-building-content-architecture-and--3",
+          "topic": "Trust-building content architecture and premium visual systems",
+          "summary": "1. **Which implementation surface changes?** `src/styles/tokens.css`, `src/styles/global.css`, `src/App.tsx`, `src/components/Hero.tsx`, `src/components/Categories.tsx`, `src/components/FeaturedDishes.tsx`, `src/components/ChefStory.tsx`, `src/components/Testimonials.tsx`, `src/components/FAQ.tsx`, ",
+          "implementationStatus": "pending",
+          "benchmarkScore": null,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-scout-package-narration-4",
+          "topic": "Scout package narration",
+          "summary": "Relevance: LOW - no clear target-repo integration path. Reason: This entry is scout workflow narration rather than implementation evidence.\n## Cross-Topic Connections\nAccessible navigation and FAQ disclosure patterns ↔ Responsive media, adaptive styles, and viewport verification: The same nav and FA",
+          "implementationStatus": "pending",
+          "benchmarkScore": null,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        }
+      ]
+    },
+    {
+      "cycleId": "2026-04-19T12:00:21.156Z",
+      "evaluatedAt": "2026-04-19T17:41:41.559Z",
+      "schemaVersion": 1,
+      "recommendations": [
+        {
+          "id": "rec-accessible-interaction-patterns-and-sema-0",
+          "topic": "Accessible interaction patterns and semantic regression testing",
+          "summary": "1. **Which files change**: `src/components/Navbar.tsx`, `src/components/FAQ.tsx`, `tests/browser/navigation.browser.test.tsx`, `tests/browser/faq.browser.test.tsx`.\n2. **What changes**: Implement the mobile navigation toggle and each FAQ item as disclosure buttons with `aria-expanded` and `aria-cont",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-frontend-foundation-and-real-browser-tes-1",
+          "topic": "Frontend foundation and real-browser test harness",
+          "summary": "1. **Which files change**: `package.json`, `vite.config.ts`, `index.html`, `src/main.tsx`, `src/App.tsx`, `src/index.css`, `tsconfig.json`.\n2. **What changes**: Scaffold the empty repo directly with Vite's `react-ts` template in the repo root, keep the default React plugin config, and structure the ",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-responsive-layout-system-and-media-deliv-2",
+          "topic": "Responsive layout system and media delivery",
+          "summary": "1. **Which files change**: `src/index.css`, `src/App.tsx`, `src/components/Hero.tsx`, `src/components/Navbar.tsx`, `src/components/Categories.tsx`, `src/components/FeaturedDishes.tsx`, `src/components/Testimonials.tsx`, `src/components/FAQ.tsx`.\n2. **What changes**: Build the page mobile-first with ",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-motion-safety-and-reduced-motion-behavio-3",
+          "topic": "Motion safety and reduced-motion behavior",
+          "summary": "1. **Which files change**: `src/index.css`, `src/components/Hero.tsx`, `src/components/Navbar.tsx`, `src/components/FeaturedDishes.tsx`, `tests/browser/motion.browser.test.tsx`.\n2. **What changes**: Add a site-wide reduced-motion styling branch that removes or tones down large transform-based animat",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-trust-signals-and-conversion-credibility-4",
+          "topic": "Trust signals and conversion credibility",
+          "summary": "1. **Which files change**: `src/components/Hero.tsx`, `src/components/ChefStory.tsx`, `src/components/Testimonials.tsx`, `src/components/FAQ.tsx`, `src/components/CTA.tsx`, `src/components/Footer.tsx`, `src/content/siteContent.ts`.\n2. **What changes**: Fill the landing page with credibility-bearing ",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        },
+        {
+          "id": "rec-scout-framing-note-5",
+          "topic": "Scout framing note",
+          "summary": "Relevance: LOW - no clear target-repo integration path. Reason: This entry is a scouting note, not implementation evidence.",
+          "implementationStatus": "pending",
+          "benchmarkScore": 1,
+          "capacityGain": null,
+          "evidence": "",
+          "source_url": null,
+          "submission_id": null,
+          "model_tag": null,
+          "attempt_count": null,
+          "prId": null,
+          "mergedSha": null,
+          "ciClosed": null
+        }
+      ]
+    },
     {
       "cycleId": "2026-04-16T19:03:15.065Z",
       "evaluatedAt": "2026-04-16T19:26:04.196Z",
@@ -2381,126 +2658,6 @@
           "id": "rec-multi-agent-orchestration-contracts-and--2",
           "topic": "Multi-agent orchestration contracts and anti-loop replanning",
           "summary": "1. **File**: `src/core/orchestrator.ts`  \n2. **Behavior change**: Implement a two-loop controller with persisted `task/facts/plan/n_rounds/n_stalls`, schema-validated progress ledger, and automatic replan when stalls hit threshold (default 3).  \n3. **Verifiable outcome**: Orchestrator state JSON alw",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        }
-      ]
-    },
-    {
-      "cycleId": "2026-04-08T12:08:45.941Z",
-      "evaluatedAt": "2026-04-08T12:26:58.030Z",
-      "schemaVersion": 1,
-      "recommendations": [
-        {
-          "id": "rec-copilot-cloud-agent-environment-determin-0",
-          "topic": "Copilot Cloud Agent Environment Determinism",
-          "summary": "1. **File to change**: `src/core/worker_runner.ts` (plus repository workflow `.github/workflows/copilot-setup-steps.yml` generation/validation path if worker provisions repos).  \n2. **Specific behavior change**: Add a pre-run environment policy validator that enforces `copilot-setup-steps.yml` contr",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-durable-worker-runtime-and-retry-semanti-1",
-          "topic": "Durable Worker Runtime and Retry Semantics (Temporal TS)",
-          "summary": "1. **File to change**: `src/core/orchestrator.ts`.  \n2. **Specific behavior change**: Introduce explicit worker lifecycle state machine and graceful shutdown windows modeled on Temporal semantics (`RUNNING/STOPPING/STOPPED/FAILED`), with stop behavior that halts new work intake and allows bounded in",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-interrupt-team-and-termination-control-p-2",
-          "topic": "Interrupt, Team, and Termination Control Patterns",
-          "summary": "1. **File to change**: `src/core/orchestrator.ts`.  \n2. **Specific behavior change**: Add resumable interrupt checkpoints for high-risk operations with persisted `thread_id` equivalent in BOX state; require resume payload mapping by checkpoint ID for multi-pause scenarios and enforce idempotent pre-",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-reasoning-controls-and-external-benchmar-3",
-          "topic": "Reasoning Controls and External Benchmark Signals",
-          "summary": "1. **File to change**: `.github/agents/prometheus.agent.md`.  \n2. **Specific behavior change**: Add model-mode routing rules that explicitly choose reasoning mode per task class (`adaptive/high-effort` for plan synthesis, `thinking disabled/omitted` for routine edits), plus strict output-block parsi",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        }
-      ]
-    },
-    {
-      "cycleId": "2026-04-08T10:33:33.149Z",
-      "evaluatedAt": "2026-04-08T11:11:55.513Z",
-      "schemaVersion": 1,
-      "recommendations": [
-        {
-          "id": "rec-deliberate-planning-and-multi-agent-plan-0",
-          "topic": "Deliberate Planning and Multi-Agent Plan Synthesis",
-          "summary": "1. **File to change**: `src/core/prometheus.ts`  \n2. **Specific behavior change**: Add typed planning lanes (`planning`, `security`, `tests`, `release`) and a fan-in collector that waits for all lane outputs before final plan assembly; reject incomplete lane sets instead of generating a plan from pa",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-agent-governance-hitl-control-and-operat-1",
-          "topic": "Agent Governance, HITL Control, and Operational Reliability",
-          "summary": "1. **File to change**: `src/core/worker_runner.ts`  \n2. **Specific behavior change**: Add a pre-dispatch Copilot-policy reconciliation step that calls the org Copilot coding-agent management endpoints and blocks worker execution if target repo is not enabled under current org policy.  \n3. **Verifiab",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-durable-orchestration-and-evaluator-firs-2",
-          "topic": "Durable Orchestration and Evaluator-First Self-Improvement",
-          "summary": "1. **File to change**: `src/core/orchestrator.ts`  \n2. **Specific behavior change**: Add a deterministic step journal and cycle rollover behavior analogous to Continue-As-New: persist minimal serializable state at boundary and start next cycle from checkpoint snapshot, with side-effectful operations",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        }
-      ]
-    },
-    {
-      "cycleId": "2026-04-08T08:39:39.307Z",
-      "evaluatedAt": "2026-04-08T09:19:35.717Z",
-      "schemaVersion": 1,
-      "recommendations": [
-        {
-          "id": "rec-structured-code-action-interfaces-and-co-0",
-          "topic": "Structured Code Action Interfaces and Context Pruning",
-          "summary": "1. **File to change**: `src/core/worker_runner.ts` (plus tool prompt contract in `.github/agents/*.agent.md` for worker roles).  \n2. **Specific behavior change**: Replace free-form edit/read task instructions with a structured tool contract (`readCode`/`editCode`) and require selector-based edit int",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-mcp-governance-and-hook-based-runtime-co-1",
-          "topic": "MCP Governance and Hook-Based Runtime Controls",
-          "summary": "1. **File to change**: `src/core/worker_runner.ts`.  \n2. **Specific behavior change**: Introduce explicit MCP policy profiles that compile to deterministic headers/env (`X-MCP-*` / `GITHUB_*`) per worker phase and log final effective config hash with each run artifact.  \n3. **Verifiable outcome**: F",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-spec-driven-multi-agent-workflow-groundi-2",
-          "topic": "Spec-Driven Multi-Agent Workflow Grounding",
-          "summary": "1. **File to change**: `src/core/prometheus.ts`, `src/core/athena.ts`, and `src/core/orchestrator.ts`.  \n2. **Specific behavior change**: Enforce explicit phase artifacts (`SPEC/PLAN/TASKS`) and add phase-transition gates requiring discovery and validation outputs before execution handoff.  \n3. **Ve",
-          "implementationStatus": "pending",
-          "benchmarkScore": null,
-          "capacityGain": null,
-          "evidence": ""
-        },
-        {
-          "id": "rec-evaluation-integrity-beyond-pass-rate-me-3",
-          "topic": "Evaluation Integrity Beyond Pass-Rate Metrics",
-          "summary": "1. **File to change**: `src/core/athena.ts` and `src/core/verification_gate.ts`.  \n2. **Specific behavior change**: Add design-compliance verdict classification separate from test verdict; reject “tests pass + design violated” outcomes from autonomous acceptance path.  \n3. **Verifiable outcome**: At",
           "implementationStatus": "pending",
           "benchmarkScore": null,
           "capacityGain": null,

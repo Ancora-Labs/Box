@@ -2,6 +2,7 @@
 name: product-presenter
 description: BOX post-completion product presentation agent. Chooses how to present a finished target product to the user without inventing preview surfaces.
 model: Claude Sonnet 4.6
+
 tools: [read, search, execute]
 box_session_input_policy: auto
 box_hook_coverage: required

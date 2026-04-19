@@ -62,6 +62,14 @@ export function agentFileExists(slug) {
   return existsSync(path.join(AGENTS_DIR, `${slug}.agent.md`));
 }
 
+export function agentFileExistsForExecution(slug, executionCwd) {
+  const normalizedSlug = String(slug || "").trim();
+  if (!normalizedSlug) return false;
+  const normalizedCwd = String(executionCwd || "").trim();
+  if (!normalizedCwd) return agentFileExists(normalizedSlug);
+  return existsSync(path.join(normalizedCwd, ".github", "agents", `${normalizedSlug}.agent.md`));
+}
+
 function readAgentFrontmatterSnapshot(slug: string): AgentFrontmatterSnapshot {
   const filePath = path.join(AGENTS_DIR, `${slug}.agent.md`);
   if (!existsSync(filePath)) {
@@ -137,6 +145,11 @@ function deriveHookCoverageModeFromTools(tools: string[]): AgentHookCoverageMode
 // ÔöÇÔöÇ Map model name to Copilot CLI model slug ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 export function toCopilotModelSlug(name) {
+  const key = String(name || "").trim().toLowerCase();
+  if (!key || key === "auto" || key === "default" || key === "system") {
+    return "";
+  }
+
   const map = {
     "claude sonnet 4.6": "claude-sonnet-4.6",
     "claude sonnet 4.5": "claude-sonnet-4.5",
@@ -161,7 +174,6 @@ export function toCopilotModelSlug(name) {
     "gpt 5 mini": "gpt-5-mini",
     "gpt 4.1": "gpt-4.1"
   };
-  const key = String(name || "").trim().toLowerCase();
   if (map[key]) return map[key];
   return key
     .replace(/[^a-z0-9.\s-]/g, "")
@@ -265,6 +277,14 @@ export function writeAgentDebugFile(config: any, input: {
   }
 }
 
+function resolveAgentLiveModeLabel(config: any, session: any) {
+  const fromConfig = String(config?.platformModeState?.currentMode || "").trim();
+  if (fromConfig === "single_target_delivery") return "target";
+  if (fromConfig === "self_dev") return "self";
+  if (session?.projectId && session?.sessionId) return "target";
+  return "self";
+}
+
 export function appendAgentLiveLog(config: any, input: {
   agentSlug: string;
   session?: any;
@@ -276,15 +296,14 @@ export function appendAgentLiveLog(config: any, input: {
     const stateDir = config?.paths?.stateDir || STATE_DIR;
     const agentSlug = normalizeAgentDebugSlug(input?.agentSlug);
     const session = input?.session || null;
-    const contextLabel = String(input?.contextLabel || "agent_call").trim() || "agent_call";
-    const status = String(input?.status ?? "info").trim() || "info";
-    const message = String(input?.message || "").trim();
-    if (!message) return;
-    const line = `[${new Date().toISOString()}] [AGENT:${agentSlug}] [context=${contextLabel}] [status=${status}] ${message}\n`;
+    const message = String(input?.message || "").trimEnd();
+    if (!message.trim()) return;
+    const mode = resolveAgentLiveModeLabel(config, session);
+    const line = `${message} [mode=${mode}]\n`;
 
     mkdirSync(stateDir, { recursive: true });
     appendFileSync(path.join(stateDir, `live_agent_${agentSlug}.log`), line, "utf8");
-    appendFileSync(path.join(stateDir, "live_agents.log"), `[agent:${agentSlug}] ${line}`, "utf8");
+    appendFileSync(path.join(stateDir, "live_agents.log"), `[${agentSlug}] ${message} [mode=${mode}]\n`, "utf8");
 
     if (session?.projectId && session?.sessionId) {
       const evidenceDir = path.join(
@@ -311,16 +330,16 @@ export function appendAgentLiveLogDetail(config: any, input: {
     const stateDir = config?.paths?.stateDir || STATE_DIR;
     const agentSlug = normalizeAgentDebugSlug(input?.agentSlug);
     const session = input?.session || null;
-    const contextLabel = String(input?.contextLabel || "agent_call").trim() || "agent_call";
     const stage = String(input?.stage || "detail").trim() || "detail";
     const title = String(input?.title || stage).trim() || stage;
     const content = String(input?.content || "");
     if (!content.trim()) return;
+    const mode = resolveAgentLiveModeLabel(config, session);
 
     const header = [
       "",
       `${"=".repeat(72)}`,
-      `[${new Date().toISOString()}] [AGENT:${agentSlug}] [context=${contextLabel}] [stage=${stage}] ${title}`,
+      `${title} [mode=${mode}]`,
       `${"=".repeat(72)}`,
       content.endsWith("\n") ? content.slice(0, -1) : content,
       "",
@@ -328,7 +347,7 @@ export function appendAgentLiveLogDetail(config: any, input: {
 
     mkdirSync(stateDir, { recursive: true });
     appendFileSync(path.join(stateDir, `live_agent_${agentSlug}.log`), `${header}\n`, "utf8");
-    appendFileSync(path.join(stateDir, "live_agents.log"), `[agent:${agentSlug}] ${header}\n`, "utf8");
+    appendFileSync(path.join(stateDir, "live_agents.log"), `[${agentSlug}] ${header}\n`, "utf8");
 
     if (session?.projectId && session?.sessionId) {
       const evidenceDir = path.join(
@@ -358,6 +377,10 @@ export function buildAgentArgs({
   const args = [];
   const normalizedModelCallSettings: ModelCallSettingsOverlay =
     modelCallSettings && typeof modelCallSettings === "object" ? modelCallSettings : {};
+  const executionCwd = String(runContract?.executionCwd || "").trim();
+  const agentAvailableForExecution = agentSlug
+    ? agentFileExistsForExecution(agentSlug, executionCwd)
+    : false;
   const agentProfile = agentSlug && agentFileExists(agentSlug)
     ? resolveAgentExecutionProfile(agentSlug)
     : null;
@@ -394,7 +417,7 @@ export function buildAgentArgs({
   }
   if (effectiveSilent) args.push("--silent");
 
-  if (agentSlug && agentFileExists(agentSlug)) {
+  if (agentSlug && agentAvailableForExecution) {
     args.push("--agent", agentSlug);
     // Force explicit model even with custom agent to avoid default-model fallback.
     pushResolvedModelArg(effectiveModel);

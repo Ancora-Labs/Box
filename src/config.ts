@@ -3,7 +3,7 @@ import path from "node:path";
 import dotenv from "dotenv";
 import type { Config } from "./types/index.js";
 
-dotenv.config();
+dotenv.config({ override: true });
 
 function must(value: string | undefined, _key: string): string | null {
   if (!value || !value.trim()) {
@@ -19,14 +19,21 @@ export async function loadConfig(): Promise<Config> {
   const fileConfig = JSON.parse(raw);
 
   const env = {
-    githubToken: must(process.env.GITHUB_TOKEN, "GITHUB_TOKEN"),
+    githubToken: must(
+      process.env.canerdogduGITHUB_TOKEN
+      || process.env.GITHUB_TOKEN
+      || process.env.GITHUB_TOKENPERSONAL,
+      "GITHUB_TOKEN"
+    ),
     // Copilot CLI needs a fine-grained PAT (github_pat_) with Copilot permissions.
     // Classic PATs (ghp_) are NOT supported by Copilot CLI.
     // Support legacy/local variable names used in older .env files.
     copilotGithubToken: must(
-      process.env.COPILOT_GITHUB_TOKEN
+      process.env.canerdoqdu_FINEGRADED
+      || process.env.COPILOT_GITHUB_TOKEN
+      || process.env.CanerdoqduFINEGRADED
       || process.env.CanerdoqduFINEGRADEDGENERALANDTRUMP
-        || process.env.GITHUB_FINEGRADED
+      || process.env.GITHUB_FINEGRADED
       || process.env.GITHUBFINEGRADEDPERSONALINTEL,
       "COPILOT_GITHUB_TOKEN"
     ),
@@ -431,9 +438,16 @@ export async function loadConfig(): Promise<Config> {
       : Number(fileConfig?.cloudAssignment?.maxWaitMs ?? 3600000),
   };
 
-  // Propagate resolved token into process.env so CopilotReviewer child processes inherit it
-  if (env.copilotGithubToken && !process.env.COPILOT_GITHUB_TOKEN) {
+  // Propagate resolved tokens into process.env so child Copilot/GitHub processes
+  // always inherit the active account selected by the .env file.
+  if (env.githubToken) {
+    process.env.GITHUB_TOKEN = env.githubToken;
+    process.env.GH_TOKEN = env.githubToken;
+  }
+
+  if (env.copilotGithubToken) {
     process.env.COPILOT_GITHUB_TOKEN = env.copilotGithubToken;
+    process.env.GITHUB_FINEGRADED = env.copilotGithubToken;
   }
 
   return {
