@@ -10,6 +10,7 @@ import { readPipelineProgress, SYSTEM_STATUS_REASON_CODE } from "../core/pipelin
 import { parseTypedEvent } from "../core/event_schema.js";
 import { readCycleAnalytics } from "../core/cycle_analytics.js";
 import { collectHypothesisScorecard } from "../core/hypothesis_scorecard.js";
+import { renderAtlasHtml, type AtlasSessionSummary } from "./atlas_render.js";
 
 dotenv.config();
 
@@ -1295,6 +1296,72 @@ function derivePremiumEstimate(prometheusAnalysisRef: Record<string, any>, usedR
   };
 }
 
+function listActiveWorkers(workerSessions: Record<string, unknown>): Array<{ name: string; task: string; since: string | null }> {
+  return Object.entries(workerSessions || {})
+    .filter(([, session]) => session && typeof session === "object" && (session as Record<string, unknown>).status === "working")
+    .map(([name, session]) => {
+      const workerSession = session as Record<string, unknown>;
+      return {
+        name,
+        task: String(workerSession.lastTask || "").slice(0, 80),
+        since: typeof workerSession.lastActiveAt === "string" ? workerSession.lastActiveAt : null,
+      };
+    });
+}
+
+function normalizeWorkerActivity(
+  workerSessions: Record<string, unknown>,
+  thinkingMap: Record<string, string> = {}
+): Record<string, {
+  role: string;
+  status: string;
+  lastTask: string;
+  lastActiveAt: string | null;
+  historyLength: number;
+  lastThinking: string;
+}> {
+  const cleaned: Record<string, {
+    role: string;
+    status: string;
+    lastTask: string;
+    lastActiveAt: string | null;
+    historyLength: number;
+    lastThinking: string;
+  }> = {};
+
+  for (const [role, rawSession] of Object.entries(workerSessions || {})) {
+    const session = rawSession && typeof rawSession === "object" ? rawSession as Record<string, unknown> : {};
+    const history = Array.isArray(session.history) ? session.history : [];
+    let effectiveStatus = String(session.status || "idle");
+
+    if (effectiveStatus === "working" && history.length > 0) {
+      const lastEntry = [...history].reverse().find((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const historyEntry = entry as Record<string, unknown>;
+        const actor = String(historyEntry.from || historyEntry.role || "");
+        return actor !== "Athena" && actor !== "orchestrator";
+      });
+      if (lastEntry && typeof lastEntry === "object") {
+        const normalizedHistoryStatus = String((lastEntry as Record<string, unknown>).status || "").toLowerCase();
+        if (["done", "partial", "blocked"].includes(normalizedHistoryStatus)) {
+          effectiveStatus = "idle";
+        }
+      }
+    }
+
+    cleaned[role] = {
+      role,
+      status: effectiveStatus,
+      lastTask: String(session.lastTask || ""),
+      lastActiveAt: typeof session.lastActiveAt === "string" ? session.lastActiveAt : null,
+      historyLength: history.length,
+      lastThinking: String(thinkingMap[role] || ""),
+    };
+  }
+
+  return cleaned;
+}
+
 async function collectDashboardData() {
   const [
     boxConfig,
@@ -1503,42 +1570,12 @@ async function collectDashboardData() {
           ? copilotApiUsage.byModel.map(m => ({ model: m.model, qty: m.grossQuantity }))
           : []
       },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      workersActive: Object.entries(workerSessions || {}).filter(([, s]: any) => s?.status === "working").map(([name, s]: any) => ({
-        name,
-        task: String(s.lastTask || "").slice(0, 80),
-        since: s.lastActiveAt || null
-      })),
+      workersActive: listActiveWorkers(workerSessions),
       daemonPid: daemonStatus.pid,
       daemonRunning: daemonStatus.running
     },
     premiumUsageByWorker: derivePremiumUsageByWorker(premiumUsageLog),
-    workerActivity: (function() {
-      const sessions = workerSessions || {};
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const cleaned: Record<string, any> = {};
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const [role, s] of Object.entries(sessions) as any[]) {
-        // Cross-check: if status is "working" but last non-orchestrator history says "done",
-        // the worker actually finished — session file is stale
-        let effectiveStatus = s.status || "idle";
-        if (effectiveStatus === "working" && Array.isArray(s.history) && s.history.length > 0) {
-          const lastEntry = s.history.filter(h => h && h.role !== "Athena").pop();
-          if (lastEntry && ["done", "partial", "blocked"].includes(String(lastEntry.status || "").toLowerCase())) {
-            effectiveStatus = "idle";
-          }
-        }
-        cleaned[role] = {
-          role,
-          status: effectiveStatus,
-          lastTask: s.lastTask || "",
-          lastActiveAt: s.lastActiveAt || null,
-          historyLength: Array.isArray(s.history) ? s.history.length : 0,
-          lastThinking: thinkingMap[role] || ""
-        };
-      }
-      return cleaned;
-    })(),
+    workerActivity: normalizeWorkerActivity(workerSessions, thinkingMap),
     leadership: {
       athena: athenaState,
       jesus: jesusDirective,
@@ -1581,6 +1618,26 @@ async function collectDashboardData() {
       updatedBy: String(siControlRaw.updatedBy || ""),
       liveLog: siLiveLogTail,
     },
+  };
+}
+
+function toAtlasSessionSummary(data: Awaited<ReturnType<typeof collectDashboardData>>): AtlasSessionSummary {
+  return {
+    projectLabel: String(data?.runtime?.projectLabel || "ATLAS"),
+    targetRepo: String(data?.runtime?.targetRepo || TARGET_REPO || "Target repo not configured"),
+    systemStatus: String(data?.runtime?.systemStatus || "idle"),
+    systemStatusText: String(data?.runtime?.systemStatusText || "System ready"),
+    degradedReason: typeof data?.runtime?.degradedReason === "string" ? data.runtime.degradedReason : null,
+    statusFreshnessAt: typeof data?.runtime?.statusFreshnessAt === "string" ? data.runtime.statusFreshnessAt : null,
+    pipelineStageLabel: String(data?.pipeline?.stageLabel || data?.pipeline?.stage || "Idle"),
+    pipelineDetail: String(data?.pipeline?.detail || "Waiting for the next cycle update"),
+    pipelinePercent: Number(data?.pipeline?.percent || 0),
+    sessions: Object.values(data?.workerActivity || {}).map((session) => ({
+      name: String(session?.role || "Session"),
+      status: String(session?.status || "idle"),
+      lastTask: String(session?.lastTask || ""),
+      lastActiveAt: typeof session?.lastActiveAt === "string" ? session.lastActiveAt : null,
+    })),
   };
 }
 
@@ -4502,6 +4559,19 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse): Promi
     } catch (err) {
       res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: String(err?.message || err) }));
+    }
+    return;
+  }
+
+  if (url.pathname === "/atlas") {
+    try {
+      const atlasSummary = toAtlasSessionSummary(await collectDashboardData());
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderAtlasHtml(atlasSummary));
+    } catch (error) {
+      console.error(`[box] atlas route failed: ${String((error as Error)?.message || error)}`);
+      res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!doctype html><html><body><h1>ATLAS Home unavailable</h1><p>Check dashboard logs for details.</p></body></html>");
     }
     return;
   }
