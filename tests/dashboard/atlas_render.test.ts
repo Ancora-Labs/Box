@@ -55,46 +55,96 @@ function requestText(port: number, pathname: string): Promise<{ status: number; 
   });
 }
 
-describe("renderAtlasHtml", () => {
-  it("renders the ATLAS Home control surface from session summary data", () => {
-    const html = renderAtlasHtml({
-      projectLabel: "ATLAS",
-      targetRepo: "Ancora-Labs/Box",
-      systemStatus: "working",
-      systemStatusText: "Workers Active",
-      statusFreshnessAt: "2026-04-21T12:00:00.000Z",
-      pipelineStageLabel: "Workers Running",
-      pipelineDetail: "Rendering the new ATLAS route",
-      pipelinePercent: 85,
-      sessions: [
-        {
-          name: "Atlas",
-          status: "working",
-          lastTask: "Ship the ATLAS Home route",
-          lastActiveAt: "2026-04-21T12:00:00.000Z",
-        },
-      ],
-    });
+function buildSummary(overrides = {}) {
+  return {
+    projectLabel: "ATLAS",
+    targetRepo: "Ancora-Labs/Box",
+    systemStatus: "working",
+    systemStatusText: "Workers Active",
+    statusFreshnessAt: "2026-04-21T12:00:00.000Z",
+    pipelineStageLabel: "Workers Running",
+    pipelineDetail: "Rendering the ATLAS entry surface",
+    pipelinePercent: 85,
+    sessions: [
+      {
+        name: "Athena",
+        status: "working",
+        lastTask: "Validate the regression suite",
+        lastActiveAt: "2026-04-21T12:00:00.000Z",
+      },
+      {
+        name: "Prometheus",
+        status: "blocked",
+        lastTask: "Waiting on review notes",
+        lastActiveAt: "2026-04-21T11:45:00.000Z",
+      },
+      {
+        name: "Hermes",
+        status: "done",
+        lastTask: "Closed the previous session",
+        lastActiveAt: "2026-04-21T11:30:00.000Z",
+      },
+      {
+        name: "Atlas",
+        status: "idle",
+        lastTask: "",
+        lastActiveAt: "2026-04-21T11:15:00.000Z",
+      },
+    ],
+    ...overrides,
+  };
+}
 
-    assert.match(html, /<title>ATLAS Home<\/title>/);
-    assert.match(html, /Session-centered control surface/);
-    assert.match(html, /Ship the ATLAS Home route/);
-    assert.match(html, /Ancora-Labs\/Box/);
+describe("renderAtlasHtml", () => {
+  it("renders the ATLAS surface with the primary nav, resumable action, summary cards, and no internal labels", () => {
+    const html = renderAtlasHtml(buildSummary());
+
+    assert.match(html, /<title>ATLAS<\/title>/);
+    assert.match(html, /<nav class="primary-nav" aria-label="Primary">[\s\S]*>Home<\/a>[\s\S]*>Sessions<\/a>[\s\S]*>New Session<\/a>[\s\S]*>Settings<\/a>/);
+    assert.match(html, />Continue last session</);
+    assert.match(html, /<span>Total sessions<\/span>\s*<strong>4<\/strong>/);
+    assert.match(html, /<span>Active sessions<\/span>\s*<strong>1<\/strong>/);
+    assert.match(html, /<span>Sessions needing input<\/span>\s*<strong>1<\/strong>/);
+    assert.match(html, /<span>Recently completed<\/span>\s*<strong>1<\/strong>/);
+    assert.doesNotMatch(html, /Athena|Prometheus|Hermes/);
+    assert.doesNotMatch(html, /self-improvement/i);
   });
 
-  it("[NEGATIVE] renders the empty state and reason note when sessions are absent", () => {
-    const html = renderAtlasHtml({
-      systemStatus: "idle",
-      systemStatusText: "System Idle",
-      degradedReason: "MISSING_PIPELINE_STATE",
-      pipelineStageLabel: "Idle",
-      pipelineDetail: "Waiting for the next cycle",
-      pipelinePercent: 0,
-      sessions: [],
-    });
+  it("maps the health badge states to the requested labels", () => {
+    const scenarios = [
+      { systemStatus: "idle", label: "Ready" },
+      { systemStatus: "working", label: "Working" },
+      { systemStatus: "degraded", label: "Needs attention" },
+      { systemStatus: "offline", label: "Stopped" },
+    ];
 
-    assert.match(html, /No active sessions yet\./);
-    assert.match(html, /Cycle data is not available yet/);
+    for (const scenario of scenarios) {
+      const html = renderAtlasHtml(buildSummary({
+        systemStatus: scenario.systemStatus,
+        sessions: [],
+      }));
+      const badgePattern = new RegExp(`<span>Health<\\/span>\\s*<strong>${scenario.label}<\\/strong>`);
+      assert.match(html, badgePattern);
+    }
+  });
+
+  it("[NEGATIVE] shows the fallback primary action when there is no resumable session", () => {
+    const html = renderAtlasHtml(buildSummary({
+      systemStatus: "idle",
+      sessions: [
+        {
+          name: "Hermes",
+          status: "done",
+          lastTask: "Closed the previous session",
+          lastActiveAt: "2026-04-21T11:30:00.000Z",
+        },
+      ],
+    }));
+
+    assert.match(html, />Open sessions</);
+    assert.doesNotMatch(html, />Continue last session</);
+    assert.match(html, /<span>Total sessions<\/span>\s*<strong>1<\/strong>/);
+    assert.match(html, /<span>Recently completed<\/span>\s*<strong>1<\/strong>/);
   });
 });
 
@@ -112,8 +162,22 @@ describe("/atlas route", () => {
       Atlas: {
         role: "Atlas",
         status: "working",
-        lastTask: "Serve the ATLAS Home route",
+        lastTask: "Serve the ATLAS route",
         lastActiveAt: "2026-04-21T12:00:00.000Z",
+        history: [],
+      },
+      Athena: {
+        role: "Athena",
+        status: "blocked",
+        lastTask: "Await operator input",
+        lastActiveAt: "2026-04-21T11:45:00.000Z",
+        history: [],
+      },
+      Hermes: {
+        role: "Hermes",
+        status: "done",
+        lastTask: "Closed the previous session",
+        lastActiveAt: "2026-04-21T11:30:00.000Z",
         history: [],
       },
     }), "utf8");
@@ -169,16 +233,19 @@ describe("/atlas route", () => {
     delete process.env.TARGET_REPO;
   });
 
-  it("serves ATLAS Home from /atlas without changing the existing / dashboard", async () => {
+  it("serves the ATLAS entry surface from /atlas without changing the existing / dashboard", async () => {
     const atlasResponse = await requestText(port, "/atlas");
     const rootResponse = await requestText(port, "/");
 
     assert.equal(atlasResponse.status, 200);
-    assert.match(atlasResponse.text, /<title>ATLAS Home<\/title>/);
-    assert.match(atlasResponse.text, /Serve the ATLAS Home route/);
+    assert.match(atlasResponse.text, /<title>ATLAS<\/title>/);
+    assert.match(atlasResponse.text, />Continue last session</);
+    assert.match(atlasResponse.text, /<span>Total sessions<\/span>\s*<strong>3<\/strong>/);
+    assert.match(atlasResponse.text, /<span>Sessions needing input<\/span>\s*<strong>1<\/strong>/);
+    assert.doesNotMatch(atlasResponse.text, /Athena|Hermes/);
 
     assert.equal(rootResponse.status, 200);
     assert.match(rootResponse.text, /<title>BOX Mission Control<\/title>/);
-    assert.doesNotMatch(rootResponse.text, /<title>ATLAS Home<\/title>/);
+    assert.doesNotMatch(rootResponse.text, /<title>ATLAS<\/title>/);
   });
 });
