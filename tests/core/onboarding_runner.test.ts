@@ -139,4 +139,28 @@ describe("onboarding_runner", () => {
       scope: "Keep protected paths immutable.",
     });
   });
+
+  it("keeps the first question active when back is requested without history", async () => {
+    const questionSequence: string[] = [];
+
+    const result = await runOnboarding({
+      async initializePlan() {
+        return onboardingPlan;
+      },
+      async askQuestion(view) {
+        questionSequence.push(`${view.question.slotKey}:${view.canGoBack ? "back" : "start"}`);
+        if (questionSequence.length === 1) {
+          assert.equal(view.canGoBack, false);
+          return { kind: "back" } as const;
+        }
+        return { kind: "answer", answer: "Clarify the onboarding goal." } as const;
+      },
+      async renderSummary() {
+        return { kind: "confirm" } as const;
+      },
+    });
+
+    assert.deepEqual(questionSequence, ["goal:start", "goal:start", "scope:back"]);
+    assert.equal(result.answers.goal, "Clarify the onboarding goal.");
+  });
 });

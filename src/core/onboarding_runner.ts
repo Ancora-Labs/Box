@@ -88,7 +88,7 @@ export async function runOnboarding(options: RunOnboardingOptions): Promise<Onbo
       })
       .filter((entry): entry is [string, string] => entry !== null),
   );
-  let history = plan.slots
+  const history = plan.slots
     .map((slot) => slot.key)
     .filter((slotKey) => Boolean(answers[slotKey]));
 
