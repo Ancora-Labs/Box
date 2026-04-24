@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { renderAtlasHomeHtml, type AtlasPageData } from "../renderer.js";
 import { readAtlasClarificationStatus } from "../clarification.js";
+import { renderAtlasHomeHtml, type AtlasPageData } from "../renderer.js";
 import { listAtlasSessions, type AtlasSessionDto } from "../state_bridge.js";
 import { readPipelineProgress } from "../../core/pipeline_progress.js";
 import { normalizeWorkerName } from "../../core/role_registry.js";
@@ -35,24 +35,6 @@ function sortSessions(sessions: AtlasSessionDto[]): AtlasSessionDto[] {
     }
     return left.name.localeCompare(right.name);
   });
-}
-
-async function readDesktopBuildInfo(): Promise<{ sessionId: string; builtAt: string | null; }> {
-  const buildInfoPath = path.join(process.cwd(), "desktop-build-info.json");
-  try {
-    const raw = await fs.readFile(buildInfoPath, "utf8");
-    const parsed = JSON.parse(raw) as AtlasDesktopBuildInfo;
-    return {
-      sessionId: String(parsed?.sessionId || "unknown-session").trim() || "unknown-session",
-        builtAt: typeof parsed?.builtAt === "string" && parsed.builtAt.trim() ? parsed.builtAt.trim() : null,
-    };
-  } catch (error) {
-    console.error(`[atlas] failed to read desktop build info: ${String((error as Error)?.message || error)}`);
-    return {
-      sessionId: "unknown-session",
-      builtAt: null,
-    };
-  }
 }
 
 export function deriveAtlasHomeReadiness(
@@ -125,13 +107,31 @@ function renderClarificationRequiredHtml(): string {
 </html>`;
 }
 
+async function readDesktopBuildInfo(): Promise<{ sessionId: string; builtAt: string | null; }> {
+  const buildInfoPath = path.join(process.cwd(), "desktop-build-info.json");
+  try {
+    const raw = await fs.readFile(buildInfoPath, "utf8");
+    const parsed = JSON.parse(raw) as AtlasDesktopBuildInfo;
+    return {
+      sessionId: String(parsed?.sessionId || "unknown-session").trim() || "unknown-session",
+      builtAt: typeof parsed?.builtAt === "string" && parsed.builtAt.trim() ? parsed.builtAt.trim() : null,
+    };
+  } catch (error) {
+    console.error(`[atlas] failed to read desktop build info: ${String((error as Error)?.message || error)}`);
+    return {
+      sessionId: "unknown-session",
+      builtAt: null,
+    };
+  }
+}
+
 export async function buildAtlasPageData(options: AtlasHomeRouteOptions): Promise<AtlasPageData> {
   const pipelineProgress = await readPipelineProgress({ paths: { stateDir: options.stateDir } });
   const sessions = await listAtlasSessions({ stateDir: options.stateDir });
   const sortedSessions = sortSessions(Object.values(sessions));
   const buildInfo = await readDesktopBuildInfo();
 
-  return {
+  const pageData = {
     title: "ATLAS Home",
     repoLabel: normalizeRepoLabel(options.targetRepo),
     hostLabel: String(options.hostLabel || "Windows host").trim() || "Windows host",
@@ -145,6 +145,7 @@ export async function buildAtlasPageData(options: AtlasHomeRouteOptions): Promis
     ...deriveAtlasHomeReadiness(sortedSessions),
     sessions: sortedSessions,
   };
+  return pageData as AtlasPageData;
 }
 
 export async function handleAtlasHomeRequest(

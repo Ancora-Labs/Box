@@ -204,6 +204,7 @@ describe("atlas server", () => {
     assert.match(homeResponse.text, /ATLAS keeps the live delivery state in the desktop window\./);
     assert.match(homeResponse.text, /Ancora-Labs\/ATLAS/);
     assert.match(homeResponse.text, />Stop runtime</);
+    assert.doesNotMatch(homeResponse.text, /default browser|localhost page/i);
 
     assert.equal(sessionsResponse.status, 200);
     assert.match(sessionsResponse.text, /<title>ATLAS Sessions<\/title>/);
@@ -212,6 +213,7 @@ describe("atlas server", () => {
     assert.match(sessionsResponse.text, />Quality lane</);
     assert.match(sessionsResponse.text, />2 tracked sessions</);
     assert.match(sessionsResponse.text, />Pause lane</);
+    assert.doesNotMatch(sessionsResponse.text, /default browser|localhost page/i);
     assert.doesNotMatch(sessionsResponse.text, /BOX Mission Control/i);
   });
 

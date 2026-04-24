@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
+import { ATLAS_WINDOWS_APP_ID } from "../../electron/single_instance.ts";
+import { createAtlasDesktopPackageLayout } from "../../scripts/atlas_desktop_package.ts";
 import { listAtlasSessions, readAtlasSessionReadModel } from "../../src/atlas/state_bridge.ts";
 
 function createTempRoot(): Promise<string> {
@@ -50,19 +52,58 @@ describe("atlas regression fence", () => {
     const packageJsonPath = path.join(process.cwd(), "package.json");
     const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as {
       scripts?: Record<string, string>;
+      build?: {
+        appId?: string;
+        productName?: string;
+        files?: string[];
+        extraFiles?: string[];
+        win?: {
+          target?: string[];
+          executableName?: string;
+          signAndEditExecutable?: boolean;
+        };
+      };
     };
     const launcherPath = path.join(process.cwd(), "ATLAS.cmd");
     const launcher = await fs.readFile(launcherPath, "utf8");
+    const desktopMain = await fs.readFile(path.join(process.cwd(), "electron", "main.ts"), "utf8");
+    const layout = createAtlasDesktopPackageLayout(path.join("C:", "ATLAS Release Root"));
 
     assert.equal(packageJson.scripts?.["atlas:start"], "node --import tsx src/atlas/server.ts");
     assert.equal(packageJson.scripts?.["atlas:ctl"], "node --import tsx src/atlas/lifecycle.ts");
     assert.match(String(packageJson.scripts?.["atlas:open"] || ""), /atlas:desktop/);
     assert.match(String(packageJson.scripts?.["atlas:desktop"] || ""), /electron/i);
     assert.match(String(packageJson.scripts?.["atlas:desktop:build"] || ""), /tsconfig\.electron\.json/);
+    assert.match(String(packageJson.scripts?.["atlas:desktop:package"] || ""), /scripts\/atlas_desktop_package\.ts/i);
     assert.doesNotMatch(String(packageJson.scripts?.["atlas:start"] || ""), /dashboard/i);
+    assert.equal(packageJson.build?.appId, ATLAS_WINDOWS_APP_ID);
+    assert.equal(packageJson.build?.productName, "ATLAS");
+    assert.ok(packageJson.build?.files?.includes(".electron-build/**/*"));
+    assert.ok(packageJson.build?.files?.includes("electron/renderer/**/*"));
+    assert.ok(packageJson.build?.extraFiles?.includes("box.config.json"));
+    assert.ok(packageJson.build?.win?.target?.includes("dir"));
+    assert.equal(packageJson.build?.win?.executableName, "ATLAS");
+    assert.equal(packageJson.build?.win?.signAndEditExecutable, false);
+    assert.equal(layout.portableRoot, path.join("C:", "ATLAS Release Root", "dist", "ATLAS"));
+    assert.equal(layout.portableExePath, path.join("C:", "ATLAS Release Root", "dist", "ATLAS", "ATLAS.exe"));
+    assert.equal(layout.stagedAppRoot, path.join("C:", "ATLAS Release Root", "dist", ".atlas-builder", "win-unpacked"));
     assert.match(launcher, /npm run atlas:ctl -- %ATLAS_ACTION%/);
     assert.match(launcher, /Launching the native ATLAS desktop shell/i);
+    assert.match(launcher, /Packaging the portable Windows desktop folder/i);
     assert.doesNotMatch(launcher, /Start-Process|Invoke-WebRequest/);
+    assert.match(desktopMain, /requestSingleInstanceLock\(\)/);
+    assert.match(desktopMain, /app\.on\("second-instance"/);
+    assert.match(desktopMain, /restoreAndFocusAtlasWindow\(mainWindow\)/);
+    assert.match(desktopMain, /setAppUserModelId\(ATLAS_WINDOWS_APP_ID\)/);
+    assert.match(desktopMain, /atlasDesktopResources\.onboardingHtmlPath/);
+    assert.match(desktopMain, /window\.loadFile\(atlasDesktopResources\.onboardingHtmlPath\)/);
+  });
+
+  it("[NEGATIVE] rejects empty portable folder names so the release folder cannot lose the root ATLAS.exe contract", () => {
+    assert.throws(
+      () => createAtlasDesktopPackageLayout(path.join("C:", "ATLAS Release Root"), "   "),
+      /non-empty string/i,
+    );
   });
 
   it("falls back to open_target_sessions.json, maps legacy BOX stages, and aggregates archived sessions", async () => {
