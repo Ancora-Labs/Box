@@ -9,7 +9,11 @@ import {
   type AtlasDesktopProductSurface,
 } from "../desktop_state.js";
 import { renderAtlasHomeHtml, type AtlasPageData } from "../renderer.js";
-import { listAtlasSessions, type AtlasSessionDto } from "../state_bridge.js";
+import {
+  compareAtlasSessionsForDesktop,
+  listAtlasSessions,
+  type AtlasSessionDto,
+} from "../state_bridge.js";
 import { readPipelineProgress } from "../../core/pipeline_progress.js";
 import { normalizeWorkerName } from "../../core/role_registry.js";
 
@@ -32,17 +36,10 @@ function normalizeRepoLabel(targetRepo?: string): string {
 }
 
 function sortSessions(sessions: AtlasSessionDto[]): AtlasSessionDto[] {
-  return [...sessions].sort((left, right) => {
-    const leftIsAtlas = normalizeWorkerName(left.role) === "atlas" ? 0 : 1;
-    const rightIsAtlas = normalizeWorkerName(right.role) === "atlas" ? 0 : 1;
-    if (leftIsAtlas !== rightIsAtlas) {
-      return leftIsAtlas - rightIsAtlas;
-    }
-    return left.name.localeCompare(right.name);
-  });
+  return [...sessions].sort(compareAtlasSessionsForDesktop);
 }
 
-function resolveAtlasProductLocation(
+export function resolveAtlasDesktopPageLocation(
   requestUrl: string | undefined,
   fallbackSurface: AtlasDesktopProductSurface,
 ): AtlasDesktopLocation {
@@ -221,7 +218,7 @@ export async function handleAtlasHomeRequest(
       return;
     }
 
-    const pageData = await buildAtlasPageData(options, resolveAtlasProductLocation(req.url, "home"));
+    const pageData = await buildAtlasPageData(options, resolveAtlasDesktopPageLocation(req.url, "home"));
     writeAtlasHtmlResponse(res, renderAtlasHomeHtml(pageData));
   } catch (error) {
     console.error(`[atlas] home route failed: ${String((error as Error)?.message || error)}`);

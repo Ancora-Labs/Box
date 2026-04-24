@@ -75,6 +75,16 @@ export interface AtlasSessionReadModel {
   archivedSessions: AtlasArchivedSessionDto[];
 }
 
+const SESSION_STATUS_PRIORITY: Record<AtlasSessionStatus, number> = {
+  blocked: 0,
+  error: 1,
+  working: 2,
+  partial: 3,
+  idle: 4,
+  offline: 5,
+  done: 6,
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -288,6 +298,52 @@ function resolveEffectiveStatus(
 
 export function getAtlasSessionStatusLabel(status: AtlasSessionStatus): string {
   return STATUS_LABELS[status];
+}
+
+function compareNullableTimestampsDescending(left: string | null, right: string | null): number {
+  const leftValue = left ? Date.parse(left) : Number.NaN;
+  const rightValue = right ? Date.parse(right) : Number.NaN;
+
+  if (Number.isFinite(leftValue) && Number.isFinite(rightValue)) {
+    return rightValue - leftValue;
+  }
+  if (Number.isFinite(leftValue)) return -1;
+  if (Number.isFinite(rightValue)) return 1;
+  return 0;
+}
+
+export function compareAtlasSessionsForDesktop(left: AtlasSessionDto, right: AtlasSessionDto): number {
+  const leftIsAtlas = normalizeWorkerName(left.role) === "atlas" ? 0 : 1;
+  const rightIsAtlas = normalizeWorkerName(right.role) === "atlas" ? 0 : 1;
+  if (leftIsAtlas !== rightIsAtlas) {
+    return leftIsAtlas - rightIsAtlas;
+  }
+
+  if (left.needsInput !== right.needsInput) {
+    return left.needsInput ? -1 : 1;
+  }
+
+  const leftPriority = SESSION_STATUS_PRIORITY[left.status];
+  const rightPriority = SESSION_STATUS_PRIORITY[right.status];
+  if (leftPriority !== rightPriority) {
+    return leftPriority - rightPriority;
+  }
+
+  if (left.isResumable !== right.isResumable) {
+    return left.isResumable ? -1 : 1;
+  }
+
+  const timestampOrder = compareNullableTimestampsDescending(left.lastActiveAt, right.lastActiveAt);
+  if (timestampOrder !== 0) {
+    return timestampOrder;
+  }
+
+  const nameOrder = left.name.localeCompare(right.name);
+  if (nameOrder !== 0) {
+    return nameOrder;
+  }
+
+  return left.role.localeCompare(right.role);
 }
 
 export function getAtlasSessionReadiness(

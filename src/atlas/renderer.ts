@@ -84,6 +84,10 @@ function getFocusedSession(sessions: AtlasSessionDto[], focusedSessionRole: stri
   return sessions.find((session) => session.role === focusedSessionRole) || null;
 }
 
+function getActiveSessionFocus(pageData: AtlasPageData): AtlasSessionDto | null {
+  return getFocusedSession(pageData.sessions, pageData.focusedSessionRole) || getPrimarySession(pageData.sessions);
+}
+
 function countSessions(sessions: AtlasSessionDto[]): AtlasSessionCounts {
   return sessions.reduce<AtlasSessionCounts>((counts, session) => ({
     total: counts.total + 1,
@@ -118,6 +122,10 @@ function getSessionSummary(session: AtlasSessionDto | null): { heading: string; 
     branch: session.currentBranch || "No branch recorded",
     status: `${session.statusLabel} · ${session.readinessLabel}`,
   };
+}
+
+function getSessionActivityLabel(session: AtlasSessionDto): string {
+  return session.lastTask || "Waiting for the next product-facing task.";
 }
 
 function renderNavigation(view: AtlasView, focusedSessionRole: string | null): string {
@@ -189,12 +197,13 @@ function renderStatusTags(session: AtlasSessionDto): string {
 
 function renderSessionCard(session: AtlasSessionDto, focusedSessionRole: string | null): string {
   const isFocused = session.role === focusedSessionRole;
-
-  return `<article class="session-card${isFocused ? " session-card-focused" : ""}" aria-label="${escapeHtml(session.name)} session"${isFocused ? ' data-focus-state="focused"' : ""}>
-    <div class="session-card-header">
-      <div>
+  const laneLabel = session.lane ? `${session.lane} lane` : "Shared lane";
+  return `<article class="session-row${isFocused ? " session-row-focused" : ""}" aria-label="${escapeHtml(session.name)} session"${isFocused ? ' data-focus-state="focused"' : ""}>
+    <div class="session-row-header">
+      <div class="session-row-copy">
+        <div class="eyebrow">${escapeHtml(laneLabel)}</div>
         <h3>${escapeHtml(session.name)}</h3>
-        <p class="support-copy">${escapeHtml(session.lastTask || "Waiting for the next product-facing task.")}</p>
+        <p class="support-copy">${escapeHtml(getSessionActivityLabel(session))}</p>
       </div>
       <div class="chip-row">${renderStatusTags(session)}${isFocused ? '<span class="chip">Focused workspace</span>' : ""}</div>
     </div>
@@ -220,13 +229,107 @@ function renderSessionCard(session: AtlasSessionDto, focusedSessionRole: string 
   </article>`;
 }
 
-function renderHomeContent(pageData: AtlasPageData, counts: AtlasSessionCounts): string {
-  const sessionSummary = getSessionSummary(
-    getFocusedSession(pageData.sessions, pageData.focusedSessionRole) || getPrimarySession(pageData.sessions),
-  );
+function renderSidebarSessionRail(pageData: AtlasPageData, view: AtlasView): string {
+  if (pageData.sessions.length === 0) {
+    return `<div class="sidebar-empty">
+      <strong>No session state is available yet.</strong>
+      <p class="support-copy">ATLAS will surface tracked work here as soon as the next session is written.</p>
+    </div>`;
+  }
 
-  return `<section class="content-grid">
-    <article class="panel panel-span" aria-label="Desktop continuity">
+  return `<div class="session-rail">
+    ${pageData.sessions.map((session) => {
+      const isSelected = session.role === pageData.focusedSessionRole || (!pageData.focusedSessionRole && session === pageData.sessions[0]);
+      const containerTag = view === "sessions" ? "a" : "div";
+      const hrefAttribute = view === "sessions" ? ` href="${escapeHtml(buildSurfaceHref("sessions", session.role))}"` : "";
+      const currentAttribute = isSelected ? ' aria-current="true"' : "";
+      return `<${containerTag} class="session-rail-link${isSelected ? " session-rail-link-selected" : ""}"${hrefAttribute}${currentAttribute}>
+        <span class="session-rail-copy">
+          <strong>${escapeHtml(session.name)}</strong>
+          <span>${escapeHtml(session.statusLabel)} · ${escapeHtml(session.readinessLabel)}</span>
+        </span>
+        <span class="session-rail-meta">${escapeHtml(session.currentBranch || "No branch")}</span>
+      </${containerTag}>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderSidebar(pageData: AtlasPageData, view: AtlasView, counts: AtlasSessionCounts, activeSession: AtlasSessionDto | null): string {
+  const sessionSummary = getSessionSummary(activeSession);
+  return `<aside class="desktop-sidebar" aria-label="ATLAS desktop sidebar">
+    <div class="sidebar-top">
+      <div class="brand-block">
+        <div class="brand-mark">A</div>
+        <div>
+          <div class="eyebrow">Native desktop workspace</div>
+          <p class="product-title">ATLAS</p>
+          <p class="product-copy">${escapeHtml(pageData.hostLabel)} · ${escapeHtml(pageData.pipelineDetail)}</p>
+        </div>
+      </div>
+      <div class="repo-tag">${escapeHtml(pageData.repoLabel)}</div>
+      ${renderNavigation(view, pageData.focusedSessionRole)}
+    </div>
+
+    <section class="sidebar-section" aria-label="Runtime status">
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">Runtime status</div>
+          <h2>${escapeHtml(pageData.pipelineStageLabel)}</h2>
+        </div>
+        <span class="meta-copy">${escapeHtml(formatTimestamp(pageData.updatedAt))}</span>
+      </div>
+      <p class="support-copy">${escapeHtml(pageData.homeReadinessHeading)} · ${escapeHtml(pageData.homeReadinessDetail)}</p>
+      <div class="progress-rail" aria-hidden="true">
+        <span style="width:${escapeHtml(String(clampPercent(pageData.pipelinePercent)))}%"></span>
+      </div>
+      <div class="chip-row" aria-label="Current runtime status">
+        <span class="chip">${escapeHtml(pageData.homeReadinessHeading)}</span>
+        <span class="chip">${escapeHtml(String(counts.total))} tracked sessions</span>
+        <span class="chip">${escapeHtml(String(counts.needsInput))} needing input</span>
+        <span class="chip">${escapeHtml(String(counts.paused))} paused lane${counts.paused === 1 ? "" : "s"}</span>
+      </div>
+    </section>
+
+    <section class="sidebar-section" aria-label="Session focus">
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">Session focus</div>
+          <h2>${escapeHtml(sessionSummary.heading)}</h2>
+        </div>
+        ${activeSession && pageData.focusedSessionRole
+          ? renderLinkAction("Clear focus", buildSurfaceHref(view, null))
+          : ""}
+      </div>
+      <p class="support-copy">${escapeHtml(sessionSummary.detail)}</p>
+      <div class="definition-stack">
+        <div>
+          <span class="caption">Branch</span>
+          <code>${escapeHtml(sessionSummary.branch)}</code>
+        </div>
+        <div>
+          <span class="caption">Status</span>
+          <strong>${escapeHtml(sessionSummary.status)}</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="sidebar-section sidebar-section-fill" aria-label="Tracked sessions rail">
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">Tracked sessions</div>
+          <h2>Persistent left sidebar</h2>
+        </div>
+        <span class="meta-copy">${escapeHtml(String(counts.resumable))} resumable</span>
+      </div>
+      ${renderSidebarSessionRail(pageData, view)}
+    </section>
+  </aside>`;
+}
+
+function renderHomeCanvas(pageData: AtlasPageData, counts: AtlasSessionCounts, activeSession: AtlasSessionDto | null): string {
+  const sessionSummary = getSessionSummary(activeSession);
+  return `<section class="workspace-canvas" aria-label="Desktop continuity">
+    <section class="canvas-section canvas-hero">
       <div class="section-heading">
         <div>
           <div class="eyebrow">Desktop continuity</div>
@@ -252,81 +355,49 @@ function renderHomeContent(pageData: AtlasPageData, counts: AtlasSessionCounts):
           <dd>${escapeHtml(formatTimestamp(pageData.updatedAt))}</dd>
         </div>
       </dl>
-      <div class="cta-row">
-        <a class="primary-link" href="${escapeHtml(buildSurfaceHref("sessions", pageData.focusedSessionRole))}">${escapeHtml(pageData.homePrimaryActionLabel)}</a>
-        ${renderLifecycleForm("Stop runtime", "stop", {
-          returnTo: buildSurfaceHref("home", pageData.focusedSessionRole),
-          tone: "secondary",
-        })}
-      </div>
-    </article>
+    </section>
 
-    <article class="panel" aria-label="Active delivery focus">
-      <div class="eyebrow">Active delivery focus</div>
-      <h2>${escapeHtml(pageData.pipelineStageLabel)}</h2>
-      <p class="lead">${escapeHtml(pageData.pipelineDetail)}</p>
-      <div class="chip-row" aria-label="Current runtime status">
-        <span class="chip">${escapeHtml(pageData.homeReadinessHeading)}</span>
-        <span class="chip">${escapeHtml(sessionSummary.status)}</span>
-      </div>
-      <div class="progress-rail" aria-hidden="true">
-        <span style="width:${escapeHtml(String(clampPercent(pageData.pipelinePercent)))}%"></span>
-      </div>
-      <div class="definition-stack">
-        <div>
-          <span class="caption">Live focus</span>
-          <strong>${escapeHtml(sessionSummary.heading)}</strong>
-          <p class="support-copy">${escapeHtml(sessionSummary.detail)}</p>
-          <code>${escapeHtml(sessionSummary.branch)}</code>
+    <section class="canvas-columns">
+      <section class="canvas-section" aria-label="Active delivery focus">
+        <div class="eyebrow">Active delivery focus</div>
+        <h2>${escapeHtml(pageData.pipelineStageLabel)}</h2>
+        <p class="lead">${escapeHtml(pageData.pipelineDetail)}</p>
+        <div class="definition-stack">
+          <div>
+            <span class="caption">Live focus</span>
+            <strong>${escapeHtml(sessionSummary.heading)}</strong>
+            <p class="support-copy">${escapeHtml(sessionSummary.detail)}</p>
+            <code>${escapeHtml(sessionSummary.branch)}</code>
+          </div>
+          <div>
+            <span class="caption">Next handoff</span>
+            <strong>${escapeHtml(pageData.homePrimaryActionLabel)}</strong>
+            <p class="support-copy">${escapeHtml(pageData.homeReadinessDetail)}</p>
+          </div>
         </div>
-        <div>
-          <span class="caption">Next handoff</span>
-          <strong>${escapeHtml(pageData.homePrimaryActionLabel)}</strong>
-          <p class="support-copy">${escapeHtml(pageData.homeReadinessDetail)}</p>
-        </div>
-      </div>
-    </article>
+      </section>
 
-    <article class="panel" aria-label="Repo state">
-      <div class="eyebrow">Repo state</div>
-      <h2>${escapeHtml(pageData.repoLabel)}</h2>
-      <p class="lead">${escapeHtml(pageData.hostLabel)}</p>
-      <p class="support-copy">${escapeHtml(pageData.homeReadinessDetail)}</p>
-      <dl class="definition-grid">
-        <div>
-          <dt>Tracked sessions</dt>
-          <dd>${escapeHtml(String(counts.total))}</dd>
+      <section class="canvas-section" aria-label="Repo state">
+        <div class="eyebrow">Repo state</div>
+        <h2>${escapeHtml(pageData.repoLabel)}</h2>
+        <p class="lead">${escapeHtml(pageData.hostLabel)}</p>
+        <p class="support-copy">${escapeHtml(pageData.homeReadinessDetail)}</p>
+        <div class="stats-grid">
+          <div class="stat-pill"><span class="caption">Tracked sessions</span><strong>${escapeHtml(String(counts.total))}</strong></div>
+          <div class="stat-pill"><span class="caption">Active sessions</span><strong>${escapeHtml(String(counts.active))}</strong></div>
+          <div class="stat-pill"><span class="caption">Needs input</span><strong>${escapeHtml(String(counts.needsInput))}</strong></div>
+          <div class="stat-pill"><span class="caption">Completed handoffs</span><strong>${escapeHtml(String(counts.completed))}</strong></div>
+          <div class="stat-pill"><span class="caption">Resumable sessions</span><strong>${escapeHtml(String(counts.resumable))}</strong></div>
+          <div class="stat-pill"><span class="caption">Paused lanes</span><strong>${escapeHtml(String(counts.paused))}</strong></div>
         </div>
-        <div>
-          <dt>Active sessions</dt>
-          <dd>${escapeHtml(String(counts.active))}</dd>
-        </div>
-        <div>
-          <dt>Needs input</dt>
-          <dd>${escapeHtml(String(counts.needsInput))}</dd>
-        </div>
-        <div>
-          <dt>Completed handoffs</dt>
-          <dd>${escapeHtml(String(counts.completed))}</dd>
-        </div>
-        <div>
-          <dt>Resumable sessions</dt>
-          <dd>${escapeHtml(String(counts.resumable))}</dd>
-        </div>
-        <div>
-          <dt>Paused lanes</dt>
-          <dd>${escapeHtml(String(counts.paused))}</dd>
-        </div>
-      </dl>
-    </article>
+      </section>
+    </section>
   </section>`;
 }
 
-function renderSessionsContent(pageData: AtlasPageData, counts: AtlasSessionCounts): string {
-  const focusedSession = getFocusedSession(pageData.sessions, pageData.focusedSessionRole);
-
-  return `<section class="content-grid">
-    <article class="panel panel-span" aria-label="Session ledger">
+function renderSessionsCanvas(pageData: AtlasPageData, counts: AtlasSessionCounts, activeSession: AtlasSessionDto | null): string {
+  return `<section class="workspace-canvas" aria-label="Session ledger">
+    <section class="canvas-section canvas-hero">
       <div class="section-heading">
         <div>
           <div class="eyebrow">Trust-first work ledger</div>
@@ -340,35 +411,32 @@ function renderSessionsContent(pageData: AtlasPageData, counts: AtlasSessionCoun
         <span class="chip">${escapeHtml(String(counts.needsInput))} needing input</span>
         <span class="chip">${escapeHtml(String(counts.paused))} paused lane${counts.paused === 1 ? "" : "s"}</span>
       </div>
-    </article>
+    </section>
 
-    ${focusedSession
-      ? `<article class="panel panel-span" aria-label="Focused workspace context">
+    ${activeSession
+      ? `<section class="canvas-section" aria-label="Focused workspace context">
       <div class="section-heading">
         <div>
           <div class="eyebrow">Focused workspace</div>
-          <h2>${escapeHtml(focusedSession.name)}</h2>
+          <h2>${escapeHtml(activeSession.name)}</h2>
         </div>
-        <div class="cta-row">
-          <a class="primary-link" href="${escapeHtml(buildSurfaceHref("home", focusedSession.role))}">Keep focus on home</a>
-          ${renderLinkAction("Clear focus", buildSurfaceHref("sessions", null))}
-        </div>
+        ${pageData.focusedSessionRole ? `<a class="primary-link" href="${escapeHtml(buildSurfaceHref("home", activeSession.role))}">Keep focus on home</a>` : ""}
       </div>
-      <p class="support-copy">${escapeHtml(focusedSession.lastTask || "Waiting for the next product-facing task.")}</p>
+      <p class="support-copy">${escapeHtml(getSessionActivityLabel(activeSession))}</p>
       <dl class="definition-grid">
         <div>
           <dt>Branch</dt>
-          <dd>${escapeHtml(focusedSession.currentBranch || "No branch recorded")}</dd>
+          <dd>${escapeHtml(activeSession.currentBranch || "No branch recorded")}</dd>
         </div>
         <div>
           <dt>Status</dt>
-          <dd>${escapeHtml(`${focusedSession.statusLabel} · ${focusedSession.readinessLabel}`)}</dd>
+          <dd>${escapeHtml(`${activeSession.statusLabel} · ${activeSession.readinessLabel}`)}</dd>
         </div>
       </dl>
-    </article>`
+    </section>`
       : ""}
 
-    <section class="panel panel-span" aria-label="Tracked sessions">
+    <section class="canvas-section" aria-label="Tracked sessions">
       <div class="section-heading">
         <div>
           <div class="eyebrow">Trusted feedback</div>
@@ -383,9 +451,55 @@ function renderSessionsContent(pageData: AtlasPageData, counts: AtlasSessionCoun
   </section>`;
 }
 
+function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession: AtlasSessionDto | null): string {
+  const primaryHref = view === "sessions" && activeSession
+    ? buildSurfaceHref("home", activeSession.role)
+    : buildSurfaceHref("sessions", pageData.focusedSessionRole);
+  const primaryLabel = view === "sessions" && activeSession
+    ? "Keep focus on home"
+    : pageData.homePrimaryActionLabel;
+  const returnTo = buildSurfaceHref(view, pageData.focusedSessionRole);
+
+  const actions = [
+    `<a class="primary-link" href="${escapeHtml(primaryHref)}">${escapeHtml(primaryLabel)}</a>`,
+    renderLifecycleForm("Stop runtime", "stop", {
+      returnTo,
+      tone: "secondary",
+    }),
+  ];
+
+  if (activeSession) {
+    if (view === "sessions") {
+      actions.push(activeSession.role === pageData.focusedSessionRole
+        ? renderLinkAction("Clear focus", buildSurfaceHref(view, null))
+        : renderLinkAction("Focus session", buildSurfaceHref("sessions", activeSession.role)));
+
+      if (activeSession.lane) {
+        actions.push(activeSession.isPaused
+          ? renderLifecycleForm("Resume lane", "resume", { role: activeSession.role, returnTo })
+          : renderLifecycleForm("Pause lane", "pause", { role: activeSession.role, returnTo }));
+      }
+
+      if (activeSession.canArchive) {
+        actions.push(renderLifecycleForm("Archive session", "archive", { role: activeSession.role, returnTo }));
+      }
+    }
+  }
+
+  return `<section class="desktop-composer" aria-label="Desktop composer">
+    <div class="composer-copy">
+      <div class="eyebrow">Desktop composer</div>
+      <h2>${escapeHtml(activeSession?.name || pageData.pipelineStageLabel)}</h2>
+      <p class="support-copy">${escapeHtml(activeSession ? getSessionActivityLabel(activeSession) : pageData.homeReadinessDetail)}</p>
+    </div>
+    <div class="composer-actions">${actions.join("")}</div>
+  </section>`;
+}
+
 function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
   const counts = countSessions(pageData.sessions);
   const pageTitle = view === "sessions" ? "ATLAS Sessions" : pageData.title;
+  const activeSession = getActiveSessionFocus(pageData);
 
   return `<!doctype html>
 <html lang="en">
@@ -435,32 +549,61 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
       outline-offset: 2px;
     }
     main {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 24px 20px 40px;
+      padding: 20px;
     }
     .shell {
       display: grid;
-      gap: 18px;
+      grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+      gap: 20px;
+      min-height: calc(100vh - 40px);
     }
-    .masthead,
-    .content-grid,
+    .desktop-sidebar,
+    .workspace-shell,
+    .workspace-canvas,
     .session-list,
     .definition-grid,
     .chip-row,
     .cta-row,
-    .action-row {
+    .action-row,
+    .canvas-columns,
+    .stats-grid,
+    .composer-actions {
       display: grid;
       gap: 12px;
     }
-    .masthead {
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: start;
-      padding: 18px 20px;
+    .desktop-sidebar,
+    .workspace-shell,
+    .canvas-section,
+    .desktop-composer,
+    .session-row {
+      border-radius: 24px;
       border: 1px solid var(--line);
-      border-radius: 22px;
-      background: rgba(17, 17, 17, 0.92);
+      background: linear-gradient(180deg, rgba(20, 20, 20, 0.96), rgba(12, 12, 12, 0.96));
       box-shadow: var(--shadow);
+    }
+    .desktop-sidebar {
+      position: sticky;
+      top: 20px;
+      align-self: start;
+      min-height: calc(100vh - 40px);
+      padding: 18px;
+      grid-template-rows: auto auto auto minmax(0, 1fr);
+    }
+    .workspace-shell {
+      min-height: calc(100vh - 40px);
+      padding: 18px;
+      grid-template-rows: minmax(0, 1fr) auto;
+    }
+    .workspace-canvas {
+      align-content: start;
+      gap: 16px;
+    }
+    .canvas-section {
+      padding: 22px;
+    }
+    .canvas-columns {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: start;
     }
     .brand-block {
       display: flex;
@@ -501,16 +644,14 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
       line-height: 1.6;
     }
     .product-copy { max-width: 720px; }
-    .masthead-meta {
-      display: grid;
-      justify-items: end;
-      gap: 10px;
-    }
     .repo-tag,
     .chip,
     .nav-link,
     .action-button,
-    .empty-state {
+    .empty-state,
+    .sidebar-empty,
+    .session-rail-link,
+    .stat-pill {
       border: 1px solid var(--line);
       border-radius: 14px;
       background: rgba(255, 255, 255, 0.03);
@@ -536,23 +677,24 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
       border-color: #ffffff;
       font-weight: 600;
     }
-    .content-grid {
-      grid-template-columns: minmax(0, 1.5fr) minmax(320px, 1fr);
+    .sidebar-top,
+    .sidebar-section {
+      display: grid;
+      gap: 14px;
     }
-    .panel,
-    .session-card {
-      padding: 22px;
-      border-radius: 24px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(20, 20, 20, 0.96), rgba(12, 12, 12, 0.96));
-      box-shadow: var(--shadow);
+    .sidebar-section {
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.02);
     }
-    .session-card-focused {
+    .sidebar-section-fill {
+      align-content: start;
+    }
+    .session-row-focused,
+    .session-rail-link-selected {
       border-color: rgba(255, 255, 255, 0.42);
       background: linear-gradient(180deg, rgba(28, 28, 28, 0.98), rgba(14, 14, 14, 0.98));
-    }
-    .panel-span {
-      grid-column: 1 / -1;
     }
     h1,
     .section-heading h2,
@@ -580,17 +722,14 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
       overflow-x: auto;
       padding-bottom: 2px;
     }
-    .command-block,
     .definition-stack {
       display: grid;
       gap: 8px;
-      margin-top: 18px;
     }
     .cta-row {
       grid-auto-flow: column;
       grid-auto-columns: max-content;
       justify-content: start;
-      margin-top: 22px;
     }
     .primary-link {
       display: inline-flex;
@@ -632,12 +771,14 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
       gap: 16px;
       align-items: end;
       flex-wrap: wrap;
-      margin-bottom: 18px;
     }
     .session-list {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
     }
-    .session-card-header {
+    .session-row {
+      padding: 18px;
+    }
+    .session-row-header {
       display: flex;
       justify-content: space-between;
       gap: 16px;
@@ -646,7 +787,7 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
     }
     .definition-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      margin: 18px 0;
+      margin: 16px 0 0;
     }
     dd {
       margin-top: 6px;
@@ -659,18 +800,73 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
       justify-content: start;
       align-items: start;
     }
-    .empty-state {
+    .empty-state,
+    .sidebar-empty {
       padding: 20px;
     }
+    .session-rail {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .session-rail-link {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+    }
+    .session-rail-copy {
+      display: grid;
+      gap: 2px;
+    }
+    .session-rail-copy span,
+    .session-rail-meta,
+    .meta-copy {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .stats-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .stat-pill {
+      padding: 14px;
+      display: grid;
+      gap: 6px;
+    }
+    .stat-pill strong {
+      font-size: 24px;
+      letter-spacing: -0.04em;
+    }
+    .desktop-composer {
+      position: sticky;
+      bottom: 18px;
+      padding: 18px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      background: linear-gradient(180deg, rgba(24, 24, 24, 0.98), rgba(12, 12, 12, 0.98));
+    }
+    .composer-actions {
+      grid-auto-flow: column;
+      grid-auto-columns: max-content;
+      align-items: center;
+      justify-content: end;
+    }
     @media (max-width: 960px) {
-      .masthead,
-      .content-grid,
-      .session-list,
+      .shell,
+      .canvas-columns,
+      .stats-grid,
+      .desktop-composer,
+      .composer-actions,
       .definition-grid {
         grid-template-columns: 1fr;
       }
-      .masthead-meta {
-        justify-items: start;
+      .desktop-sidebar,
+      .workspace-shell,
+      .desktop-composer {
+        position: static;
+        min-height: auto;
       }
     }
   </style>
@@ -678,21 +874,11 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
 <body>
   <main>
     <section class="shell" aria-label="ATLAS desktop surface">
-      <header class="masthead">
-        <div class="brand-block">
-          <div class="brand-mark">A</div>
-          <div>
-            <div class="eyebrow">Native desktop workspace</div>
-            <p class="product-title">ATLAS</p>
-            <p class="product-copy">${escapeHtml(pageData.hostLabel)} · ${escapeHtml(pageData.pipelineDetail)}</p>
-          </div>
-        </div>
-        <div class="masthead-meta">
-          <div class="repo-tag">${escapeHtml(pageData.repoLabel)}</div>
-          ${renderNavigation(view, pageData.focusedSessionRole)}
-        </div>
-      </header>
-      ${view === "home" ? renderHomeContent(pageData, counts) : renderSessionsContent(pageData, counts)}
+      ${renderSidebar(pageData, view, counts, activeSession)}
+      <section class="workspace-shell" aria-label="ATLAS work canvas">
+        ${view === "home" ? renderHomeCanvas(pageData, counts, activeSession) : renderSessionsCanvas(pageData, counts, activeSession)}
+        ${renderComposer(view, pageData, activeSession)}
+      </section>
     </section>
   </main>
 </body>

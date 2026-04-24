@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { parseAtlasDesktopLocationFromUrl } from "../desktop_state.js";
 import { renderAtlasSessionsHtml } from "../renderer.js";
 import {
   buildAtlasPageData,
   respondWithClarificationGateIfNeeded,
+  resolveAtlasDesktopPageLocation,
   type AtlasHomeRouteOptions,
   writeAtlasHtmlResponse,
 } from "./home.js";
@@ -29,10 +29,7 @@ export async function handleAtlasSessionsRequest(
 
     const pageData = await buildAtlasPageData(
       options,
-      parseAtlasDesktopLocationFromUrl(String(req.url || "/sessions")) || {
-        surface: "sessions",
-        focusedSessionRole: null,
-      },
+      resolveAtlasDesktopPageLocation(req.url, "sessions"),
     );
     writeAtlasHtmlResponse(res, renderAtlasSessionsHtml({
       ...pageData,
