@@ -13,6 +13,7 @@ import {
 } from "../src/atlas/clarification.js";
 import {
   buildAtlasDesktopLocationPath,
+  createAtlasDesktopClarificationHandoffState,
   createDefaultAtlasDesktopState,
   parseAtlasDesktopLocationFromUrl,
   readAtlasDesktopState,
@@ -144,12 +145,8 @@ async function updateProductComposerFocus(focused: boolean): Promise<void> {
   await updateDesktopState({ productComposerFocused: focused === true });
 }
 
-async function clearClarificationDrafts(): Promise<void> {
-  await updateDesktopState({
-    onboardingDraft: "",
-    productDraft: "",
-    productComposerFocused: false,
-  });
+async function completeClarificationHandoff(objective: string): Promise<void> {
+  await updateDesktopState(createAtlasDesktopClarificationHandoffState(objective));
   if (atlasBootstrap) {
     atlasBootstrap = {
       ...atlasBootstrap,
@@ -355,7 +352,7 @@ async function submitDesktopClarification(
       command: String(config.copilotCliCommand || "").trim(),
     });
 
-    await clearClarificationDrafts();
+    await completeClarificationHandoff(normalizedObjective);
     if (requestWindow && !requestWindow.isDestroyed()) {
       await loadInitialSurface(requestWindow);
     }

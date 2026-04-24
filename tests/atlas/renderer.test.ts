@@ -119,6 +119,8 @@ describe("atlas renderer", () => {
     assert.match(html, /getDesktopState/);
     assert.match(html, /setProductDraft/);
     assert.match(html, /setProductComposerFocus/);
+    assert.match(html, /Restored the last clarification objective for this desktop session\./);
+    assert.match(html, /payload\.packet\.objective/);
     assert.match(html, />Resume session flow</);
     assert.match(html, />Stop runtime</);
     assert.match(html, />Ready to resume</);

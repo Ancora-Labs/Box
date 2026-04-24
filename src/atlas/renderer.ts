@@ -579,12 +579,15 @@ function renderComposerScript(): string {
     detailEl.textContent = detail || continuityDetail;
   };
 
-  const persistDraft = async (value) => {
+  const persistDraft = async (value, options = {}) => {
     if (!bridge?.setProductDraft) {
       return;
     }
     try {
       await bridge.setProductDraft(value);
+      if (options.silent === true) {
+        return;
+      }
       if (String(value || "").trim()) {
         setComposerStatus("Saved the workspace draft for this desktop shell.", continuityDetail);
       } else {
@@ -629,8 +632,18 @@ function renderComposerScript(): string {
         return;
       }
       const payload = await response.json();
-      if (payload?.ready && payload?.packet?.summary) {
-        setComposerStatus("Restored the desktop workspace with the latest clarification brief.", String(payload.packet.summary || continuityDetail));
+      if (payload?.ready && payload?.packet) {
+        const packetSummary = String(payload.packet.summary || continuityDetail);
+        const packetObjective = String(payload.packet.objective || "").trim();
+        if (!String(input.value || "").trim() && packetObjective) {
+          input.value = packetObjective;
+          await persistDraft(packetObjective, { silent: true });
+          setComposerStatus("Restored the last clarification objective for this desktop session.", packetSummary);
+          return;
+        }
+        if (payload.packet.summary) {
+          setComposerStatus("Restored the desktop workspace with the latest clarification brief.", packetSummary);
+        }
       }
     } catch (error) {
       console.error("[atlas] product composer status load failed:", error);

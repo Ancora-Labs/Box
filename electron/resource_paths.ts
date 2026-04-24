@@ -16,6 +16,15 @@ export interface ResolveAtlasDesktopResourcePathsOptions {
   exePath?: string;
 }
 
+function normalizeResolveAtlasDesktopResourcePathsOptions(
+  options: ResolveAtlasDesktopResourcePathsOptions | string,
+): ResolveAtlasDesktopResourcePathsOptions {
+  if (typeof options === "string") {
+    return { mainModuleUrl: options };
+  }
+  return options;
+}
+
 export function resolvePackagedWorkingDirectory(exePath: string): string {
   return path.dirname(exePath);
 }
@@ -25,12 +34,13 @@ function resolvePackagedAppRoot(exePath: string): string {
 }
 
 export function resolveAtlasDesktopResourcePaths(
-  options: ResolveAtlasDesktopResourcePathsOptions,
+  options: ResolveAtlasDesktopResourcePathsOptions | string,
 ): AtlasDesktopResourcePaths {
-  const mainModulePath = fileURLToPath(options.mainModuleUrl);
+  const normalizedOptions = normalizeResolveAtlasDesktopResourcePathsOptions(options);
+  const mainModulePath = fileURLToPath(normalizedOptions.mainModuleUrl);
   const fallbackMainModuleDir = path.dirname(mainModulePath);
-  const packagedExePath = String(options.exePath || "").trim();
-  const isPackaged = options.isPackaged === true;
+  const packagedExePath = String(normalizedOptions.exePath || "").trim();
+  const isPackaged = normalizedOptions.isPackaged === true;
 
   if (isPackaged && !packagedExePath) {
     throw new Error("ATLAS packaged resource resolution requires the executable path.");
