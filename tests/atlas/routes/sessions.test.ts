@@ -129,6 +129,9 @@ describe("atlas sessions route", () => {
       assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
       assert.match(res.body, /<title>ATLAS Sessions<\/title>/);
       assert.match(res.body, /Trust-first work ledger/);
+      assert.match(res.body, /aria-label="ATLAS desktop surface"/);
+      assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
+      assert.match(res.body, /aria-label="ATLAS work canvas"/);
       assert.match(res.body, />Tracked sessions</);
       assert.match(res.body, /Session ledger keeps delivery trust anchored in the desktop lifecycle\./);
       assert.match(res.body, />ATLAS control</);
@@ -141,7 +144,7 @@ describe("atlas sessions route", () => {
       assert.match(res.body, />Pause lane</);
       assert.match(res.body, />Archive session</);
       assert.match(res.body, /method="post" action="\/lifecycle"/);
-      assert.doesNotMatch(res.body, /hero-panel|BOX Mission Control|dashboard/i);
+      assert.doesNotMatch(res.body, /hero-panel|BOX Mission Control|dashboard|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
@@ -196,6 +199,34 @@ describe("atlas sessions route", () => {
       assert.match(res.body, /The saved focus target is still waiting on its next live session snapshot\./);
       assert.match(res.body, />Clear focus</);
       assert.doesNotMatch(res.body, /missing-worker/);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+  it("[NEGATIVE] keeps the session ledger shell stable when state is sparse", async () => {
+    const tempRoot = await createTempRoot();
+
+    try {
+      const stateDir = path.join(tempRoot, "state");
+      await fs.mkdir(stateDir, { recursive: true });
+      const req = createRequest();
+      const res = createResponseCapture();
+
+      await handleAtlasSessionsRequest(req, res, {
+        stateDir,
+        targetRepo: "Ancora-Labs/ATLAS",
+        shellCommand: ".\\ATLAS.cmd",
+      });
+
+      assert.equal(res.statusCode, 200);
+      assert.match(res.body, /aria-label="ATLAS desktop surface"/);
+      assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
+      assert.match(res.body, /aria-label="ATLAS work canvas"/);
+      assert.match(res.body, /No session state is available yet\./);
+      assert.match(res.body, />0 tracked sessions</);
+      assert.match(res.body, />0 resumable</);
+      assert.match(res.body, /Desktop composer/);
+      assert.doesNotMatch(res.body, /dashboard-card|BOX Mission Control|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }

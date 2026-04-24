@@ -201,6 +201,9 @@ describe("atlas server", () => {
 
     assert.equal(homeResponse.status, 200);
     assert.match(homeResponse.text, /<title>ATLAS Home<\/title>/);
+    assert.match(homeResponse.text, /aria-label="ATLAS desktop surface"/);
+    assert.match(homeResponse.text, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(homeResponse.text, /aria-label="ATLAS work canvas"/);
     assert.match(homeResponse.text, /ATLAS keeps the live delivery state in the desktop window\./);
     assert.match(homeResponse.text, /Desktop continuity/);
     assert.match(homeResponse.text, /Ancora-Labs\/ATLAS/);
@@ -211,6 +214,9 @@ describe("atlas server", () => {
 
     assert.equal(sessionsResponse.status, 200);
     assert.match(sessionsResponse.text, /<title>ATLAS Sessions<\/title>/);
+    assert.match(sessionsResponse.text, /aria-label="ATLAS desktop surface"/);
+    assert.match(sessionsResponse.text, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(sessionsResponse.text, /aria-label="ATLAS work canvas"/);
     assert.match(sessionsResponse.text, />Tracked sessions</);
     assert.match(sessionsResponse.text, />ATLAS control</);
     assert.match(sessionsResponse.text, />Quality lane</);
@@ -315,6 +321,74 @@ describe("atlas server", () => {
     }
   });
 
+  it("[NEGATIVE] keeps onboarding blocked when clarification refresh fails and does not write a packet", async () => {
+    const tempRoot = await createTempRoot();
+    const stateDir = path.join(tempRoot, "state");
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, "worker_cycle_artifacts.json"), JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: "2026-04-25T00:00:00.000Z",
+      latestCycleId: "cycle-1",
+      cycles: {
+        "cycle-1": {
+          cycleId: "cycle-1",
+          updatedAt: "2026-04-25T00:00:00.000Z",
+          status: "in_progress",
+          workerSessions: {},
+          workerActivity: {},
+          completedTaskIds: [],
+        },
+      },
+    }), "utf8");
+    await fs.writeFile(path.join(stateDir, "pipeline_progress.json"), JSON.stringify({
+      stage: "idle",
+      stageLabel: "Idle",
+      percent: 0,
+      detail: "Waiting for onboarding",
+      steps: [],
+      updatedAt: "2026-04-25T00:00:00.000Z",
+      startedAt: "cycle-1",
+    }), "utf8");
+
+    const failedPort = await getFreePort();
+    const failedServer = await startAtlasServer({
+      port: failedPort,
+      stateDir,
+      targetRepo: "Ancora-Labs/ATLAS",
+      desktopSessionId: "desktop-session-failure",
+      clarificationRunner: async () => {
+        throw new Error("Clarification provider unavailable.");
+      },
+    });
+
+    try {
+      const clarifyResponse = await requestJson(failedPort, "/api/onboarding/clarify", {
+        objective: "Refresh the ATLAS desktop brief after relaunch.",
+      });
+      const blockedHome = await requestText(failedPort, "/");
+      const onboardingStatus = await requestText(failedPort, "/api/onboarding/status");
+
+      assert.equal(clarifyResponse.status, 502);
+      assert.match(clarifyResponse.text, /"code":"clarification_invocation_failed"/);
+      assert.match(clarifyResponse.text, /Clarification provider unavailable\./);
+      assert.equal(blockedHome.status, 412);
+      assert.match(blockedHome.text, /Finish clarification in the ATLAS desktop window/i);
+      assert.equal(onboardingStatus.status, 200);
+      assert.match(onboardingStatus.text, /"ready":false/);
+      await assert.rejects(
+        fs.stat(path.join(stateDir, "atlas", "desktop_sessions", "desktop-session-failure", "clarification_packet.json")),
+        /ENOENT/,
+      );
+    } finally {
+      if (failedServer.listening) {
+        await new Promise<void>((resolve) => {
+          failedServer.close(() => resolve());
+        });
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("accepts lifecycle API mutations without breaking the dedicated surface contract", async () => {
     const response = await requestJson(port, "/api/lifecycle", {
       action: "pause",
@@ -373,6 +447,39 @@ describe("atlas server", () => {
     assert.match(response.text, /The saved focus target is still waiting on its next live session snapshot\./);
     assert.match(response.text, />Clear focus</);
     assert.doesNotMatch(response.text, /missing-worker/);
+  });
+
+  it("[NEGATIVE] serves the premium desktop shell even when the server starts against sparse state", async () => {
+    const tempRoot = await createTempRoot();
+    const sparseStateDir = path.join(tempRoot, "state");
+    await fs.mkdir(sparseStateDir, { recursive: true });
+    const sparsePort = await getFreePort();
+    const sparseServer = await startAtlasServer({
+      port: sparsePort,
+      stateDir: sparseStateDir,
+      targetRepo: "Ancora-Labs/ATLAS",
+    });
+
+    try {
+      const homeResponse = await requestText(sparsePort, "/");
+      const sessionsResponse = await requestText(sparsePort, "/sessions");
+
+      assert.equal(homeResponse.status, 200);
+      assert.match(homeResponse.text, /No session state is available yet\./);
+      assert.match(homeResponse.text, /aria-label="ATLAS desktop surface"/);
+      assert.match(homeResponse.text, /data-role="product-composer-input"/);
+      assert.equal(sessionsResponse.status, 200);
+      assert.match(sessionsResponse.text, /No session state is available yet\./);
+      assert.match(sessionsResponse.text, /Desktop composer/);
+      assert.doesNotMatch(`${homeResponse.text}\n${sessionsResponse.text}`, /dashboard-card|window-controls|traffic-light/i);
+    } finally {
+      if (sparseServer.listening) {
+        await new Promise<void>((resolve) => {
+          sparseServer.close(() => resolve());
+        });
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
   });
   it("can create a request handler without mutating dashboard port 8787 behavior", () => {
     const isolatedServer = createAtlasServer({

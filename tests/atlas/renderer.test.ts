@@ -96,6 +96,10 @@ describe("atlas renderer", () => {
 
     assert.match(html, /<title>ATLAS Home<\/title>/);
     assert.match(html, /Native desktop workspace/);
+    assert.match(html, /aria-label="ATLAS desktop surface"/);
+    assert.match(html, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(html, /aria-label="ATLAS work canvas"/);
+    assert.match(html, /class="workspace-shell"/);
     assert.match(html, /<a class="nav-link" href="\/" aria-current="page">Home<\/a>/);
     assert.match(html, /<a class="nav-link" href="\/sessions">Sessions<\/a>/);
     assert.match(html, /Desktop continuity/);
@@ -115,6 +119,8 @@ describe("atlas renderer", () => {
     assert.match(html, />3</);
     assert.match(html, /Desktop composer/);
     assert.match(html, /Refresh clarification/);
+    assert.match(html, /class="desktop-composer"/);
+    assert.match(html, /data-view="home"/);
     assert.match(html, /data-role="product-composer-input"/);
     assert.match(html, /getDesktopState/);
     assert.match(html, /setProductDraft/);
@@ -124,19 +130,25 @@ describe("atlas renderer", () => {
     assert.match(html, />Resume session flow</);
     assert.match(html, />Stop runtime</);
     assert.match(html, />Ready to resume</);
+    assert.match(html, /Saved the workspace draft for this desktop shell\./);
+    assert.match(html, /Clarification refresh failed\. The draft is still preserved in this desktop shell\./);
     assert.match(html, /outline: 3px solid #ffffff/);
     assert.match(html, /@media \(max-width: 960px\)/);
-    assert.doesNotMatch(html, /hero-panel|metric-card|dashboard/i);
+    assert.doesNotMatch(html, /hero-panel|metric-card|dashboard|window-controls|traffic-light|titlebar-buttons/i);
   });
 
   it("renders the sessions surface with trusted lifecycle feedback and session actions", () => {
     const html = renderAtlasSessionsHtml(buildPageData({ title: "ATLAS Sessions" }));
 
     assert.match(html, /<title>ATLAS Sessions<\/title>/);
+    assert.match(html, /aria-label="ATLAS desktop surface"/);
+    assert.match(html, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(html, /aria-label="ATLAS work canvas"/);
     assert.match(html, /<a class="nav-link" href="\/">Home<\/a>/);
     assert.match(html, /<a class="nav-link" href="\/sessions" aria-current="page">Sessions<\/a>/);
     assert.match(html, /Trust-first work ledger/);
     assert.match(html, /Session ledger keeps delivery trust anchored in the desktop lifecycle\./);
+    assert.match(html, /Persistent left sidebar/);
     assert.match(html, />3 tracked sessions</);
     assert.match(html, />2 resumable</);
     assert.match(html, />1 needing input</);
@@ -150,11 +162,12 @@ describe("atlas renderer", () => {
     assert.match(html, />Pause lane</);
     assert.match(html, />Archive session</);
     assert.match(html, />Refresh clarification</);
+    assert.match(html, /data-view="sessions"/);
     assert.match(html, />feat\/atlas-home</);
     assert.match(html, />No branch recorded</);
     assert.match(html, />2026-04-21 12:00 UTC</);
     assert.match(html, /method="post" action="\/lifecycle"/);
-    assert.doesNotMatch(html, /hero-panel|BOX Mission Control|dashboard/i);
+    assert.doesNotMatch(html, /hero-panel|BOX Mission Control|dashboard|window-controls|traffic-light/i);
   });
 
   it("[NEGATIVE] escapes dynamic values, keeps the empty state stable, and preserves the start CTA", () => {
@@ -180,7 +193,20 @@ describe("atlas renderer", () => {
     assert.match(homeHtml, />Ready to start</);
     assert.match(homeHtml, /No resumable session is active yet\./);
     assert.match(homeHtml, /No live session snapshot yet/);
-    assert.doesNotMatch(homeHtml, /metric-card|dashboard/i);
+    assert.match(homeHtml, /data-has-live-sessions="false"/);
+    assert.doesNotMatch(homeHtml, /metric-card|dashboard|window-controls|traffic-light/i);
+  });
+
+  it("shows degraded composer continuity when the saved focus has no live snapshot yet", () => {
+    const html = renderAtlasSessionsHtml(buildPageData({
+      title: "ATLAS Sessions",
+      missingFocusedSnapshot: true,
+    }));
+
+    assert.match(html, /Focus restored without a live session snapshot/);
+    assert.match(html, /The saved focus target is still waiting on its next live session snapshot\./);
+    assert.match(html, /data-missing-focused-snapshot="true"/);
+    assert.match(html, />Clear focus</);
   });
 
   it("shows degraded composer continuity when the saved focus has no live snapshot yet", () => {

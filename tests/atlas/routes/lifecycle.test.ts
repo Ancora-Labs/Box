@@ -193,4 +193,27 @@ describe("atlas lifecycle route", () => {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("[NEGATIVE] rejects lifecycle mutations that do not specify a target role", async () => {
+    const tempRoot = await createTempRoot();
+
+    try {
+      const stateDir = await writeStateFixture(tempRoot);
+      const req = createRequest(JSON.stringify({
+        action: "pause",
+        returnTo: "/sessions",
+      }));
+      const res = createResponseCapture();
+
+      await handleAtlasLifecycleRequest(req, res, { stateDir, pathname: "/api/lifecycle" });
+
+      assert.equal(res.statusCode, 400);
+      const payload = JSON.parse(res.body) as { ok: boolean; code: string; error: string };
+      assert.equal(payload.ok, false);
+      assert.equal(payload.code, "missing_role");
+      assert.match(payload.error, /requires a role/i);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
