@@ -1,7 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { renderAtlasSessionsHtml } from "../renderer.js";
-import { buildAtlasPageData, type AtlasHomeRouteOptions, writeAtlasHtmlResponse } from "./home.js";
+import {
+  buildAtlasPageData,
+  respondWithClarificationGateIfNeeded,
+  resolveAtlasDesktopPageLocation,
+  type AtlasHomeRouteOptions,
+  writeAtlasHtmlResponse,
+} from "./home.js";
 
 export type AtlasSessionsRouteOptions = AtlasHomeRouteOptions;
 
@@ -17,7 +23,14 @@ export async function handleAtlasSessionsRequest(
   }
 
   try {
-    const pageData = await buildAtlasPageData(options);
+    if (await respondWithClarificationGateIfNeeded(res, options)) {
+      return;
+    }
+
+    const pageData = await buildAtlasPageData(
+      options,
+      resolveAtlasDesktopPageLocation(req.url, "sessions"),
+    );
     writeAtlasHtmlResponse(res, renderAtlasSessionsHtml({
       ...pageData,
       title: "ATLAS Sessions",

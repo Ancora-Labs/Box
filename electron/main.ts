@@ -12,10 +12,13 @@ import {
   type AtlasClarificationPacket,
 } from "../src/atlas/clarification.js";
 import {
+  buildAtlasDesktopLocationPath,
+  parseAtlasDesktopLocationFromUrl,
   readAtlasDesktopState,
   resolveAtlasDesktopStatePath,
   resolveAtlasDesktopStateRoot,
   type AtlasDesktopBootstrap,
+  type AtlasDesktopLocation,
   type AtlasDesktopState,
   type AtlasDesktopWindowBounds,
   writeAtlasDesktopState,
@@ -105,7 +108,7 @@ async function initializeDesktopState(): Promise<void> {
 }
 
 async function updateDesktopState(
-  patch: Partial<Pick<AtlasDesktopState, "sessionId" | "onboardingDraft" | "windowBounds">>,
+  patch: Partial<Pick<AtlasDesktopState, "sessionId" | "onboardingDraft" | "windowBounds" | "lastProductSurface" | "focusedSessionRole">>,
 ): Promise<void> {
   if (!atlasDesktopStatePath) {
     throw new Error("ATLAS desktop state path is not initialized.");
@@ -116,6 +119,8 @@ async function updateDesktopState(
       sessionId: null,
       onboardingDraft: "",
       windowBounds: null,
+      lastProductSurface: "home",
+      focusedSessionRole: null,
       updatedAt: null,
     }),
     ...patch,
@@ -135,6 +140,25 @@ async function updateOnboardingDraft(draft: string): Promise<void> {
 
 function getPersistedWindowBounds(): AtlasDesktopWindowBounds | null {
   return atlasDesktopState?.windowBounds || null;
+}
+
+function getPersistedProductLocation(): AtlasDesktopLocation {
+  return {
+    surface: atlasDesktopState?.lastProductSurface || "home",
+    focusedSessionRole: atlasDesktopState?.focusedSessionRole || null,
+  };
+}
+
+async function persistProductLocation(currentUrl: string): Promise<void> {
+  const location = parseAtlasDesktopLocationFromUrl(currentUrl);
+  if (!location) {
+    return;
+  }
+
+  await updateDesktopState({
+    lastProductSurface: location.surface,
+    focusedSessionRole: location.focusedSessionRole,
+  });
 }
 
 async function persistWindowBounds(window: BrowserWindow): Promise<void> {
@@ -187,6 +211,21 @@ function attachWindowStatePersistence(window: BrowserWindow): void {
   });
 }
 
+function attachProductLocationPersistence(window: BrowserWindow): void {
+  const persistCurrentUrl = (currentUrl: string) => {
+    persistProductLocation(currentUrl).catch((error) => {
+      console.error(`[atlas] failed to persist product location: ${String((error as Error)?.message || error)}`);
+    });
+  };
+
+  window.webContents.on("did-navigate", (_event, currentUrl) => {
+    persistCurrentUrl(currentUrl);
+  });
+  window.webContents.on("did-navigate-in-page", (_event, currentUrl) => {
+    persistCurrentUrl(currentUrl);
+  });
+}
+
 async function startDesktopRuntime(): Promise<AtlasDesktopRuntime> {
   const config = await loadConfig();
   const sessionId = atlasDesktopState?.sessionId || randomUUID();
@@ -226,7 +265,7 @@ async function loadInitialSurface(window: BrowserWindow): Promise<void> {
   const stateDir = String(config.paths?.stateDir || "state");
   const status = await readAtlasClarificationStatus(stateDir, atlasBootstrap.sessionId);
   if (status.ready) {
-    await window.loadURL(new URL("/", atlasBootstrap.serverUrl).toString());
+    await window.loadURL(new URL(buildAtlasDesktopLocationPath(getPersistedProductLocation()), atlasBootstrap.serverUrl).toString());
     return;
   }
 
@@ -344,6 +383,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     }
   });
   attachWindowStatePersistence(window);
+  attachProductLocationPersistence(window);
   attachWindowPolicies(window, atlasBootstrap.serverUrl);
   window.on("closed", () => {
     if (mainWindow === window) {

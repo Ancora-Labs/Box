@@ -3,8 +3,17 @@ import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { readAtlasClarificationStatus } from "../clarification.js";
+import {
+  parseAtlasDesktopLocationFromUrl,
+  type AtlasDesktopLocation,
+  type AtlasDesktopProductSurface,
+} from "../desktop_state.js";
 import { renderAtlasHomeHtml, type AtlasPageData } from "../renderer.js";
-import { listAtlasSessions, type AtlasSessionDto } from "../state_bridge.js";
+import {
+  compareAtlasSessionsForDesktop,
+  listAtlasSessions,
+  type AtlasSessionDto,
+} from "../state_bridge.js";
 import { readPipelineProgress } from "../../core/pipeline_progress.js";
 import { normalizeWorkerName } from "../../core/role_registry.js";
 
@@ -27,14 +36,32 @@ function normalizeRepoLabel(targetRepo?: string): string {
 }
 
 function sortSessions(sessions: AtlasSessionDto[]): AtlasSessionDto[] {
-  return [...sessions].sort((left, right) => {
-    const leftIsAtlas = normalizeWorkerName(left.role) === "atlas" ? 0 : 1;
-    const rightIsAtlas = normalizeWorkerName(right.role) === "atlas" ? 0 : 1;
-    if (leftIsAtlas !== rightIsAtlas) {
-      return leftIsAtlas - rightIsAtlas;
-    }
-    return left.name.localeCompare(right.name);
-  });
+  return [...sessions].sort(compareAtlasSessionsForDesktop);
+}
+
+export function resolveAtlasDesktopPageLocation(
+  requestUrl: string | undefined,
+  fallbackSurface: AtlasDesktopProductSurface,
+): AtlasDesktopLocation {
+  const fallbackPath = fallbackSurface === "sessions" ? "/sessions" : "/";
+  return parseAtlasDesktopLocationFromUrl(String(requestUrl || fallbackPath))
+    || {
+      surface: fallbackSurface,
+      focusedSessionRole: null,
+    };
+}
+
+function resolveFocusedSessionRole(
+  sessions: AtlasSessionDto[],
+  requestedRole: string | null,
+): string | null {
+  const normalizedRequestedRole = normalizeWorkerName(String(requestedRole || ""));
+  if (!normalizedRequestedRole) {
+    return null;
+  }
+
+  const match = sessions.find((session) => normalizeWorkerName(session.role) === normalizedRequestedRole);
+  return match?.role || null;
 }
 
 export function deriveAtlasHomeReadiness(
@@ -59,7 +86,7 @@ export function writeAtlasHtmlResponse(res: ServerResponse, html: string): void 
   res.end(html);
 }
 
-function renderClarificationRequiredHtml(): string {
+export function renderClarificationRequiredHtml(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -107,6 +134,25 @@ function renderClarificationRequiredHtml(): string {
 </html>`;
 }
 
+export async function respondWithClarificationGateIfNeeded(
+  res: ServerResponse,
+  options: AtlasHomeRouteOptions,
+): Promise<boolean> {
+  const desktopSessionId = String(options.desktopSessionId || "").trim();
+  if (!desktopSessionId) {
+    return false;
+  }
+
+  const clarificationStatus = await readAtlasClarificationStatus(options.stateDir, desktopSessionId);
+  if (clarificationStatus.ready) {
+    return false;
+  }
+
+  res.writeHead(412, { "content-type": "text/html; charset=utf-8" });
+  res.end(renderClarificationRequiredHtml());
+  return true;
+}
+
 async function readDesktopBuildInfo(): Promise<{ sessionId: string; builtAt: string | null; }> {
   const buildInfoPath = path.join(process.cwd(), "desktop-build-info.json");
   try {
@@ -125,11 +171,18 @@ async function readDesktopBuildInfo(): Promise<{ sessionId: string; builtAt: str
   }
 }
 
-export async function buildAtlasPageData(options: AtlasHomeRouteOptions): Promise<AtlasPageData> {
+export async function buildAtlasPageData(
+  options: AtlasHomeRouteOptions,
+  location: AtlasDesktopLocation = {
+    surface: "home",
+    focusedSessionRole: null,
+  },
+): Promise<AtlasPageData> {
   const pipelineProgress = await readPipelineProgress({ paths: { stateDir: options.stateDir } });
   const sessions = await listAtlasSessions({ stateDir: options.stateDir });
   const sortedSessions = sortSessions(Object.values(sessions));
   const buildInfo = await readDesktopBuildInfo();
+  const focusedSessionRole = resolveFocusedSessionRole(sortedSessions, location.focusedSessionRole);
 
   const pageData = {
     title: "ATLAS Home",
@@ -142,6 +195,7 @@ export async function buildAtlasPageData(options: AtlasHomeRouteOptions): Promis
     updatedAt: typeof pipelineProgress?.updatedAt === "string" ? pipelineProgress.updatedAt : null,
     buildSessionId: buildInfo.sessionId,
     buildTimestamp: buildInfo.builtAt,
+    focusedSessionRole,
     ...deriveAtlasHomeReadiness(sortedSessions),
     sessions: sortedSessions,
   };
@@ -160,17 +214,11 @@ export async function handleAtlasHomeRequest(
   }
 
   try {
-    const desktopSessionId = String(options.desktopSessionId || "").trim();
-    if (desktopSessionId) {
-      const clarificationStatus = await readAtlasClarificationStatus(options.stateDir, desktopSessionId);
-      if (!clarificationStatus.ready) {
-        res.writeHead(412, { "content-type": "text/html; charset=utf-8" });
-        res.end(renderClarificationRequiredHtml());
-        return;
-      }
+    if (await respondWithClarificationGateIfNeeded(res, options)) {
+      return;
     }
 
-    const pageData = await buildAtlasPageData(options);
+    const pageData = await buildAtlasPageData(options, resolveAtlasDesktopPageLocation(req.url, "home"));
     writeAtlasHtmlResponse(res, renderAtlasHomeHtml(pageData));
   } catch (error) {
     console.error(`[atlas] home route failed: ${String((error as Error)?.message || error)}`);
