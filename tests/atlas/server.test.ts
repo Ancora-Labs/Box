@@ -202,7 +202,10 @@ describe("atlas server", () => {
     assert.equal(homeResponse.status, 200);
     assert.match(homeResponse.text, /<title>ATLAS Home<\/title>/);
     assert.match(homeResponse.text, /ATLAS keeps the live delivery state in the desktop window\./);
+    assert.match(homeResponse.text, /Desktop continuity/);
     assert.match(homeResponse.text, /Ancora-Labs\/ATLAS/);
+    assert.match(homeResponse.text, /data-role="product-composer-input"/);
+    assert.match(homeResponse.text, /Wire the ATLAS server boundary/);
     assert.match(homeResponse.text, />Stop runtime</);
     assert.doesNotMatch(homeResponse.text, /default browser|localhost page/i);
 
@@ -217,7 +220,7 @@ describe("atlas server", () => {
     assert.doesNotMatch(sessionsResponse.text, /BOX Mission Control/i);
   });
 
-  it("blocks home handoff until the session-bound clarification packet exists and exposes the onboarding API", async () => {
+  it("blocks home handoff until the session-bound clarification packet exists and keeps the desktop continuity surface stable after relaunch", async () => {
     const gatedRoot = await createTempRoot();
     const gatedStateDir = path.join(gatedRoot, "state");
     await fs.mkdir(gatedStateDir, { recursive: true });
@@ -230,7 +233,14 @@ describe("atlas server", () => {
           cycleId: "cycle-1",
           updatedAt: "2026-04-21T12:00:00.000Z",
           status: "in_progress",
-          workerSessions: {},
+          workerSessions: {
+            Atlas: {
+              role: "Atlas",
+              status: "idle",
+              lastTask: "Hold the restored desktop focus on the last session surface.",
+              lastActiveAt: "2026-04-21T11:15:00.000Z",
+            },
+          },
           workerActivity: {},
           completedTaskIds: [],
         },
@@ -264,6 +274,10 @@ describe("atlas server", () => {
       assert.equal(blockedHome.status, 412);
       assert.match(blockedHome.text, /Finish clarification in the ATLAS desktop window/i);
 
+      const blockedSessions = await requestText(gatedPort, "/sessions?focusRole=quality-worker");
+      assert.equal(blockedSessions.status, 412);
+      assert.match(blockedSessions.text, /Finish clarification in the ATLAS desktop window/i);
+
       const onboardingStatus = await requestText(gatedPort, "/api/onboarding/status");
       assert.equal(onboardingStatus.status, 200);
       assert.match(onboardingStatus.text, /"ready":false/);
@@ -276,7 +290,21 @@ describe("atlas server", () => {
 
       const unblockedHome = await requestText(gatedPort, "/");
       assert.equal(unblockedHome.status, 200);
+      assert.match(unblockedHome.text, /Desktop continuity/);
       assert.match(unblockedHome.text, /ATLAS keeps the live delivery state in the desktop window\./);
+
+      const repeatHome = await requestText(gatedPort, "/");
+      const repeatOnboardingStatus = await requestText(gatedPort, "/api/onboarding/status");
+
+      assert.equal(repeatHome.status, 200);
+      assert.match(repeatHome.text, /Active delivery focus/);
+      assert.doesNotMatch(repeatHome.text, /default browser|localhost page/i);
+      assert.equal(repeatOnboardingStatus.status, 200);
+      assert.match(repeatOnboardingStatus.text, /"ready":true/);
+
+      const focusedSessions = await requestText(gatedPort, "/sessions?focusRole=atlas");
+      assert.equal(focusedSessions.status, 200);
+      assert.match(focusedSessions.text, />Focused workspace</);
     } finally {
       if (gatedServer.listening) {
         await new Promise<void>((resolve) => {
@@ -301,6 +329,30 @@ describe("atlas server", () => {
     assert.match(payload.message, /Paused the quality lane/i);
   });
 
+  it("[NEGATIVE] returns a graceful onboarding status payload when the product surface is not bound to a desktop session", async () => {
+    const detachedPort = await getFreePort();
+    const detachedServer = await startAtlasServer({
+      port: detachedPort,
+      stateDir,
+      targetRepo: "Ancora-Labs/ATLAS",
+    });
+
+    try {
+      const response = await requestText(detachedPort, "/api/onboarding/status");
+
+      assert.equal(response.status, 200);
+      assert.match(response.text, /"ready":false/);
+      assert.match(response.text, /"code":"desktop_session_missing"/);
+      assert.match(response.text, /"sessionId":null/);
+    } finally {
+      if (detachedServer.listening) {
+        await new Promise<void>((resolve) => {
+          detachedServer.close(() => resolve());
+        });
+      }
+    }
+  });
+
   it("[NEGATIVE] returns route-level errors for unsupported methods and unknown paths", async () => {
     const invalidMethodResponse = await requestText(port, "/sessions", "POST");
     const missingRouteResponse = await requestText(port, "/missing");
@@ -312,6 +364,13 @@ describe("atlas server", () => {
     assert.match(missingRouteResponse.text, /ATLAS route not found/);
   });
 
+  it("[NEGATIVE] ignores unknown focused session query values without breaking the sessions surface", async () => {
+    const response = await requestText(port, "/sessions?focusRole=missing-worker");
+
+    assert.equal(response.status, 200);
+    assert.match(response.text, />Tracked sessions</);
+    assert.doesNotMatch(response.text, /missing-worker/);
+  });
   it("can create a request handler without mutating dashboard port 8787 behavior", () => {
     const isolatedServer = createAtlasServer({
       stateDir,
