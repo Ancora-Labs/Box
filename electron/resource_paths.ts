@@ -10,14 +10,49 @@ export interface AtlasDesktopResourcePaths {
   onboardingLayoutPath: string;
 }
 
+export interface ResolveAtlasDesktopResourcePathsOptions {
+  mainModuleUrl: string;
+  isPackaged?: boolean;
+  exePath?: string;
+}
+
+function normalizeResolveAtlasDesktopResourcePathsOptions(
+  options: ResolveAtlasDesktopResourcePathsOptions | string,
+): ResolveAtlasDesktopResourcePathsOptions {
+  if (typeof options === "string") {
+    return { mainModuleUrl: options };
+  }
+  return options;
+}
+
 export function resolvePackagedWorkingDirectory(exePath: string): string {
   return path.dirname(exePath);
 }
 
-export function resolveAtlasDesktopResourcePaths(mainModuleUrl: string): AtlasDesktopResourcePaths {
-  const mainModulePath = fileURLToPath(mainModuleUrl);
-  const mainModuleDir = path.dirname(mainModulePath);
-  const appRoot = path.resolve(mainModuleDir, "..", "..");
+function resolvePackagedAppRoot(exePath: string): string {
+  return path.join(resolvePackagedWorkingDirectory(exePath), "resources", "app.asar");
+}
+
+export function resolveAtlasDesktopResourcePaths(
+  options: ResolveAtlasDesktopResourcePathsOptions | string,
+): AtlasDesktopResourcePaths {
+  const normalizedOptions = normalizeResolveAtlasDesktopResourcePathsOptions(options);
+  const mainModulePath = fileURLToPath(normalizedOptions.mainModuleUrl);
+  const fallbackMainModuleDir = path.dirname(mainModulePath);
+  const packagedExePath = String(normalizedOptions.exePath || "").trim();
+  const isPackaged = normalizedOptions.isPackaged === true;
+
+  if (isPackaged && !packagedExePath) {
+    throw new Error("ATLAS packaged resource resolution requires the executable path.");
+  }
+
+  const appRoot = isPackaged
+    ? resolvePackagedAppRoot(packagedExePath)
+    : path.resolve(fallbackMainModuleDir, "..", "..");
+  const mainModuleDir = isPackaged
+    ? path.join(appRoot, ".electron-build", "electron")
+    : fallbackMainModuleDir;
+
   return {
     appRoot,
     mainModuleDir,

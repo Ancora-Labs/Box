@@ -18,6 +18,7 @@ export interface AtlasPageData {
   homeReadinessDetail: string;
   homePrimaryActionLabel: string;
   focusedSessionRole: string | null;
+  missingFocusedSnapshot: boolean;
   sessions: AtlasSessionDto[];
 }
 
@@ -299,7 +300,7 @@ function renderSidebar(pageData: AtlasPageData, view: AtlasView, counts: AtlasSe
           <div class="eyebrow">Session focus</div>
           <h2>${escapeHtml(sessionSummary.heading)}</h2>
         </div>
-        ${activeSession && pageData.focusedSessionRole
+        ${activeSession && (pageData.focusedSessionRole || pageData.missingFocusedSnapshot)
           ? renderLinkAction("Clear focus", buildSurfaceHref(view, null))
           : ""}
       </div>
@@ -455,7 +456,11 @@ function renderSessionsCanvas(pageData: AtlasPageData, counts: AtlasSessionCount
 }
 
 function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession: AtlasSessionDto | null): string {
-  const continuity = resolveAtlasSessionSnapshotContinuity(pageData.sessions, pageData.focusedSessionRole);
+  const continuity = resolveAtlasSessionSnapshotContinuity(
+    pageData.sessions,
+    pageData.focusedSessionRole,
+    pageData.missingFocusedSnapshot === true,
+  );
   const primaryHref = view === "sessions" && activeSession
     ? buildSurfaceHref("home", activeSession.role)
     : buildSurfaceHref("sessions", pageData.focusedSessionRole);
@@ -498,6 +503,10 @@ function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession:
         actions.push(renderLifecycleForm("Archive session", "archive", { role: activeSession.role, returnTo }));
       }
     }
+  }
+
+  if (view === "sessions" && pageData.missingFocusedSnapshot) {
+    actions.push(renderLinkAction("Clear focus", buildSurfaceHref(view, null)));
   }
 
   return `<section
@@ -570,12 +579,15 @@ function renderComposerScript(): string {
     detailEl.textContent = detail || continuityDetail;
   };
 
-  const persistDraft = async (value) => {
+  const persistDraft = async (value, options = {}) => {
     if (!bridge?.setProductDraft) {
       return;
     }
     try {
       await bridge.setProductDraft(value);
+      if (options.silent === true) {
+        return;
+      }
       if (String(value || "").trim()) {
         setComposerStatus("Saved the workspace draft for this desktop shell.", continuityDetail);
       } else {
@@ -620,8 +632,18 @@ function renderComposerScript(): string {
         return;
       }
       const payload = await response.json();
-      if (payload?.ready && payload?.packet?.summary) {
-        setComposerStatus("Restored the desktop workspace with the latest clarification brief.", String(payload.packet.summary || continuityDetail));
+      if (payload?.ready && payload?.packet) {
+        const packetSummary = String(payload.packet.summary || continuityDetail);
+        const packetObjective = String(payload.packet.objective || "").trim();
+        if (!String(input.value || "").trim() && packetObjective) {
+          input.value = packetObjective;
+          await persistDraft(packetObjective, { silent: true });
+          setComposerStatus("Restored the last clarification objective for this desktop session.", packetSummary);
+          return;
+        }
+        if (payload.packet.summary) {
+          setComposerStatus("Restored the desktop workspace with the latest clarification brief.", packetSummary);
+        }
       }
     } catch (error) {
       console.error("[atlas] product composer status load failed:", error);

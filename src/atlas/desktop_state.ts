@@ -59,6 +59,17 @@ export function createDefaultAtlasDesktopState(): AtlasDesktopState {
   };
 }
 
+export function createAtlasDesktopClarificationHandoffState(
+  objective: unknown,
+): Pick<AtlasDesktopState, "onboardingDraft" | "productDraft" | "productComposerFocused"> {
+  const normalizedObjective = typeof objective === "string" ? objective.trim() : "";
+  return {
+    onboardingDraft: "",
+    productDraft: normalizedObjective,
+    productComposerFocused: normalizedObjective.length > 0,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

@@ -13,6 +13,7 @@ import {
 } from "../src/atlas/clarification.js";
 import {
   buildAtlasDesktopLocationPath,
+  createAtlasDesktopClarificationHandoffState,
   createDefaultAtlasDesktopState,
   parseAtlasDesktopLocationFromUrl,
   readAtlasDesktopState,
@@ -64,7 +65,11 @@ let atlasBootstrap: AtlasDesktopBootstrap | null = null;
 let mainWindow: BrowserWindow | null = null;
 let atlasDesktopState: AtlasDesktopState | null = null;
 let atlasDesktopStatePath = "";
-const atlasDesktopResources = resolveAtlasDesktopResourcePaths(import.meta.url);
+const atlasDesktopResources = resolveAtlasDesktopResourcePaths({
+  mainModuleUrl: import.meta.url,
+  isPackaged: app.isPackaged,
+  exePath: app.getPath("exe"),
+});
 const atlasOwnsSingleInstanceLock = wireSingleInstanceLifecycle();
 
 async function assertDesktopResourcePath(resourcePath: string, label: string): Promise<void> {
@@ -140,12 +145,8 @@ async function updateProductComposerFocus(focused: boolean): Promise<void> {
   await updateDesktopState({ productComposerFocused: focused === true });
 }
 
-async function clearClarificationDrafts(): Promise<void> {
-  await updateDesktopState({
-    onboardingDraft: "",
-    productDraft: "",
-    productComposerFocused: false,
-  });
+async function completeClarificationHandoff(objective: string): Promise<void> {
+  await updateDesktopState(createAtlasDesktopClarificationHandoffState(objective));
   if (atlasBootstrap) {
     atlasBootstrap = {
       ...atlasBootstrap,
@@ -351,7 +352,7 @@ async function submitDesktopClarification(
       command: String(config.copilotCliCommand || "").trim(),
     });
 
-    await clearClarificationDrafts();
+    await completeClarificationHandoff(normalizedObjective);
     if (requestWindow && !requestWindow.isDestroyed()) {
       await loadInitialSurface(requestWindow);
     }

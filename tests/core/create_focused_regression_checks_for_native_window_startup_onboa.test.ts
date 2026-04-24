@@ -11,6 +11,7 @@ import {
   getAtlasClarificationPacketPath,
 } from "../../src/atlas/clarification.ts";
 import {
+  createAtlasDesktopClarificationHandoffState,
   readAtlasDesktopState,
   resolveAtlasDesktopStatePath,
   resolveAtlasDesktopStateRoot,
@@ -69,6 +70,8 @@ describe("atlas desktop regression checks", () => {
         onboardingDraft: "Reopen the desktop shell without losing this draft.",
         productDraft: "Restore the product-side composer draft after a relaunch.",
         productComposerFocused: true,
+        lastProductSurface: "sessions",
+        focusedSessionRole: "quality-worker",
         windowBounds: {
           x: 120,
           y: 84,
@@ -85,6 +88,8 @@ describe("atlas desktop regression checks", () => {
       assert.equal(restoredState.onboardingDraft, "Reopen the desktop shell without losing this draft.");
       assert.equal(restoredState.productDraft, "Restore the product-side composer draft after a relaunch.");
       assert.equal(restoredState.productComposerFocused, true);
+      assert.equal(restoredState.lastProductSurface, "sessions");
+      assert.equal(restoredState.focusedSessionRole, "quality-worker");
       assert.deepEqual(restoredState.windowBounds, {
         x: 120,
         y: 84,
@@ -96,6 +101,25 @@ describe("atlas desktop regression checks", () => {
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
+  });
+
+  it("keeps the product-side draft and composer focus ready after clarification handoff", () => {
+    assert.deepEqual(
+      createAtlasDesktopClarificationHandoffState("  Keep the reopened shell focused on the saved draft.  "),
+      {
+        onboardingDraft: "",
+        productDraft: "Keep the reopened shell focused on the saved draft.",
+        productComposerFocused: true,
+      },
+    );
+    assert.deepEqual(
+      createAtlasDesktopClarificationHandoffState("   "),
+      {
+        onboardingDraft: "",
+        productDraft: "",
+        productComposerFocused: false,
+      },
+    );
   });
 
   it("resolves packaged preload and onboarding assets from the bundled desktop entrypoint instead of process.cwd()", async () => {
