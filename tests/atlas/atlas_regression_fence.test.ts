@@ -71,6 +71,8 @@ describe("atlas regression fence", () => {
     const launcherPath = path.join(process.cwd(), "ATLAS.cmd");
     const launcher = await fs.readFile(launcherPath, "utf8");
     const desktopMain = await fs.readFile(path.join(process.cwd(), "electron", "main.ts"), "utf8");
+    const onboardingHtml = await fs.readFile(path.join(process.cwd(), "electron", "renderer", "index.html"), "utf8");
+    const rendererSource = await fs.readFile(path.join(process.cwd(), "src", "atlas", "renderer.ts"), "utf8");
     const layout = createAtlasDesktopPackageLayout(path.join("C:", "ATLAS Release Root"));
 
     assert.equal(packageJson.scripts?.["atlas:start"], "node --import tsx src/atlas/server.ts");
@@ -96,6 +98,16 @@ describe("atlas regression fence", () => {
     assert.match(launcher, /Launching the native ATLAS desktop shell/i);
     assert.match(launcher, /Packaging the portable Windows desktop folder/i);
     assert.doesNotMatch(launcher, /Start-Process|Invoke-WebRequest/);
+    assert.match(onboardingHtml, /Native Windows title bar/);
+    assert.match(onboardingHtml, /First-run objective intake/);
+    assert.doesNotMatch(onboardingHtml, /dashboard-card|window-controls|traffic-light/i);
+    assert.match(rendererSource, /aria-label="ATLAS desktop surface"/);
+    assert.match(rendererSource, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(rendererSource, /aria-label="ATLAS work canvas"/);
+    assert.match(rendererSource, /aria-label="Desktop composer"/);
+    assert.match(rendererSource, /Persistent left sidebar/);
+    assert.match(rendererSource, /Refresh clarification/);
+    assert.doesNotMatch(rendererSource, /dashboard-card|hero-panel|metric-card|window-controls|traffic-light/i);
     assert.match(desktopMain, /requestSingleInstanceLock\(\)/);
     assert.match(desktopMain, /app\.on\("second-instance"/);
     assert.match(desktopMain, /restoreAndFocusAtlasWindow\(mainWindow\)/);

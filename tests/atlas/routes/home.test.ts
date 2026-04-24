@@ -122,6 +122,9 @@ describe("atlas home route", () => {
       assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
       assert.match(res.body, /<title>ATLAS Home<\/title>/);
       assert.match(res.body, /Native desktop workspace/);
+      assert.match(res.body, /aria-label="ATLAS desktop surface"/);
+      assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
+      assert.match(res.body, /aria-label="ATLAS work canvas"/);
       assert.match(res.body, /Desktop continuity/);
       assert.match(res.body, /ATLAS keeps the live delivery state in the desktop window\./);
       assert.match(res.body, /Active delivery focus/);
@@ -132,7 +135,7 @@ describe("atlas home route", () => {
       assert.match(res.body, /Tracked sessions/);
       assert.match(res.body, />Ancora-Labs\/Box</);
       assert.doesNotMatch(res.body, /quality-worker|governance-worker/);
-      assert.doesNotMatch(res.body, /hero-panel|metric-card|BOX Mission Control|dashboard/i);
+      assert.doesNotMatch(res.body, /hero-panel|metric-card|BOX Mission Control|dashboard|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
@@ -169,7 +172,38 @@ describe("atlas home route", () => {
       assert.match(res.body, />Open sessions</);
       assert.match(res.body, /No resumable session is active yet/);
       assert.match(res.body, /Desktop continuity/);
+      assert.match(res.body, /data-role="product-composer-input"/);
       assert.doesNotMatch(res.body, /quality-worker|integration-worker/);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("[NEGATIVE] keeps the premium desktop shell stable when state files are missing", async () => {
+    const tempRoot = await createTempRoot();
+
+    try {
+      const stateDir = path.join(tempRoot, "state");
+      await fs.mkdir(stateDir, { recursive: true });
+      const req = createRequest();
+      const res = createResponseCapture();
+
+      await handleAtlasHomeRequest(req, res, {
+        stateDir,
+        targetRepo: "Ancora-Labs/ATLAS",
+        hostLabel: "Windows 11 workstation",
+        shellCommand: ".\\ATLAS.cmd",
+      });
+
+      assert.equal(res.statusCode, 200);
+      assert.match(res.body, /aria-label="ATLAS desktop surface"/);
+      assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
+      assert.match(res.body, /aria-label="ATLAS work canvas"/);
+      assert.match(res.body, /data-role="product-composer-input"/);
+      assert.match(res.body, /No session state is available yet\./);
+      assert.match(res.body, />Ready to start</);
+      assert.match(res.body, />0 tracked sessions</);
+      assert.doesNotMatch(res.body, /dashboard-card|metric-card|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
