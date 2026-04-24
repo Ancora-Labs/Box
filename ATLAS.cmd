@@ -28,6 +28,7 @@ if "%~1"=="" (
 
 if /I "%ATLAS_ACTION%"=="start" goto :start
 if /I "%ATLAS_ACTION%"=="open" goto :open
+if /I "%ATLAS_ACTION%"=="package" goto :package
 if /I "%ATLAS_ACTION%"=="pause" goto :control
 if /I "%ATLAS_ACTION%"=="resume" goto :control
 if /I "%ATLAS_ACTION%"=="stop" goto :control
@@ -50,10 +51,18 @@ call npm run atlas:open
 popd >nul
 exit /b 0
 
+:package
+echo [ATLAS] Packaging the portable Windows desktop folder...
+call npm run atlas:desktop:package
+set "ATLAS_EXIT=%ERRORLEVEL%"
+popd >nul
+exit /b %ATLAS_EXIT%
+
 :usage
 echo [ATLAS] Usage:
 echo [ATLAS]   ATLAS.cmd start
 echo [ATLAS]   ATLAS.cmd open
+echo [ATLAS]   ATLAS.cmd package
 echo [ATLAS]   ATLAS.cmd pause ^<role^>
 echo [ATLAS]   ATLAS.cmd resume [role]
 echo [ATLAS]   ATLAS.cmd stop

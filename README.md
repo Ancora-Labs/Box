@@ -109,5 +109,5 @@ robustness, intelligence, and autonomy across successive operational cycles.
 
 ATLAS now launches inside a native Electron window instead of opening a localhost page in the default browser. The desktop shell performs one English clarification pass, stores a session-bound clarification packet under `state\atlas\desktop_sessions\`, and only then hands the window over to the existing ATLAS home and session surfaces.
 
-Use `ATLAS.cmd start` or `npm run atlas:open` to launch the desktop shell, `npm run atlas:desktop:build` to transpile the Electron entrypoints, and `npm run atlas:desktop:package` for the internal Windows package directory build.
+Use `ATLAS.cmd start` or `npm run atlas:open` to launch the desktop shell, `npm run atlas:desktop:build` to transpile the Electron entrypoints, and `ATLAS.cmd package` or `npm run atlas:desktop:package` to emit a portable Windows app folder at `dist\ATLAS\ATLAS.exe`.
 
