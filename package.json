@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": ".electron-build/electron/main.js",
   "description": "Repo-agnostic autonomous engineering orchestrator starter",
   "scripts": {
     "build": "npm run typecheck",
@@ -23,7 +24,7 @@
     "atlas:ctl": "node --import tsx src/atlas/lifecycle.ts",
     "atlas:desktop:build": "tsc -p tsconfig.electron.json",
     "atlas:desktop": "npm run atlas:desktop:build && electron .electron-build\\electron\\main.js",
-    "atlas:desktop:package": "npm run atlas:desktop:build && electron-builder --dir --win",
+    "atlas:desktop:package": "node --import tsx scripts/atlas_desktop_package.ts",
     "atlas:open": "npm run atlas:desktop",
     "prometheus:watch": "node --import tsx scripts/watch_prometheus_live.ts",
     "worker:run": "node --import tsx src/workers/run_task.ts",
@@ -31,6 +32,17 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "build": {
+    "appId": "com.ancoralabs.atlas",
+    "productName": "ATLAS",
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "executableName": "ATLAS",
+      "signAndEditExecutable": false
+    }
   },
   "dependencies": {
     "dotenv": "^16.4.5",
