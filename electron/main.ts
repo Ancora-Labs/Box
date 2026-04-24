@@ -1,13 +1,11 @@
-﻿import fs from "node:fs/promises";
+import fs from "node:fs/promises";
 import http from "node:http";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { app, BrowserWindow, ipcMain } from "electron";
 
 import { loadConfig } from "../src/config.js";
 import {
-  createAtlasClarificationPacket,
   readAtlasClarificationStatus,
 } from "../src/atlas/clarification.js";
 import {
@@ -24,6 +22,10 @@ import {
   resolveAtlasDesktopResourcePaths,
   resolvePackagedWorkingDirectory,
 } from "./resource_paths.js";
+import {
+  ATLAS_WINDOWS_APP_ID,
+  restoreAndFocusAtlasWindow,
+} from "./single_instance.js";
 import { decideAtlasPopupHandling, isContainedAuthUrl } from "./window_policy.js";
 
 interface AtlasDesktopRuntime {
@@ -37,6 +39,7 @@ let mainWindow: BrowserWindow | null = null;
 let atlasDesktopState: AtlasDesktopState | null = null;
 let atlasDesktopStatePath = "";
 const atlasDesktopResources = resolveAtlasDesktopResourcePaths(import.meta.url);
+const atlasOwnsSingleInstanceLock = wireSingleInstanceLifecycle();
 
 async function assertDesktopResourcePath(resourcePath: string, label: string): Promise<void> {
   try {
@@ -277,6 +280,30 @@ async function createMainWindow(): Promise<BrowserWindow> {
   return window;
 }
 
+function wireSingleInstanceLifecycle(): boolean {
+  const hasLock = app.requestSingleInstanceLock();
+  if (!hasLock) {
+    app.quit();
+    return false;
+  }
+
+  app.on("second-instance", () => {
+    if (restoreAndFocusAtlasWindow(mainWindow)) {
+      return;
+    }
+    if (!app.isReady()) {
+      return;
+    }
+    createMainWindow().then((window) => {
+      mainWindow = window;
+    }).catch((error) => {
+      console.error(`[atlas] failed to restore the desktop window after a repeat launch: ${String((error as Error)?.message || error)}`);
+    });
+  });
+
+  return true;
+}
+
 async function bootstrapDesktopApp(): Promise<void> {
   alignPackagedWorkingDirectory();
   await validateDesktopResources();
@@ -287,66 +314,19 @@ async function bootstrapDesktopApp(): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  if (!atlasOwnsSingleInstanceLock) {
+    return Promise.resolve();
+  }
+
+  if (process.platform === "win32") {
+    app.setAppUserModelId(ATLAS_WINDOWS_APP_ID);
+  }
+
   ipcMain.handle("atlas-desktop:get-bootstrap", async () => {
     if (!atlasBootstrap) {
       throw new Error("ATLAS desktop bootstrap is not available.");
     }
     return atlasBootstrap;
-  });
-
-  ipcMain.handle("atlas-desktop:save-onboarding-draft", async (_event, payload: { objective?: string }) => {
-    try {
-      await updateDesktopState({
-        onboardingDraft: typeof payload?.objective === "string" ? payload.objective : "",
-      });
-      if (atlasBootstrap) {
-        atlasBootstrap = {
-          ...atlasBootstrap,
-          onboardingDraft: atlasDesktopState?.onboardingDraft || "",
-        };
-      }
-      return { ok: true };
-    } catch (error) {
-      console.error(`[atlas] failed to persist onboarding draft: ${String((error as Error)?.message || error)}`);
-      return {
-        ok: false,
-        error: String((error as Error)?.message || error),
-      };
-    }
-  });
-
-  ipcMain.handle("atlas-desktop:submit-clarification", async (_event, payload: { objective?: string }) => {
-    if (!atlasBootstrap || !mainWindow) {
-      return { ok: false, error: "ATLAS desktop window is not ready." };
-    }
-
-    try {
-      const objective = typeof payload?.objective === "string" ? payload.objective : "";
-      await updateDesktopState({
-        sessionId: atlasBootstrap.sessionId,
-        onboardingDraft: objective,
-      });
-      const config = await loadConfig();
-      const packet = await createAtlasClarificationPacket({
-        stateDir: String(config.paths?.stateDir || "state"),
-        sessionId: atlasBootstrap.sessionId,
-        targetRepo: atlasBootstrap.targetRepo,
-        objective: objective.trim(),
-      });
-      await updateDesktopState({ onboardingDraft: "" });
-      atlasBootstrap = {
-        ...atlasBootstrap,
-        onboardingDraft: "",
-      };
-      await mainWindow.loadURL(new URL("/", atlasBootstrap.serverUrl).toString());
-      return { ok: true, packet };
-    } catch (error) {
-      console.error(`[atlas] desktop onboarding failed: ${String((error as Error)?.message || error)}`);
-      return {
-        ok: false,
-        error: String((error as Error)?.message || error),
-      };
-    }
   });
 
   return bootstrapDesktopApp();

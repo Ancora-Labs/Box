@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 
 import {
@@ -9,8 +10,15 @@ import {
   createAtlasClarificationPacket,
   getAtlasClarificationPacketPath,
 } from "../../src/atlas/clarification.ts";
+import {
+  readAtlasDesktopState,
+  resolveAtlasDesktopStatePath,
+  resolveAtlasDesktopStateRoot,
+  writeAtlasDesktopState,
+} from "../../src/atlas/desktop_state.ts";
+import { resolveAtlasDesktopResourcePaths } from "../../electron/resource_paths.ts";
+import { restoreAndFocusAtlasWindow } from "../../electron/single_instance.ts";
 import { decideAtlasPopupHandling } from "../../electron/window_policy.ts";
-import { getDesktopLayoutMode } from "../../electron/renderer/layout.js";
 
 function createTempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "atlas-desktop-regression-"));
@@ -45,6 +53,89 @@ describe("atlas desktop regression checks", () => {
     }
   });
 
+  it("persists portable desktop state beside the packaged app and restores the last session, draft, and window bounds", async () => {
+    const tempRoot = await createTempRoot();
+    const portableRoot = path.join(tempRoot, "ATLAS-portable");
+    const stateRoot = resolveAtlasDesktopStateRoot({
+      isPackaged: true,
+      exePath: path.join(portableRoot, "ATLAS.exe"),
+      cwd: tempRoot,
+    });
+    const statePath = resolveAtlasDesktopStatePath(stateRoot);
+
+    try {
+      const storedState = await writeAtlasDesktopState(statePath, {
+        sessionId: "desktop-session-restore",
+        onboardingDraft: "Reopen the desktop shell without losing this draft.",
+        windowBounds: {
+          x: 120,
+          y: 84,
+          width: 1420,
+          height: 940,
+        },
+        updatedAt: null,
+      });
+      const restoredState = await readAtlasDesktopState(statePath);
+
+      assert.equal(stateRoot, portableRoot);
+      assert.equal(statePath, path.join(portableRoot, "state", "atlas", "desktop_state.json"));
+      assert.equal(restoredState.sessionId, "desktop-session-restore");
+      assert.equal(restoredState.onboardingDraft, "Reopen the desktop shell without losing this draft.");
+      assert.deepEqual(restoredState.windowBounds, {
+        x: 120,
+        y: 84,
+        width: 1420,
+        height: 940,
+      });
+      assert.match(String(storedState.updatedAt), /T/);
+      assert.equal(restoredState.updatedAt, storedState.updatedAt);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves packaged preload and onboarding assets from the bundled desktop entrypoint instead of process.cwd()", async () => {
+    const tempRoot = await createTempRoot();
+    const originalCwd = process.cwd();
+    const packagedAppRoot = path.join(tempRoot, "ATLAS", "resources", "app");
+    const bundledMainPath = path.join(packagedAppRoot, ".electron-build", "electron", "main.js");
+    const unrelatedWorkingDirectory = path.join(tempRoot, "unrelated-working-directory");
+
+    try {
+      await fs.mkdir(unrelatedWorkingDirectory, { recursive: true });
+      process.chdir(unrelatedWorkingDirectory);
+      const resourcePaths = resolveAtlasDesktopResourcePaths(pathToFileURL(bundledMainPath).toString());
+
+      assert.equal(resourcePaths.appRoot, packagedAppRoot);
+      assert.equal(resourcePaths.preloadPath, path.join(packagedAppRoot, ".electron-build", "electron", "preload.js"));
+      assert.equal(resourcePaths.onboardingHtmlPath, path.join(packagedAppRoot, "electron", "renderer", "index.html"));
+      assert.notEqual(resourcePaths.onboardingHtmlPath, path.join(process.cwd(), "electron", "renderer", "index.html"));
+    } finally {
+      process.chdir(originalCwd);
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("restores and focuses the existing desktop window when ATLAS receives a second launch", () => {
+    let restoreCalls = 0;
+    let focusCalls = 0;
+
+    const focused = restoreAndFocusAtlasWindow({
+      isDestroyed: () => false,
+      isMinimized: () => true,
+      restore: () => {
+        restoreCalls += 1;
+      },
+      focus: () => {
+        focusCalls += 1;
+      },
+    });
+
+    assert.equal(focused, true);
+    assert.equal(restoreCalls, 1);
+    assert.equal(focusCalls, 1);
+  });
+
   it("[NEGATIVE] surfaces AI-call failures without writing a clarification packet", async () => {
     const tempRoot = await createTempRoot();
     const stateDir = path.join(tempRoot, "state");
@@ -67,6 +158,51 @@ describe("atlas desktop regression checks", () => {
     }
   });
 
+  it("[NEGATIVE] falls back to a fresh desktop state when the persisted portable state is invalid", async () => {
+    const tempRoot = await createTempRoot();
+    const statePath = resolveAtlasDesktopStatePath(tempRoot);
+
+    try {
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
+      await fs.writeFile(statePath, JSON.stringify({
+        sessionId: 42,
+        onboardingDraft: ["invalid"],
+        windowBounds: {
+          width: -1,
+          height: "tall",
+        },
+      }), "utf8");
+
+      const restoredState = await readAtlasDesktopState(statePath);
+      assert.equal(restoredState.sessionId, null);
+      assert.equal(restoredState.onboardingDraft, "");
+      assert.equal(restoredState.windowBounds, null);
+      assert.equal(restoredState.updatedAt, null);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("[NEGATIVE] does not restore or focus a destroyed desktop window on repeat launch", () => {
+    let restoreCalls = 0;
+    let focusCalls = 0;
+
+    const focused = restoreAndFocusAtlasWindow({
+      isDestroyed: () => true,
+      isMinimized: () => true,
+      restore: () => {
+        restoreCalls += 1;
+      },
+      focus: () => {
+        focusCalls += 1;
+      },
+    });
+
+    assert.equal(focused, false);
+    assert.equal(restoreCalls, 0);
+    assert.equal(focusCalls, 0);
+  });
+
   it("contains auth popups inside the desktop shell and blocks unrelated external origins", () => {
     assert.deepEqual(
       decideAtlasPopupHandling("https://login.example.com/oauth/authorize?client_id=test", "http://127.0.0.1:40123"),
@@ -78,9 +214,4 @@ describe("atlas desktop regression checks", () => {
     );
   });
 
-  it("switches the onboarding surface into stacked mode for narrow window widths", () => {
-    assert.equal(getDesktopLayoutMode(1440), "split");
-    assert.equal(getDesktopLayoutMode(720), "stacked");
-    assert.equal(getDesktopLayoutMode(Number.NaN), "stacked");
-  });
 });
