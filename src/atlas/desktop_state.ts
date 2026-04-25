@@ -9,7 +9,7 @@ export interface AtlasDesktopWindowBounds {
   y?: number;
 }
 
-export type AtlasDesktopProductSurface = "home" | "sessions";
+export type AtlasDesktopProductSurface = "workspace";
 
 export interface AtlasDesktopLocation {
   surface: AtlasDesktopProductSurface;
@@ -53,7 +53,7 @@ export function createDefaultAtlasDesktopState(): AtlasDesktopState {
     productDraft: "",
     productComposerFocused: false,
     windowBounds: null,
-    lastProductSurface: "home",
+    lastProductSurface: "workspace",
     focusedSessionRole: null,
     updatedAt: null,
   };
@@ -68,6 +68,12 @@ export function createAtlasDesktopClarificationHandoffState(
     productDraft: normalizedObjective,
     productComposerFocused: normalizedObjective.length > 0,
   };
+}
+
+export function createAtlasDesktopSessionStartHandoffState(
+  objective: unknown,
+): Pick<AtlasDesktopState, "onboardingDraft" | "productDraft" | "productComposerFocused"> {
+  return createAtlasDesktopClarificationHandoffState(objective);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -87,7 +93,7 @@ function normalizeBoolean(value: unknown): boolean {
 }
 
 export function normalizeAtlasDesktopProductSurface(value: unknown): AtlasDesktopProductSurface {
-  return value === "sessions" ? "sessions" : "home";
+  return value === "workspace" ? "workspace" : "workspace";
 }
 
 export function normalizeAtlasDesktopWindowBounds(value: unknown): AtlasDesktopWindowBounds | null {
@@ -112,7 +118,7 @@ export function normalizeAtlasDesktopWindowBounds(value: unknown): AtlasDesktopW
 export function normalizeAtlasDesktopLocation(value: unknown): AtlasDesktopLocation {
   if (!isRecord(value)) {
     return {
-      surface: "home",
+      surface: "workspace",
       focusedSessionRole: null,
     };
   }
@@ -133,7 +139,7 @@ export function buildAtlasDesktopLocationPath(location: Partial<AtlasDesktopLoca
     params.set("focusRole", normalizedLocation.focusedSessionRole);
   }
 
-  const pathname = normalizedLocation.surface === "sessions" ? "/sessions" : "/";
+  const pathname = "/";
   const query = params.toString();
   return query ? `${pathname}?${query}` : pathname;
 }
@@ -143,9 +149,10 @@ export function parseAtlasDesktopLocationFromUrl(input: string | URL): AtlasDesk
     const parsedUrl = input instanceof URL
       ? input
       : new URL(String(input || "/"), "http://127.0.0.1");
-    const surface = parsedUrl.pathname === "/"
-      ? "home"
-      : (parsedUrl.pathname === "/sessions" ? "sessions" : null);
+    const isWorkspacePath = parsedUrl.pathname === "/" || parsedUrl.pathname === "/sessions";
+    const surface = isWorkspacePath
+      ? "workspace"
+      : null;
     if (!surface) {
       return null;
     }

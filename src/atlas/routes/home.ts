@@ -9,7 +9,7 @@ import {
   type AtlasDesktopLocation,
   type AtlasDesktopProductSurface,
 } from "../desktop_state.js";
-import { renderAtlasHomeHtml, type AtlasPageData } from "../renderer.js";
+import { renderAtlasWorkspaceHtml, type AtlasPageData } from "../renderer.js";
 import {
   compareAtlasSessionsForDesktop,
   listAtlasSessions,
@@ -31,10 +31,7 @@ export const ATLAS_SNAPSHOT_PATH = "/api/atlas/snapshot";
 export const ATLAS_LEGACY_SNAPSHOT_PATH = "/api/snapshot";
 export const ATLAS_SNAPSHOT_TOKEN_HEADER = "x-atlas-desktop-snapshot-token";
 
-type AtlasSnapshotView = "home" | "sessions";
-
 export interface AtlasSnapshotRequestPayload {
-  view?: AtlasSnapshotView;
   focusRole?: string | null;
 }
 
@@ -42,6 +39,8 @@ export interface AtlasSnapshotResponse {
   ok: true;
   pageData: AtlasPageData;
   snapshotAt: string;
+  continuitySource: "live" | "cached";
+  continuityDetail: string;
 }
 
 interface AtlasDesktopBuildInfo {
@@ -58,14 +57,68 @@ function sortSessions(sessions: AtlasSessionDto[]): AtlasSessionDto[] {
   return [...sessions].sort(compareAtlasSessionsForDesktop);
 }
 
+async function deriveAtlasWorkspaceRuntimeState(
+  options: AtlasHomeRouteOptions,
+  sessions: AtlasSessionDto[],
+  focusedSessionRole: string | null,
+  missingFocusedSnapshot: boolean,
+): Promise<Pick<AtlasPageData, "sessionStartStatusLabel" | "sessionStartStatusDetail" | "sessionStartUpdatedAt" | "continuityStatusLabel" | "continuityStatusDetail">> {
+  const hasLiveSessions = sessions.length > 0;
+  const desktopSessionId = String(options.desktopSessionId || "").trim();
+
+  let sessionStartStatusLabel = hasLiveSessions ? "New session available" : "Ready for first session";
+  let sessionStartStatusDetail = hasLiveSessions
+    ? "The left rail is showing live tracked sessions, and the main pane can switch back to a blank new-session start screen at any time."
+    : "Start a session from the blank workspace composer to seed the first live workflow.";
+  let sessionStartUpdatedAt: string | null = null;
+
+  if (desktopSessionId) {
+    try {
+      const packetStatus = await readAtlasClarificationStatus(options.stateDir, desktopSessionId);
+      if (packetStatus.ready && packetStatus.packet) {
+        sessionStartUpdatedAt = packetStatus.packet.createdAt;
+        sessionStartStatusLabel = "Session brief recorded";
+        sessionStartStatusDetail = hasLiveSessions
+          ? "The latest desktop brief is recorded. Use New Session to stay on the blank start screen or select a rail row to open live detail."
+          : "The brief is recorded. ATLAS is waiting for the first live session snapshot before it shows selected-session detail.";
+      }
+    } catch (error) {
+      console.error(`[atlas] failed to read desktop session brief status: ${String((error as Error)?.message || error)}`);
+      sessionStartStatusLabel = "Session brief unavailable";
+      sessionStartStatusDetail = "ATLAS could not read the last desktop session brief, but the blank start screen stays available.";
+    }
+  }
+
+  if (missingFocusedSnapshot) {
+    return {
+      sessionStartStatusLabel,
+      sessionStartStatusDetail,
+      sessionStartUpdatedAt,
+      continuityStatusLabel: "Selected detail unavailable",
+      continuityStatusDetail: "The saved focus is not present in the current live snapshot, so ATLAS falls back to the blank new-session view instead of showing stale detail.",
+    };
+  }
+
+  return {
+    sessionStartStatusLabel,
+    sessionStartStatusDetail,
+    sessionStartUpdatedAt,
+    continuityStatusLabel: hasLiveSessions ? "Live detail available" : "Waiting for live detail",
+    continuityStatusDetail: hasLiveSessions
+      ? "Select any session from the left rail to open its live detail view in the main pane."
+      : "ATLAS will open selected-session detail as soon as the next tracked session snapshot is written.",
+  };
+}
+
 export function resolveAtlasDesktopPageLocation(
   requestUrl: string | undefined,
   fallbackSurface: AtlasDesktopProductSurface,
 ): AtlasDesktopLocation {
-  const fallbackPath = fallbackSurface === "sessions" ? "/sessions" : "/";
+  void fallbackSurface;
+  const fallbackPath = "/";
   return parseAtlasDesktopLocationFromUrl(String(requestUrl || fallbackPath))
     || {
-      surface: fallbackSurface,
+      surface: "workspace",
       focusedSessionRole: null,
     };
 }
@@ -89,14 +142,14 @@ export function deriveAtlasHomeReadiness(
   const hasResumableSessions = sessions.some((session) => session.isResumable);
   return hasResumableSessions
     ? {
-        homePrimaryActionLabel: "Resume active session",
-        homeReadinessHeading: "Ready to resume",
-        homeReadinessDetail: "Pick a tracked session from the left rail or write a new objective to start the next flow.",
+        homePrimaryActionLabel: "New Session",
+        homeReadinessHeading: "Live sessions available",
+        homeReadinessDetail: "Pick a tracked session from the left rail to inspect it, or stay on the blank start screen and write the next objective.",
       }
     : {
-        homePrimaryActionLabel: "Start a session",
+        homePrimaryActionLabel: "New Session",
         homeReadinessHeading: "Ready to start",
-        homeReadinessDetail: "Write one outcome in the composer to start the next session from the main workspace.",
+        homeReadinessDetail: "Write one outcome in the blank start screen composer to start the next session from the main workspace.",
       };
 }
 
@@ -142,73 +195,6 @@ function isAtlasSnapshotRequestAuthorized(
   return isAuthorizedSnapshotToken(providedToken, expectedToken);
 }
 
-export function renderClarificationRequiredHtml(): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ATLAS Home</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #080808;
-      --panel: #151515;
-      --line: rgba(255, 255, 255, 0.12);
-      --text: #f5f5f5;
-      --muted: #c6c6c6;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background: linear-gradient(180deg, #020202 0%, var(--bg) 100%);
-      color: var(--text);
-      font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
-      padding: 24px;
-    }
-    main {
-      width: min(760px, 100%);
-      padding: 28px;
-      border: 1px solid var(--line);
-      border-radius: 24px;
-      background: var(--panel);
-    }
-    h1, p { margin: 0; }
-    p { margin-top: 14px; color: var(--muted); line-height: 1.7; }
-  </style>
-</head>
-<body>
-  <main aria-label="ATLAS clarification gate">
-    <p>Desktop onboarding</p>
-    <h1>Finish clarification in the ATLAS desktop window.</h1>
-    <p>The main home surface opens after the first clarification packet is recorded for this desktop session.</p>
-  </main>
-</body>
-</html>`;
-}
-
-export async function respondWithClarificationGateIfNeeded(
-  res: ServerResponse,
-  options: AtlasHomeRouteOptions,
-): Promise<boolean> {
-  const desktopSessionId = String(options.desktopSessionId || "").trim();
-  if (!desktopSessionId) {
-    return false;
-  }
-
-  const clarificationStatus = await readAtlasClarificationStatus(options.stateDir, desktopSessionId);
-  if (clarificationStatus.ready) {
-    return false;
-  }
-
-  res.writeHead(412, { "content-type": "text/html; charset=utf-8" });
-  res.end(renderClarificationRequiredHtml());
-  return true;
-}
-
 async function readDesktopBuildInfo(): Promise<{ sessionId: string; builtAt: string | null; }> {
   const buildInfoPath = path.join(process.cwd(), "desktop-build-info.json");
   try {
@@ -230,7 +216,7 @@ async function readDesktopBuildInfo(): Promise<{ sessionId: string; builtAt: str
 export async function buildAtlasPageData(
   options: AtlasHomeRouteOptions,
   location: AtlasDesktopLocation = {
-    surface: "home",
+    surface: "workspace",
     focusedSessionRole: null,
   },
 ): Promise<AtlasPageData> {
@@ -241,9 +227,15 @@ export async function buildAtlasPageData(
   const requestedFocusedSessionRole = String(location.focusedSessionRole || "").trim() || null;
   const focusedSessionRole = resolveFocusedSessionRole(sortedSessions, requestedFocusedSessionRole);
   const missingFocusedSnapshot = Boolean(requestedFocusedSessionRole && !focusedSessionRole);
+  const runtimeState = await deriveAtlasWorkspaceRuntimeState(
+    options,
+    sortedSessions,
+    requestedFocusedSessionRole,
+    missingFocusedSnapshot,
+  );
 
   const pageData = {
-    title: "ATLAS Home",
+    title: "ATLAS Workspace",
     repoLabel: normalizeRepoLabel(options.targetRepo),
     hostLabel: String(options.hostLabel || "Windows host").trim() || "Windows host",
     shellCommand: String(options.shellCommand || ".\\ATLAS.cmd").trim() || ".\\ATLAS.cmd",
@@ -255,6 +247,7 @@ export async function buildAtlasPageData(
     buildTimestamp: buildInfo.builtAt,
     focusedSessionRole,
     missingFocusedSnapshot,
+    ...runtimeState,
     ...deriveAtlasHomeReadiness(sortedSessions),
     sessions: sortedSessions,
   };
@@ -263,11 +256,9 @@ export async function buildAtlasPageData(
 
 function resolveAtlasSnapshotLocation(requestUrl: string | undefined): AtlasDesktopLocation {
   const parsedUrl = new URL(String(requestUrl || "/api/snapshot"), "http://127.0.0.1");
-  const requestedView = String(parsedUrl.searchParams.get("view") || "").trim().toLowerCase();
-  const surface: AtlasSnapshotView = requestedView === "sessions" ? "sessions" : "home";
   const focusedSessionRole = String(parsedUrl.searchParams.get("focusRole") || "").trim() || null;
   return {
-    surface,
+    surface: "workspace",
     focusedSessionRole,
   };
 }
@@ -284,12 +275,12 @@ export async function handleAtlasHomeRequest(
   }
 
   try {
-    const pageData = await buildAtlasPageData(options, resolveAtlasDesktopPageLocation(req.url, "home"));
-    writeAtlasHtmlResponse(res, renderAtlasHomeHtml(pageData));
+    const pageData = await buildAtlasPageData(options, resolveAtlasDesktopPageLocation(req.url, "workspace"));
+    writeAtlasHtmlResponse(res, renderAtlasWorkspaceHtml(pageData));
   } catch (error) {
     console.error(`[atlas] home route failed: ${String((error as Error)?.message || error)}`);
     res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
-    res.end("<!doctype html><html><body><h1>ATLAS Home unavailable</h1><p>Review the route logs and try again.</p></body></html>");
+    res.end("<!doctype html><html><body><h1>ATLAS workspace unavailable</h1><p>Review the route logs and try again.</p></body></html>");
   }
 }
 
@@ -319,6 +310,8 @@ export async function handleAtlasSnapshotRequest(
       ok: true,
       pageData,
       snapshotAt: new Date().toISOString(),
+      continuitySource: "live",
+      continuityDetail: pageData.continuityStatusDetail,
     };
     writeAtlasJsonResponse(res, payload);
   } catch (error) {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ATLAS Desktop Onboarding</title>
+  <title>ATLAS Desktop Workspace</title>
   <style>
     :root {
       color-scheme: dark;
@@ -315,24 +315,24 @@
 </head>
 <body>
   <main>
-    <section class="shell" aria-label="ATLAS desktop onboarding">
-      <header class="shell-header">
-        <div class="shell-brand">
-          <span class="eyebrow">ATLAS Desktop</span>
-          <strong>First-run objective intake</strong>
-        </div>
-        <div class="shell-pills" aria-label="Desktop shell context">
-          <span class="shell-pill">Native Windows title bar</span>
-          <span class="shell-pill">Single clarification handoff</span>
-        </div>
-      </header>
+      <section class="shell" aria-label="ATLAS desktop workspace handoff">
+        <header class="shell-header">
+          <div class="shell-brand">
+            <span class="eyebrow">ATLAS Desktop</span>
+            <strong>Workspace handoff</strong>
+          </div>
+          <div class="shell-pills" aria-label="Desktop shell context">
+            <span class="shell-pill">Native Windows title bar</span>
+            <span class="shell-pill">Portable renderer compatibility</span>
+          </div>
+        </header>
 
       <div class="body-grid">
         <aside class="rail">
           <section class="card hero">
             <div class="eyebrow">Windows-first shell</div>
-            <h1>Start with one clear objective before the workspace unlocks.</h1>
-            <p>The renderer stays below the real Windows frame, keeps the first-run handoff focused, and stores one clarification packet before the live ATLAS workspace replaces this intake surface.</p>
+            <h1>Opening the live ATLAS workspace directly from the packaged desktop shell.</h1>
+            <p>This renderer is only a compatibility handoff that preserves the portable Windows bundle shape while the native window moves into the desktop workspace.</p>
           </section>
 
           <section class="status-block" aria-live="polite">
@@ -353,50 +353,43 @@
               <span class="meta-label">Launcher</span>
               <code data-role="shell">.\\ATLAS.cmd</code>
             </div>
+            <div>
+              <span class="meta-label">Workspace URL</span>
+              <code data-role="workspace-url">Resolving workspace...</code>
+            </div>
           </section>
         </aside>
 
         <section class="workspace">
           <section class="workspace-main">
             <section class="card">
-              <div class="eyebrow">Clarification workspace</div>
-              <h2>Frame the delivery outcome, not the implementation checklist.</h2>
-              <p class="support-copy">Use the context rail to confirm the desktop session, keep the scope grounded, and hand ATLAS one precise objective before the main workspace opens.</p>
+              <div class="eyebrow">Desktop workspace redirect</div>
+              <h2>The packaged shell now hands off directly to the workspace surface.</h2>
+              <p class="support-copy">ATLAS keeps the native Windows app contract unchanged, restores the desktop session context, and redirects this renderer into the live workspace instead of showing a separate onboarding flow.</p>
             </section>
 
             <section class="card" aria-label="What ATLAS does next">
               <div class="eyebrow">What ATLAS does next</div>
               <ol class="support-list">
-                <li>Persist the objective as the session draft so the shell can recover cleanly after a relaunch.</li>
-                <li>Store one clarification packet for the current desktop session.</li>
-                <li>Replace this onboarding surface with the live ATLAS workspace in the same window.</li>
+                <li>Read the packaged desktop bootstrap from the Electron preload bridge.</li>
+                <li>Resolve the live workspace URL for the current desktop session.</li>
+                <li>Replace this compatibility screen with the main ATLAS workspace in the same window.</li>
               </ol>
             </section>
           </section>
 
-          <section class="composer card" aria-label="Objective composer">
+          <section class="composer card" aria-label="Workspace handoff status">
             <div class="composer-header">
               <div>
-                <div class="eyebrow">Objective composer</div>
-                <h2>Describe the delivery outcome in plain English.</h2>
+                <div class="eyebrow">Workspace handoff</div>
+                <h2>Redirecting into the live desktop workspace.</h2>
               </div>
               <p class="composer-help" data-role="detail"></p>
             </div>
-
-            <form data-role="form" class="composer-form">
-              <label class="composer-field">
-                <span class="meta-label">Objective</span>
-                <textarea
-                  data-role="objective"
-                  name="objective"
-                  required
-                  placeholder="Example: Ship the Electron onboarding shell with native window polish, restore the preload bridge, and keep the product surface locked until one clarification packet is stored."></textarea>
-              </label>
-              <div class="composer-actions">
-                <p class="error" data-role="error"></p>
-                <button type="submit">Store clarification and open ATLAS</button>
-              </div>
-            </form>
+            <p class="support-copy">If the redirect does not complete, review the error below. The live workspace remains the intended first-class startup surface for the ATLAS desktop app.</p>
+            <div class="composer-actions">
+              <p class="error" data-role="error"></p>
+            </div>
           </section>
         </section>
       </div>

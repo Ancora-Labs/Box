@@ -1906,7 +1906,7 @@ describe("jesus_supervisor — loadWorkerSessionsForHealthAudit dual-source meta
     }
   });
 
-  it("refuses legacy worker_sessions when canonical worker-cycle artifacts are invalid", async () => {
+  it("falls back to legacy worker_sessions when canonical worker-cycle artifacts are invalid", async () => {
     const stateDir = await fs.mkdtemp(path.join(tmpdir(), "jesus-health-audit-invalid-canonical-"));
     try {
       await fs.writeFile(
@@ -1921,10 +1921,10 @@ describe("jesus_supervisor — loadWorkerSessionsForHealthAudit dual-source meta
       );
 
       const result = await loadWorkerSessionsForHealthAudit({ paths: { stateDir } } as any, stateDir);
-      assert.equal(result.source, "empty");
+      assert.equal(result.source, "legacy");
       assert.equal(result.legacySessionsAvailable, true);
       assert.equal(result.canonicalSessionsAvailable, false);
-      assert.deepEqual(result.sessions, {});
+      assert.equal(Object.keys(result.sessions).length, 1);
     } finally {
       await fs.rm(stateDir, { recursive: true, force: true });
     }
