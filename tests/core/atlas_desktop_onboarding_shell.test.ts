@@ -15,24 +15,26 @@ describe("atlas_desktop_onboarding_shell", () => {
     const mainProcess = await fs.readFile(path.join(ROOT, "electron", "main.ts"), "utf8");
 
     assert.match(html, /Native Windows title bar/);
-    assert.match(html, /Objective composer/);
-    assert.match(html, /Store clarification and open ATLAS/);
+    assert.match(html, /Workspace handoff/);
     assert.match(html, /data-role="detail"/);
-    assert.doesNotMatch(html, /window-controls|Run clarification and open ATLAS/);
+    assert.match(html, /Portable renderer compatibility/);
+    assert.doesNotMatch(html, /window-controls|Run clarification and open ATLAS|Objective composer/);
 
-    assert.match(appScript, /setOnboardingDraft/);
-    assert.match(appScript, /queueDraftSave/);
-    assert.match(appScript, /Restored the saved onboarding draft/);
-    assert.match(appScript, /Clarification stored\. Opening the ATLAS workspace/);
+    assert.match(appScript, /window\.atlasDesktop\?\.getBootstrap/);
+    assert.match(appScript, /Opening the ATLAS desktop workspace\./);
+    assert.match(appScript, /window\.location\.replace\(workspaceUrl\)/);
+    assert.match(appScript, /Workspace handoff failed\./);
 
     assert.match(preload, /setOnboardingDraft/);
     assert.match(preload, /atlas-desktop:set-onboarding-draft/);
     assert.match(preload, /atlas-desktop:submit-clarification/);
+    assert.match(preload, /atlas-desktop:start-session/);
 
     assert.match(mainProcess, /createAtlasDesktopWindowChromeOptions/);
     assert.match(mainProcess, /createAtlasAuthPopupOptions/);
     assert.match(mainProcess, /atlas-desktop:set-onboarding-draft/);
     assert.match(mainProcess, /atlas-desktop:submit-clarification/);
+    assert.match(mainProcess, /atlas-desktop:start-session/);
   });
 
   it("[NEGATIVE] keeps narrow viewports stacked until the workspace has room for the rail plus composer layout", () => {
