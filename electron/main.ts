@@ -71,7 +71,6 @@ let atlasBootstrap: AtlasDesktopBootstrap | null = null;
 let mainWindow: BrowserWindow | null = null;
 let atlasDesktopState: AtlasDesktopState | null = null;
 let atlasDesktopStatePath = "";
-let atlasLastSnapshot: AtlasSnapshotResponse | null = null;
 const atlasDesktopSnapshotToken = randomUUID();
 const atlasDesktopResources = resolveAtlasDesktopResourcePaths({
   mainModuleUrl: import.meta.url,
@@ -126,7 +125,7 @@ async function initializeDesktopState(): Promise<void> {
 }
 
 async function updateDesktopState(
-  patch: Partial<Pick<AtlasDesktopState, "sessionId" | "onboardingDraft" | "productDraft" | "productComposerFocused" | "windowBounds" | "focusedSessionRole">>,
+  patch: Partial<Pick<AtlasDesktopState, "sessionId" | "workspaceDraft" | "workspaceComposerFocused" | "windowBounds" | "focusedSessionRole">>,
 ): Promise<void> {
   if (!atlasDesktopStatePath) {
     throw new Error("ATLAS desktop state path is not initialized.");
@@ -138,33 +137,23 @@ async function updateDesktopState(
   });
 }
 
-async function updateOnboardingDraft(draft: string): Promise<void> {
+async function updateWorkspaceDraft(draft: string): Promise<void> {
   const normalizedDraft = String(draft || "");
-  await updateDesktopState({ onboardingDraft: normalizedDraft });
+  await updateDesktopState({ workspaceDraft: normalizedDraft });
   if (atlasBootstrap) {
     atlasBootstrap = {
       ...atlasBootstrap,
-      onboardingDraft: normalizedDraft,
+      workspaceDraft: normalizedDraft,
     };
   }
 }
 
-async function updateProductDraft(draft: string): Promise<void> {
-  await updateDesktopState({ productDraft: String(draft || "") });
+async function updateWorkspaceComposerFocus(focused: boolean): Promise<void> {
+  await updateDesktopState({ workspaceComposerFocused: focused === true });
 }
 
-async function updateProductComposerFocus(focused: boolean): Promise<void> {
-  await updateDesktopState({ productComposerFocused: focused === true });
-}
-
-async function completeClarificationHandoff(objective: string): Promise<void> {
+async function completeWorkspaceSessionStart(objective: string): Promise<void> {
   await updateDesktopState(createAtlasDesktopSessionStartHandoffState(objective));
-  if (atlasBootstrap) {
-    atlasBootstrap = {
-      ...atlasBootstrap,
-      onboardingDraft: "",
-    };
-  }
 }
 
 function getPersistedWindowBounds(): AtlasDesktopWindowBounds | null {
@@ -276,7 +265,7 @@ async function startDesktopRuntime(): Promise<AtlasDesktopRuntime> {
     sessionId,
     serverUrl,
     targetRepo,
-    onboardingDraft: atlasDesktopState?.onboardingDraft || "",
+    workspaceDraft: atlasDesktopState?.workspaceDraft || "",
   };
   await updateDesktopState({ sessionId });
   return {
@@ -349,17 +338,9 @@ async function fetchAtlasDesktopSnapshot(
     if (payload.ok !== true || !payload.pageData || typeof payload.snapshotAt !== "string") {
       throw new Error("ATLAS snapshot response was not valid JSON state.");
     }
-    atlasLastSnapshot = payload as AtlasSnapshotResponse;
     return payload as AtlasSnapshotResponse;
   } catch (error) {
     console.error(`[atlas] desktop snapshot refresh failed: ${String((error as Error)?.message || error)}`);
-    if (atlasLastSnapshot) {
-      return {
-        ...atlasLastSnapshot,
-        continuitySource: "cached",
-        continuityDetail: "ATLAS is temporarily showing the last successful desktop snapshot while the next live refresh recovers.",
-      };
-    }
     throw error;
   }
 }
@@ -414,7 +395,7 @@ async function startDesktopSession(
     }
 
     const normalizedObjective = String(objective || "").trim();
-    await updateProductDraft(normalizedObjective);
+    await updateWorkspaceDraft(normalizedObjective);
 
     const config = await loadConfig();
     const stateDir = String(config.paths?.stateDir || "state");
@@ -425,7 +406,7 @@ async function startDesktopSession(
       objective: normalizedObjective,
     });
 
-    await completeClarificationHandoff(normalizedObjective);
+    await completeWorkspaceSessionStart(normalizedObjective);
     if (requestWindow && !requestWindow.isDestroyed()) {
       await loadInitialSurface(requestWindow);
     }
@@ -436,13 +417,13 @@ async function startDesktopSession(
       packet,
     };
   } catch (error) {
-    console.error(`[atlas] desktop clarification submit failed: ${String((error as Error)?.message || error)}`);
+    console.error(`[atlas] desktop session start failed: ${String((error as Error)?.message || error)}`);
     const clarificationError = error instanceof AtlasClarificationError
       ? error
       : new AtlasClarificationError(
         String((error as Error)?.message || error),
         500,
-        "onboarding_failed",
+        "workspace_session_brief_failed",
       );
     return {
       ok: false,
@@ -533,7 +514,7 @@ app.whenReady().then(() => {
     }
     return atlasBootstrap;
   });
-  ipcMain.handle("atlas-desktop:get-desktop-state", async () => {
+  ipcMain.handle("atlas-desktop:get-workspace-state", async () => {
     return atlasDesktopState || createDefaultAtlasDesktopState();
   });
   ipcMain.handle("atlas-desktop:get-snapshot", async (event, payload: AtlasSnapshotRequestPayload = {}) => {
@@ -554,39 +535,21 @@ app.whenReady().then(() => {
       throw error;
     }
   });
-  ipcMain.handle("atlas-desktop:set-onboarding-draft", async (_event, payload: { draft?: string } = {}) => {
+  ipcMain.handle("atlas-desktop:set-workspace-draft", async (_event, payload: { draft?: string } = {}) => {
     try {
-      await updateOnboardingDraft(String(payload.draft || ""));
+      await updateWorkspaceDraft(String(payload.draft || ""));
       return { ok: true };
     } catch (error) {
-      console.error(`[atlas] onboarding draft update failed: ${String((error as Error)?.message || error)}`);
+      console.error(`[atlas] workspace draft update failed: ${String((error as Error)?.message || error)}`);
       throw error;
     }
   });
-  ipcMain.handle("atlas-desktop:set-product-draft", async (_event, payload: { draft?: string } = {}) => {
+  ipcMain.handle("atlas-desktop:set-workspace-composer-focus", async (_event, payload: { focused?: boolean } = {}) => {
     try {
-      await updateProductDraft(String(payload.draft || ""));
+      await updateWorkspaceComposerFocus(payload.focused === true);
       return { ok: true };
     } catch (error) {
-      console.error(`[atlas] product draft update failed: ${String((error as Error)?.message || error)}`);
-      throw error;
-    }
-  });
-  ipcMain.handle("atlas-desktop:set-product-composer-focus", async (_event, payload: { focused?: boolean } = {}) => {
-    try {
-      await updateProductComposerFocus(payload.focused === true);
-      return { ok: true };
-    } catch (error) {
-      console.error(`[atlas] product composer focus update failed: ${String((error as Error)?.message || error)}`);
-      throw error;
-    }
-  });
-  ipcMain.handle("atlas-desktop:submit-clarification", async (event, payload: { objective?: string } = {}) => {
-    try {
-      const requestWindow = BrowserWindow.fromWebContents(event.sender);
-      return await startDesktopSession(String(payload.objective || ""), requestWindow);
-    } catch (error) {
-      console.error(`[atlas] onboarding IPC submit failed: ${String((error as Error)?.message || error)}`);
+      console.error(`[atlas] workspace composer focus update failed: ${String((error as Error)?.message || error)}`);
       throw error;
     }
   });

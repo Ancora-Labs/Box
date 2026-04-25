@@ -775,11 +775,11 @@ function renderComposerScript(): string {
     return "No live session snapshot is available yet, but the shell still restores this draft and surface cleanly.";
   };
   const persistDraft = async (value, options = {}) => {
-    if (!bridge?.setProductDraft) {
+    if (!bridge?.setWorkspaceDraft) {
       return;
     }
     try {
-      await bridge.setProductDraft(value);
+      await bridge.setWorkspaceDraft(value);
       if (options.silent === true) {
         return;
       }
@@ -797,11 +797,11 @@ function renderComposerScript(): string {
     }
   };
   const persistComposerFocus = async (focused) => {
-    if (!bridge?.setProductComposerFocus) {
+    if (!bridge?.setWorkspaceComposerFocus) {
       return;
     }
     try {
-      await bridge.setProductComposerFocus(focused === true);
+      await bridge.setWorkspaceComposerFocus(focused === true);
     } catch (error) {
       console.error("[atlas] product composer focus save failed:", error);
     }
@@ -831,7 +831,7 @@ function renderComposerScript(): string {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       errorEl.textContent = "";
-      const startSession = bridge?.startSession || bridge?.submitClarification;
+      const startSession = bridge?.startSession;
       if (!startSession) {
         errorEl.textContent = "ATLAS could not reach the session bridge for this desktop shell.";
         setComposerStatus(
@@ -887,13 +887,13 @@ function renderComposerScript(): string {
       void persistDraft(String(input.value || ""));
     });
   };
-  const loadClarificationStatus = async () => {
+  const loadWorkspaceSessionBrief = async () => {
     queryComposerElements();
     if (!(input instanceof HTMLTextAreaElement)) {
       return;
-    }
-    try {
-      const response = await window.fetch("/api/onboarding/status", {
+      }
+      try {
+      const response = await window.fetch("/api/workspace/session-brief", {
         headers: { accept: "application/json" },
       });
       if (!response.ok) {
@@ -924,7 +924,7 @@ function renderComposerScript(): string {
       || !(detailEl instanceof HTMLElement)) {
       return;
     }
-    if (!bridge?.getDesktopState) {
+    if (!bridge?.getWorkspaceState) {
       setComposerStatus(
         "Desktop state recovery is unavailable in this surface.",
         "The composer stays editable, but draft recovery requires the Electron desktop bridge.",
@@ -932,14 +932,14 @@ function renderComposerScript(): string {
       return;
     }
     try {
-      const desktopState = await bridge.getDesktopState();
-      if (desktopState.productDraft) {
-        input.value = desktopState.productDraft;
+      const desktopState = await bridge.getWorkspaceState();
+      if (desktopState.workspaceDraft) {
+        input.value = desktopState.workspaceDraft;
         setComposerStatus("Restored the saved workspace draft for this desktop session.", getContinuityDetail());
       } else {
         setComposerStatus("Message box ready.", getContinuityDetail());
       }
-      if (desktopState.productComposerFocused) {
+      if (desktopState.workspaceComposerFocused) {
         input.focus();
         input.setSelectionRange(input.value.length, input.value.length);
       }
@@ -950,7 +950,7 @@ function renderComposerScript(): string {
         "ATLAS could not read the saved shell state, but the workspace remains available.",
       );
     }
-    await loadClarificationStatus();
+    await loadWorkspaceSessionBrief();
   };
   const renderSnapshot = async (pageData) => {
     const previousDraft = input instanceof HTMLTextAreaElement ? String(input.value || "") : "";

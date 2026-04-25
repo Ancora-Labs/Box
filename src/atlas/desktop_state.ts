@@ -18,11 +18,10 @@ export interface AtlasDesktopLocation {
 
 export interface AtlasDesktopState {
   sessionId: string | null;
-  onboardingDraft: string;
-  productDraft: string;
-  productComposerFocused: boolean;
+  workspaceDraft: string;
+  workspaceComposerFocused: boolean;
   windowBounds: AtlasDesktopWindowBounds | null;
-  lastProductSurface: AtlasDesktopProductSurface;
+  lastWorkspaceSurface: AtlasDesktopProductSurface;
   focusedSessionRole: string | null;
   updatedAt: string | null;
 }
@@ -31,7 +30,7 @@ export interface AtlasDesktopBootstrap {
   sessionId: string;
   serverUrl: string;
   targetRepo: string;
-  onboardingDraft: string;
+  workspaceDraft: string;
 }
 
 interface AtlasDesktopStateRecord extends AtlasDesktopState {
@@ -49,31 +48,29 @@ const ATLAS_DESKTOP_STATE_SCHEMA_VERSION = 3;
 export function createDefaultAtlasDesktopState(): AtlasDesktopState {
   return {
     sessionId: null,
-    onboardingDraft: "",
-    productDraft: "",
-    productComposerFocused: false,
+    workspaceDraft: "",
+    workspaceComposerFocused: false,
     windowBounds: null,
-    lastProductSurface: "workspace",
+    lastWorkspaceSurface: "workspace",
     focusedSessionRole: null,
     updatedAt: null,
   };
 }
 
-export function createAtlasDesktopClarificationHandoffState(
+export function createAtlasDesktopWorkspaceHandoffState(
   objective: unknown,
-): Pick<AtlasDesktopState, "onboardingDraft" | "productDraft" | "productComposerFocused"> {
+): Pick<AtlasDesktopState, "workspaceDraft" | "workspaceComposerFocused"> {
   const normalizedObjective = typeof objective === "string" ? objective.trim() : "";
   return {
-    onboardingDraft: "",
-    productDraft: normalizedObjective,
-    productComposerFocused: normalizedObjective.length > 0,
+    workspaceDraft: normalizedObjective,
+    workspaceComposerFocused: normalizedObjective.length > 0,
   };
 }
 
 export function createAtlasDesktopSessionStartHandoffState(
   objective: unknown,
-): Pick<AtlasDesktopState, "onboardingDraft" | "productDraft" | "productComposerFocused"> {
-  return createAtlasDesktopClarificationHandoffState(objective);
+): Pick<AtlasDesktopState, "workspaceDraft" | "workspaceComposerFocused"> {
+  return createAtlasDesktopWorkspaceHandoffState(objective);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -149,16 +146,12 @@ export function parseAtlasDesktopLocationFromUrl(input: string | URL): AtlasDesk
     const parsedUrl = input instanceof URL
       ? input
       : new URL(String(input || "/"), "http://127.0.0.1");
-    const isWorkspacePath = parsedUrl.pathname === "/" || parsedUrl.pathname === "/sessions";
-    const surface = isWorkspacePath
-      ? "workspace"
-      : null;
-    if (!surface) {
+    if (parsedUrl.pathname !== "/") {
       return null;
     }
 
     return {
-      surface,
+      surface: "workspace",
       focusedSessionRole: normalizeOptionalString(parsedUrl.searchParams.get("focusRole")),
     };
   } catch {
@@ -170,21 +163,21 @@ function normalizeAtlasDesktopState(value: unknown): AtlasDesktopState | null {
   if (!isRecord(value)) return null;
 
   const sessionId = normalizeOptionalString(value.sessionId);
-  const onboardingDraft = typeof value.onboardingDraft === "string"
-    ? value.onboardingDraft
-    : "";
-  const productDraft = typeof value.productDraft === "string"
-    ? value.productDraft
-    : "";
+  const workspaceDraft = typeof value.workspaceDraft === "string"
+    ? value.workspaceDraft
+    : (typeof value.productDraft === "string"
+        ? value.productDraft
+        : (typeof value.onboardingDraft === "string" ? value.onboardingDraft : ""));
   const updatedAt = normalizeOptionalString(value.updatedAt);
 
   return {
     sessionId,
-    onboardingDraft,
-    productDraft,
-    productComposerFocused: normalizeBoolean(value.productComposerFocused),
+    workspaceDraft,
+    workspaceComposerFocused: typeof value.workspaceComposerFocused === "boolean"
+      ? value.workspaceComposerFocused
+      : normalizeBoolean(value.productComposerFocused),
     windowBounds: normalizeAtlasDesktopWindowBounds(value.windowBounds),
-    lastProductSurface: normalizeAtlasDesktopProductSurface(value.lastProductSurface),
+    lastWorkspaceSurface: normalizeAtlasDesktopProductSurface(value.lastWorkspaceSurface ?? value.lastProductSurface),
     focusedSessionRole: normalizeOptionalString(value.focusedSessionRole),
     updatedAt,
   };

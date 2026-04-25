@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 
 import { getAtlasClarificationPacketPath } from "../../src/atlas/clarification.ts";
 import { type AtlasPageData, renderAtlasHomeHtml, renderAtlasSessionsHtml } from "../../src/atlas/renderer.ts";
-import { handleAtlasOnboardingRequest } from "../../src/atlas/routes/onboarding.ts";
+import { handleAtlasWorkspaceSessionBriefRequest } from "../../src/atlas/routes/onboarding.ts";
 import type { AtlasSessionDto } from "../../src/atlas/state_bridge.ts";
 import { readOpenTargetSessionState } from "../../src/core/target_session_state.ts";
 
@@ -55,7 +55,9 @@ function buildSession(overrides: Partial<AtlasSessionDto> = {}): AtlasSessionDto
     logSource: "live_worker_quality-worker.log",
     logUpdatedAt: "2026-04-25T09:01:00.000Z",
     freshnessAt: "2026-04-25T09:01:00.000Z",
-    freshnessLabel: "Live update recorded",
+    freshnessState: "live",
+    freshnessLabel: "Live update within 5 minutes",
+    freshnessPolicyDetail: "ATLAS verified a session update within the last 5 minutes.",
     logStateLabel: "Readable log ready",
     liveStatusTone: "active",
     liveStatusLabel: "Live",
@@ -84,11 +86,11 @@ function buildPageData(overrides: Partial<AtlasPageData> = {}): AtlasPageData {
     homeReadinessHeading: "Live sessions available",
     homeReadinessDetail: "Pick a tracked session from the left rail to inspect it, or stay on the blank start screen and write the next objective.",
     homePrimaryActionLabel: "New Session",
-    sessionStartStatusLabel: "Session brief recorded",
-    sessionStartStatusDetail: "The latest desktop brief is recorded and the workspace is continuing with live session state.",
+    sessionStartStatusLabel: "Stored session brief",
+    sessionStartStatusDetail: "ATLAS keeps the most recent desktop brief for recovery, but the brief is never treated as current live worker state.",
     sessionStartUpdatedAt: "2026-04-25T09:01:30.000Z",
-    continuityStatusLabel: "Live detail available",
-    continuityStatusDetail: "Select any session from the left rail to open its live detail view in the main pane.",
+    continuityStatusLabel: "Live detail verified",
+    continuityStatusDetail: "Every visible session has a verified live update within the current freshness policy window.",
     focusedSessionRole: "quality-worker",
     missingFocusedSnapshot: false,
     sessions: [buildSession()],
@@ -173,7 +175,7 @@ describe("atlas workspace shell", () => {
     }
   });
 
-  it("starts a desktop session directly through the onboarding compatibility endpoint", async () => {
+  it("starts a desktop session directly through the workspace session brief endpoint", async () => {
     const tempRoot = await createTempRoot();
     const stateDir = path.join(tempRoot, "state");
 
@@ -183,7 +185,7 @@ describe("atlas workspace shell", () => {
       }));
       const response = createResponseCapture();
 
-      await handleAtlasOnboardingRequest(request, response, {
+      await handleAtlasWorkspaceSessionBriefRequest(request, response, {
         stateDir,
         sessionId: "desktop-session-42",
         targetRepo: "Ancora-Labs/ATLAS",

@@ -39,7 +39,7 @@ export interface AtlasSnapshotResponse {
   ok: true;
   pageData: AtlasPageData;
   snapshotAt: string;
-  continuitySource: "live" | "cached";
+  continuitySource: "live";
   continuityDetail: string;
 }
 
@@ -57,6 +57,40 @@ function sortSessions(sessions: AtlasSessionDto[]): AtlasSessionDto[] {
   return [...sessions].sort(compareAtlasSessionsForDesktop);
 }
 
+function summarizeAtlasFreshnessPolicy(
+  sessions: AtlasSessionDto[],
+): Pick<AtlasPageData, "continuityStatusLabel" | "continuityStatusDetail"> {
+  if (sessions.length === 0) {
+    return {
+      continuityStatusLabel: "Waiting for live detail",
+      continuityStatusDetail: "ATLAS will open selected-session detail as soon as the next tracked session snapshot is written.",
+    };
+  }
+
+  const liveCount = sessions.filter((session) => session.freshnessState === "live").length;
+  const staleCount = sessions.filter((session) => session.freshnessState === "stale").length;
+  const unknownCount = sessions.filter((session) => session.freshnessState === "unknown").length;
+
+  if (liveCount === sessions.length) {
+    return {
+      continuityStatusLabel: "Live detail verified",
+      continuityStatusDetail: "Every visible session has a verified live update within the current freshness policy window.",
+    };
+  }
+
+  if (liveCount === 0 && staleCount > 0) {
+    return {
+      continuityStatusLabel: "Live detail stale",
+      continuityStatusDetail: "ATLAS is showing recorded session context, but none of the tracked sessions have refreshed within the live freshness policy window.",
+    };
+  }
+
+  return {
+    continuityStatusLabel: "Mixed freshness policy",
+    continuityStatusDetail: `ATLAS verified ${String(liveCount)} live session${liveCount === 1 ? "" : "s"}, while ${String(staleCount + unknownCount)} row${staleCount + unknownCount === 1 ? "" : "s"} remain stale or unverified.`,
+  };
+}
+
 async function deriveAtlasWorkspaceRuntimeState(
   options: AtlasHomeRouteOptions,
   sessions: AtlasSessionDto[],
@@ -65,6 +99,7 @@ async function deriveAtlasWorkspaceRuntimeState(
 ): Promise<Pick<AtlasPageData, "sessionStartStatusLabel" | "sessionStartStatusDetail" | "sessionStartUpdatedAt" | "continuityStatusLabel" | "continuityStatusDetail">> {
   const hasLiveSessions = sessions.length > 0;
   const desktopSessionId = String(options.desktopSessionId || "").trim();
+  const freshnessSummary = summarizeAtlasFreshnessPolicy(sessions);
 
   let sessionStartStatusLabel = hasLiveSessions ? "New session available" : "Ready for first session";
   let sessionStartStatusDetail = hasLiveSessions
@@ -77,10 +112,10 @@ async function deriveAtlasWorkspaceRuntimeState(
       const packetStatus = await readAtlasClarificationStatus(options.stateDir, desktopSessionId);
       if (packetStatus.ready && packetStatus.packet) {
         sessionStartUpdatedAt = packetStatus.packet.createdAt;
-        sessionStartStatusLabel = "Session brief recorded";
+        sessionStartStatusLabel = "Stored session brief";
         sessionStartStatusDetail = hasLiveSessions
-          ? "The latest desktop brief is recorded. Use New Session to stay on the blank start screen or select a rail row to open live detail."
-          : "The brief is recorded. ATLAS is waiting for the first live session snapshot before it shows selected-session detail.";
+          ? "ATLAS keeps the most recent desktop brief for recovery, but the brief is never treated as current live worker state."
+          : "ATLAS stored the last desktop brief for recovery, and it will wait for a live session snapshot before showing selected-session detail.";
       }
     } catch (error) {
       console.error(`[atlas] failed to read desktop session brief status: ${String((error as Error)?.message || error)}`);
@@ -95,7 +130,7 @@ async function deriveAtlasWorkspaceRuntimeState(
       sessionStartStatusDetail,
       sessionStartUpdatedAt,
       continuityStatusLabel: "Selected detail unavailable",
-      continuityStatusDetail: "The saved focus is not present in the current live snapshot, so ATLAS falls back to the blank new-session view instead of showing stale detail.",
+      continuityStatusDetail: "The saved focus is not present in the current live snapshot, so ATLAS clears the selection and falls back to the blank new-session view instead of showing stale detail.",
     };
   }
 
@@ -103,10 +138,8 @@ async function deriveAtlasWorkspaceRuntimeState(
     sessionStartStatusLabel,
     sessionStartStatusDetail,
     sessionStartUpdatedAt,
-    continuityStatusLabel: hasLiveSessions ? "Live detail available" : "Waiting for live detail",
-    continuityStatusDetail: hasLiveSessions
-      ? "Select any session from the left rail to open its live detail view in the main pane."
-      : "ATLAS will open selected-session detail as soon as the next tracked session snapshot is written.",
+    continuityStatusLabel: freshnessSummary.continuityStatusLabel,
+    continuityStatusDetail: freshnessSummary.continuityStatusDetail,
   };
 }
 

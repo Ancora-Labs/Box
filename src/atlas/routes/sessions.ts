@@ -10,6 +10,19 @@ import {
 
 export type AtlasSessionsRouteOptions = AtlasHomeRouteOptions;
 
+function resolveLegacySessionsLocation(requestUrl: string | undefined) {
+  const workspaceLocation = resolveAtlasDesktopPageLocation(requestUrl, "workspace");
+  if (workspaceLocation.focusedSessionRole || !String(requestUrl || "").startsWith("/sessions")) {
+    return workspaceLocation;
+  }
+
+  const parsedUrl = new URL(String(requestUrl || "/sessions"), "http://127.0.0.1");
+  return {
+    surface: "workspace" as const,
+    focusedSessionRole: String(parsedUrl.searchParams.get("focusRole") || "").trim() || null,
+  };
+}
+
 export async function handleAtlasSessionsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -22,7 +35,7 @@ export async function handleAtlasSessionsRequest(
   }
 
   try {
-    const workspaceLocation = resolveAtlasDesktopPageLocation(req.url, "workspace");
+    const workspaceLocation = resolveLegacySessionsLocation(req.url);
     const pageData = await buildAtlasPageData(options, workspaceLocation);
     writeAtlasHtmlResponse(res, renderAtlasWorkspaceHtml(pageData));
   } catch (error) {

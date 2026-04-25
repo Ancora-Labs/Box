@@ -6,7 +6,7 @@ import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, it } from "node:test";
 
-import { handleAtlasOnboardingRequest } from "../../src/atlas/routes/onboarding.ts";
+import { handleAtlasWorkspaceSessionBriefRequest } from "../../src/atlas/routes/onboarding.ts";
 import {
   renderAtlasHomeHtml,
   renderAtlasSessionsHtml,
@@ -58,7 +58,9 @@ function buildSession(overrides: Partial<AtlasSessionDto> = {}): AtlasSessionDto
     logSource: "live_worker_quality-worker.log",
     logUpdatedAt: "2026-04-25T00:01:00.000Z",
     freshnessAt: "2026-04-25T00:01:00.000Z",
-    freshnessLabel: "Live update recorded",
+    freshnessState: "live",
+    freshnessLabel: "Live update within 5 minutes",
+    freshnessPolicyDetail: "ATLAS verified a session update within the last 5 minutes.",
     logStateLabel: "Readable log ready",
     liveStatusTone: "active",
     liveStatusLabel: "Live",
@@ -87,11 +89,11 @@ function buildPageData(overrides: Partial<AtlasPageData> = {}): AtlasPageData {
     homeReadinessHeading: "Live sessions available",
     homeReadinessDetail: "Pick a tracked session from the left rail to inspect it, or stay on the blank start screen and write the next objective.",
     homePrimaryActionLabel: "New Session",
-    sessionStartStatusLabel: "Session brief recorded",
-    sessionStartStatusDetail: "The latest desktop brief is recorded and the workspace is continuing with live session state.",
+    sessionStartStatusLabel: "Stored session brief",
+    sessionStartStatusDetail: "ATLAS keeps the most recent desktop brief for recovery, but the brief is never treated as current live worker state.",
     sessionStartUpdatedAt: "2026-04-25T00:04:00.000Z",
-    continuityStatusLabel: "Live detail available",
-    continuityStatusDetail: "Select any session from the left rail to open its live detail view in the main pane.",
+    continuityStatusLabel: "Live detail verified",
+    continuityStatusDetail: "Every visible session has a verified live update within the current freshness policy window.",
     focusedSessionRole: "quality-worker",
     missingFocusedSnapshot: false,
     sessions: [buildSession()],
@@ -203,7 +205,7 @@ describe("update the existing atlas test suite so it stops protecting the old sh
     assert.match(atlasCmd, /Packaging the portable Windows desktop folder/i);
   });
 
-  it("[NEGATIVE] reports onboarding failures without minting a desktop session or fake shell state", async () => {
+  it("[NEGATIVE] reports workspace session brief failures without minting a desktop session or fake shell state", async () => {
     const tempRoot = await createTempRoot();
 
     try {
@@ -212,7 +214,7 @@ describe("update the existing atlas test suite so it stops protecting the old sh
       }));
       const missingSessionResponse = createResponseCapture();
 
-      await handleAtlasOnboardingRequest(missingSessionRequest, missingSessionResponse, {
+      await handleAtlasWorkspaceSessionBriefRequest(missingSessionRequest, missingSessionResponse, {
         stateDir: path.join(tempRoot, "state"),
       });
 
@@ -224,7 +226,7 @@ describe("update the existing atlas test suite so it stops protecting the old sh
       }));
       const failedRunnerResponse = createResponseCapture();
 
-      await handleAtlasOnboardingRequest(failedRunnerRequest, failedRunnerResponse, {
+      await handleAtlasWorkspaceSessionBriefRequest(failedRunnerRequest, failedRunnerResponse, {
         stateDir: path.join(tempRoot, "state"),
         sessionId: "desktop-session-negative",
         targetRepo: "Ancora-Labs/ATLAS",

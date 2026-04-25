@@ -81,6 +81,11 @@ export type AtlasSessionLiveStatusTone =
   | "complete"
   | "offline";
 
+export type AtlasSessionFreshnessState =
+  | "live"
+  | "stale"
+  | "unknown";
+
 export interface AtlasSessionDto {
   role: string;
   name: string;
@@ -110,7 +115,9 @@ export interface AtlasSessionDto {
   logSource: string | null;
   logUpdatedAt: string | null;
   freshnessAt: string | null;
+  freshnessState: AtlasSessionFreshnessState;
   freshnessLabel: string;
+  freshnessPolicyDetail: string;
   logStateLabel: string;
   liveStatusTone: AtlasSessionLiveStatusTone;
   liveStatusLabel: string;
@@ -193,6 +200,7 @@ const RECENT_ACTION_LIMIT = 4;
 const LOG_EXCERPT_LINE_LIMIT = 6;
 const LOG_CONTROL_LINE_PATTERN = /^\[[A-Za-z0-9:_-]+\]$/;
 const ANSI_ESCAPE_SEQUENCE_PATTERN = new RegExp(String.raw`\u001B\[[0-9;]*m`, "g");
+const SESSION_LIVE_FRESHNESS_WINDOW_MS = 5 * 60 * 1000;
 const INTERNAL_SESSION_STAGE_TO_STATUS: Record<string, AtlasSessionStatus> = {
   blocked: "blocked",
   complete: "done",
@@ -430,8 +438,51 @@ function buildInlineLogExcerpt(session: BoxTargetSessionRecord): string[] {
     .slice(-LOG_EXCERPT_LINE_LIMIT);
 }
 
-function getSessionFreshnessLabel(freshnessAt: string | null): string {
-  return freshnessAt ? "Live update recorded" : "Waiting for live update";
+type AtlasSessionSource = "canonical" | "legacy";
+
+function resolveSessionFreshnessPolicy(
+  freshnessAt: string | null,
+  source: AtlasSessionSource,
+): Pick<AtlasSessionDto, "freshnessState" | "freshnessLabel" | "freshnessPolicyDetail"> {
+  if (source === "legacy") {
+    return {
+      freshnessState: "stale",
+      freshnessLabel: "Legacy fallback snapshot",
+      freshnessPolicyDetail: "ATLAS restored this session from legacy fallback state, so it is shown as recorded context instead of current live state.",
+    };
+  }
+
+  if (!freshnessAt) {
+    return {
+      freshnessState: "unknown",
+      freshnessLabel: "Waiting for live update",
+      freshnessPolicyDetail: "ATLAS does not have a current live update timestamp for this session yet.",
+    };
+  }
+
+  const freshnessTime = Date.parse(freshnessAt);
+  if (!Number.isFinite(freshnessTime)) {
+    return {
+      freshnessState: "unknown",
+      freshnessLabel: "Waiting for verified live update",
+      freshnessPolicyDetail: "ATLAS could not verify the session freshness timestamp, so it is not presented as current live state.",
+    };
+  }
+
+  const ageMs = Date.now() - freshnessTime;
+  if (ageMs <= SESSION_LIVE_FRESHNESS_WINDOW_MS) {
+    return {
+      freshnessState: "live",
+      freshnessLabel: "Live update within 5 minutes",
+      freshnessPolicyDetail: "ATLAS verified a session update within the last 5 minutes.",
+    };
+  }
+
+  return {
+    freshnessState: "stale",
+    freshnessLabel: "Live update stale",
+    freshnessPolicyDetail: "The latest session update is older than 5 minutes, so ATLAS keeps it visible as stale context instead of current live state.",
+  };
 }
 
 function getSessionLogStateLabel(logExcerpt: string[]): string {
@@ -441,7 +492,19 @@ function getSessionLogStateLabel(logExcerpt: string[]): string {
 function resolveSessionLiveStatus(
   sessionName: string,
   status: AtlasSessionStatus,
+  freshnessState: AtlasSessionFreshnessState,
 ): Pick<AtlasSessionDto, "liveStatusTone" | "liveStatusLabel" | "liveStatusAssistiveText" | "liveStatusPulse"> {
+  if (status === "working" && freshnessState !== "live") {
+    return {
+      liveStatusTone: "attention",
+      liveStatusLabel: freshnessState === "stale" ? "Stale" : "Waiting",
+      liveStatusAssistiveText: freshnessState === "stale"
+        ? `${sessionName} does not have a recent live update, so ATLAS is showing stale recorded context.`
+        : `${sessionName} is waiting for a verified live update before ATLAS marks it as live.`,
+      liveStatusPulse: false,
+    };
+  }
+
   switch (status) {
     case "working":
       return {
@@ -804,6 +867,7 @@ export function bridgeBoxTargetSessionState(
   workerSessions: Record<string, unknown>,
   thinkingMap: Record<string, string> = {},
   pausedLanes: Record<string, unknown> = {},
+  source: AtlasSessionSource = "canonical",
 ): Record<string, AtlasSessionDto> {
   const cleaned: Record<string, AtlasSessionDto> = {};
 
@@ -845,6 +909,7 @@ export function bridgeBoxTargetSessionState(
       logUpdatedAt,
       normalizeOptionalString(session.updatedAt),
     );
+    const freshnessPolicy = resolveSessionFreshnessPolicy(freshnessAt, source);
 
     cleaned[roleKey] = {
       role,
@@ -875,9 +940,9 @@ export function bridgeBoxTargetSessionState(
       logSource: normalizeOptionalString(session.logSource),
       logUpdatedAt,
       freshnessAt,
-      freshnessLabel: getSessionFreshnessLabel(freshnessAt),
+      ...freshnessPolicy,
       logStateLabel: getSessionLogStateLabel(logExcerpt),
-      ...resolveSessionLiveStatus(getAtlasSessionDisplayName(role), status),
+      ...resolveSessionLiveStatus(getAtlasSessionDisplayName(role), status, freshnessPolicy.freshnessState),
       needsInput: readiness === "action_needed",
       isResumable: isResumable(status, lastTask),
       isPaused: Boolean(lane && pausedLanes[lane]),
@@ -907,11 +972,13 @@ export async function readAtlasSessionReadModel(
   const fallbackOpenSessions = Object.keys(canonicalOpenSessions).length > 0
     ? {}
     : await readLegacyOpenSessionRecords(options.stateDir);
+  const sessionSource: AtlasSessionSource = Object.keys(canonicalOpenSessions).length > 0 ? "canonical" : "legacy";
 
   const openSessions = bridgeBoxTargetSessionState(
     Object.keys(canonicalOpenSessions).length > 0 ? canonicalOpenSessions : fallbackOpenSessions,
     options.thinkingMap,
     pausedLanes,
+    sessionSource,
   );
 
   return {
