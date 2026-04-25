@@ -25,8 +25,8 @@ contextBridge.exposeInMainWorld("atlasDesktop", {
   getBootstrap(): Promise<AtlasDesktopBootstrap> {
     return ipcRenderer.invoke("atlas-desktop:get-bootstrap");
   },
-  getDesktopState(): Promise<AtlasDesktopState> {
-    return ipcRenderer.invoke("atlas-desktop:get-desktop-state");
+  getWorkspaceState(): Promise<AtlasDesktopState> {
+    return ipcRenderer.invoke("atlas-desktop:get-workspace-state");
   },
   refreshSnapshot(request: AtlasSnapshotRequestPayload = {}): Promise<AtlasSnapshotResponse> {
     return ipcRenderer.invoke("atlas-desktop:refresh-snapshot", request);
@@ -34,19 +34,13 @@ contextBridge.exposeInMainWorld("atlasDesktop", {
   getSnapshot(request: AtlasSnapshotRequestPayload = {}): Promise<AtlasSnapshotResponse> {
     return ipcRenderer.invoke("atlas-desktop:get-snapshot", request);
   },
-  setOnboardingDraft(draft: string): Promise<{ ok: true }> {
-    return ipcRenderer.invoke("atlas-desktop:set-onboarding-draft", { draft });
+  setWorkspaceDraft(draft: string): Promise<{ ok: true }> {
+    return ipcRenderer.invoke("atlas-desktop:set-workspace-draft", { draft });
   },
-  setProductDraft(draft: string): Promise<{ ok: true }> {
-    return ipcRenderer.invoke("atlas-desktop:set-product-draft", { draft });
-  },
-  setProductComposerFocus(focused: boolean): Promise<{ ok: true }> {
-    return ipcRenderer.invoke("atlas-desktop:set-product-composer-focus", { focused });
+  setWorkspaceComposerFocus(focused: boolean): Promise<{ ok: true }> {
+    return ipcRenderer.invoke("atlas-desktop:set-workspace-composer-focus", { focused });
   },
   startSession(objective: string): Promise<AtlasDesktopClarificationResult> {
     return ipcRenderer.invoke("atlas-desktop:start-session", { objective });
-  },
-  submitClarification(objective: string): Promise<AtlasDesktopClarificationResult> {
-    return ipcRenderer.invoke("atlas-desktop:submit-clarification", { objective });
   },
 });

@@ -76,7 +76,7 @@ describe("atlas regression fence", () => {
     const launcher = await fs.readFile(launcherPath, "utf8");
     const desktopMain = await fs.readFile(path.join(process.cwd(), "electron", "main.ts"), "utf8");
     const preloadSource = await fs.readFile(path.join(process.cwd(), "electron", "preload.ts"), "utf8");
-    const onboardingHtml = await fs.readFile(path.join(process.cwd(), "electron", "renderer", "index.html"), "utf8");
+    const workspaceHandoffHtml = await fs.readFile(path.join(process.cwd(), "electron", "renderer", "index.html"), "utf8");
     const rendererSource = await fs.readFile(path.join(process.cwd(), "src", "atlas", "renderer.ts"), "utf8");
     const layout = createAtlasDesktopPackageLayout(path.join("C:", "ATLAS Release Root"));
 
@@ -103,9 +103,9 @@ describe("atlas regression fence", () => {
     assert.match(launcher, /Launching the native ATLAS desktop shell/i);
     assert.match(launcher, /Packaging the portable Windows desktop folder/i);
     assert.doesNotMatch(launcher, /Start-Process|Invoke-WebRequest/);
-    assert.match(onboardingHtml, /Native Windows title bar/);
-    assert.match(onboardingHtml, /Workspace handoff/);
-    assert.doesNotMatch(onboardingHtml, /dashboard-card|window-controls|traffic-light/i);
+    assert.match(workspaceHandoffHtml, /Native Windows title bar/);
+    assert.match(workspaceHandoffHtml, /Workspace handoff/);
+    assert.doesNotMatch(workspaceHandoffHtml, /dashboard-card|window-controls|traffic-light/i);
     assert.match(rendererSource, /aria-label="ATLAS desktop surface"/);
     assert.match(rendererSource, /aria-label="ATLAS desktop sidebar"/);
     assert.match(rendererSource, /aria-label="ATLAS work canvas"/);
@@ -120,6 +120,13 @@ describe("atlas regression fence", () => {
     assert.match(preloadSource, /atlas-desktop:refresh-snapshot/);
     assert.match(preloadSource, /getSnapshot\(request: AtlasSnapshotRequestPayload = \{\}\)/);
     assert.match(preloadSource, /atlas-desktop:get-snapshot/);
+    assert.match(preloadSource, /getWorkspaceState\(\): Promise<AtlasDesktopState>/);
+    assert.match(preloadSource, /atlas-desktop:get-workspace-state/);
+    assert.match(preloadSource, /setWorkspaceDraft\(draft: string\)/);
+    assert.match(preloadSource, /atlas-desktop:set-workspace-draft/);
+    assert.match(preloadSource, /setWorkspaceComposerFocus\(focused: boolean\)/);
+    assert.match(preloadSource, /atlas-desktop:set-workspace-composer-focus/);
+    assert.doesNotMatch(preloadSource, /setOnboardingDraft|submitClarification|getDesktopState|setProductDraft|setProductComposerFocus/);
     assert.match(desktopMain, /requestSingleInstanceLock\(\)/);
     assert.match(desktopMain, /app\.on\("second-instance"/);
     assert.match(desktopMain, /restoreAndFocusAtlasWindow\(mainWindow\)/);
@@ -129,10 +136,14 @@ describe("atlas regression fence", () => {
     assert.match(desktopMain, /atlasDesktopResources\.rendererHtmlPath/);
     assert.match(desktopMain, /buildAtlasDesktopLocationPath\(getPersistedProductLocation\(\)\)/);
     assert.match(desktopMain, /window\.loadURL\(new URL\(buildAtlasDesktopLocationPath\(getPersistedProductLocation\(\)\), atlasBootstrap\.serverUrl\)\.toString\(\)\)/);
+    assert.match(desktopMain, /ipcMain\.handle\("atlas-desktop:get-workspace-state"/);
+    assert.match(desktopMain, /ipcMain\.handle\("atlas-desktop:set-workspace-draft"/);
+    assert.match(desktopMain, /ipcMain\.handle\("atlas-desktop:set-workspace-composer-focus"/);
     assert.match(desktopMain, /ipcMain\.handle\("atlas-desktop:get-snapshot"/);
     assert.match(desktopMain, /ipcMain\.handle\("atlas-desktop:refresh-snapshot"/);
     assert.match(desktopMain, /ATLAS_SNAPSHOT_TOKEN_HEADER/);
     assert.match(desktopMain, /ATLAS_SNAPSHOT_PATH/);
+    assert.doesNotMatch(desktopMain, /atlas-desktop:set-onboarding-draft|atlas-desktop:submit-clarification|atlas-desktop:get-desktop-state/);
     assert.match(desktopMain, /rejected an untrusted window/);
   });
 
@@ -157,10 +168,7 @@ describe("atlas regression fence", () => {
       surface: "workspace",
       focusedSessionRole: "quality-worker",
     });
-    assert.deepEqual(parseAtlasDesktopLocationFromUrl("/sessions?focusRole=quality-worker"), {
-      surface: "workspace",
-      focusedSessionRole: "quality-worker",
-    });
+    assert.equal(parseAtlasDesktopLocationFromUrl("/sessions?focusRole=quality-worker"), null);
   });
 
   it("keeps dist\\ATLAS as the only Windows handoff surface after packaging", async () => {

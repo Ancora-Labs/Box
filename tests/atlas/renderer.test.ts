@@ -46,7 +46,9 @@ function buildSession(overrides: Partial<AtlasSessionDto> = {}): AtlasSessionDto
     logSource: "live_worker_athena.log",
     logUpdatedAt: "2026-04-21T12:01:00.000Z",
     freshnessAt: "2026-04-21T12:01:00.000Z",
-    freshnessLabel: "Live update recorded",
+    freshnessState: "live",
+    freshnessLabel: "Live update within 5 minutes",
+    freshnessPolicyDetail: "ATLAS verified a session update within the last 5 minutes.",
     logStateLabel: "Readable log ready",
     liveStatusTone: "active",
     liveStatusLabel: "Live",
@@ -75,11 +77,11 @@ function buildPageData(overrides: Partial<AtlasPageData> = {}): AtlasPageData {
     homeReadinessHeading: "Live sessions available",
     homeReadinessDetail: "Pick a tracked session from the left rail to inspect it, or stay on the blank start screen and write the next objective.",
     homePrimaryActionLabel: "New Session",
-    sessionStartStatusLabel: "Session brief recorded",
-    sessionStartStatusDetail: "The latest desktop brief is recorded. Use New Session to stay on the blank start screen or select a rail row to open live detail.",
+    sessionStartStatusLabel: "Stored session brief",
+    sessionStartStatusDetail: "ATLAS keeps the most recent desktop brief for recovery, but the brief is never treated as current live worker state.",
     sessionStartUpdatedAt: "2026-04-21T12:04:00.000Z",
-    continuityStatusLabel: "Live detail available",
-    continuityStatusDetail: "Select any session from the left rail to open its live detail view in the main pane.",
+    continuityStatusLabel: "Live detail verified",
+    continuityStatusDetail: "Every visible session has a verified live update within the current freshness policy window.",
     focusedSessionRole: null,
     missingFocusedSnapshot: false,
     sessions: [
@@ -116,7 +118,9 @@ function buildPageData(overrides: Partial<AtlasPageData> = {}): AtlasPageData {
         logSource: "live_worker_prometheus.log",
         logUpdatedAt: "2026-04-21T11:46:00.000Z",
         freshnessAt: "2026-04-21T11:46:00.000Z",
-        freshnessLabel: "Live update recorded",
+        freshnessState: "stale",
+        freshnessLabel: "Live update stale",
+        freshnessPolicyDetail: "The latest session update is older than 5 minutes, so ATLAS keeps it visible as stale context instead of current live state.",
         logStateLabel: "Readable log ready",
         liveStatusTone: "attention",
         liveStatusLabel: "Needs attention",
@@ -152,7 +156,7 @@ describe("atlas renderer", () => {
     assert.match(documentMarkup, /data-role="product-composer-input"/);
     assert.match(documentMarkup, /data-role="runtime-stage-label"/);
     assert.match(documentMarkup, /data-role="session-row-status-light"/);
-    assert.match(documentMarkup, /Live detail available/);
+    assert.match(documentMarkup, /Live detail verified/);
     assert.match(html, /bridge\?\.refreshSnapshot/);
     assert.match(html, /ATLAS snapshot refresh requires the Electron desktop bridge\./);
     assert.doesNotMatch(documentMarkup, /data-role="selected-session-view"/);

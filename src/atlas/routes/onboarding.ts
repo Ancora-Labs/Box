@@ -7,7 +7,7 @@ import {
   type AtlasClarificationRunner,
 } from "../clarification.js";
 
-export interface AtlasOnboardingRouteOptions {
+export interface AtlasWorkspaceSessionBriefRouteOptions {
   stateDir: string;
   sessionId?: string;
   targetRepo?: string;
@@ -15,7 +15,7 @@ export interface AtlasOnboardingRouteOptions {
   clarificationRunner?: AtlasClarificationRunner;
 }
 
-interface AtlasOnboardingPayload {
+interface AtlasWorkspaceSessionBriefPayload {
   objective?: string;
 }
 
@@ -31,7 +31,7 @@ async function readRequestBody(req: IncomingMessage): Promise<string> {
     req.on("data", (chunk) => {
       raw += chunk;
       if (raw.length > 64_000) {
-        reject(new AtlasClarificationError("Onboarding payload exceeded 64KB.", 413, "payload_too_large"));
+        reject(new AtlasClarificationError("Workspace session brief payload exceeded 64KB.", 413, "payload_too_large"));
       }
     });
     req.on("end", () => resolve(raw));
@@ -39,22 +39,22 @@ async function readRequestBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function parseOnboardingPayload(body: string): AtlasOnboardingPayload {
+function parseWorkspaceSessionBriefPayload(body: string): AtlasWorkspaceSessionBriefPayload {
   try {
-    return JSON.parse(body || "{}") as AtlasOnboardingPayload;
+    return JSON.parse(body || "{}") as AtlasWorkspaceSessionBriefPayload;
   } catch (error) {
     throw new AtlasClarificationError(
-      `Onboarding payload is not valid JSON: ${String((error as Error)?.message || error)}`,
+      `Workspace session brief payload is not valid JSON: ${String((error as Error)?.message || error)}`,
       400,
       "invalid_payload",
     );
   }
 }
 
-export async function handleAtlasOnboardingRequest(
+export async function handleAtlasWorkspaceSessionBriefRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  options: AtlasOnboardingRouteOptions,
+  options: AtlasWorkspaceSessionBriefRouteOptions,
 ): Promise<void> {
   const method = String(req.method || "GET").toUpperCase();
   const sessionId = String(options.sessionId || "").trim();
@@ -91,7 +91,7 @@ export async function handleAtlasOnboardingRequest(
     if (!sessionId) {
       writeJsonResponse(res, 409, {
         ok: false,
-        error: "ATLAS onboarding is not bound to a desktop session.",
+        error: "ATLAS workspace session brief is not bound to a desktop session.",
         code: "desktop_session_missing",
         sessionId: null,
       });
@@ -99,30 +99,30 @@ export async function handleAtlasOnboardingRequest(
     }
 
     const rawBody = await readRequestBody(req);
-    const payload = parseOnboardingPayload(rawBody);
-      const packet = await createAtlasSessionStartPacket({
-        stateDir: options.stateDir,
-        sessionId,
-        targetRepo: String(options.targetRepo || "").trim(),
-        objective: String(payload.objective || "").trim(),
-      });
+    const payload = parseWorkspaceSessionBriefPayload(rawBody);
+    const packet = await createAtlasSessionStartPacket({
+      stateDir: options.stateDir,
+      sessionId,
+      targetRepo: String(options.targetRepo || "").trim(),
+      objective: String(payload.objective || "").trim(),
+    });
 
-      writeJsonResponse(res, 200, {
-        ok: true,
-        ready: true,
-        sessionId,
-        packet,
-        started: true,
-      });
+    writeJsonResponse(res, 200, {
+      ok: true,
+      ready: true,
+      sessionId,
+      packet,
+      started: true,
+    });
   } catch (error) {
     const clarificationError = error instanceof AtlasClarificationError
       ? error
       : new AtlasClarificationError(
         String((error as Error)?.message || error),
         500,
-        "onboarding_failed",
+        "workspace_session_brief_failed",
       );
-    console.error(`[atlas] onboarding route failed: ${clarificationError.message}`);
+    console.error(`[atlas] workspace session brief route failed: ${clarificationError.message}`);
     writeJsonResponse(res, clarificationError.statusCode, {
       ok: false,
       error: clarificationError.message,

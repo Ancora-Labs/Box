@@ -60,6 +60,9 @@ async function writeStateFixture(
   tempRoot: string,
   workerSessions: Record<string, unknown>,
 ): Promise<string> {
+  const now = Date.now();
+  const pipelineUpdatedAt = new Date(now - 60_000).toISOString();
+  const workerActiveAt = new Date(now - 50_000).toISOString();
   const stateDir = path.join(tempRoot, "state");
   await fs.mkdir(stateDir, { recursive: true });
   await fs.writeFile(path.join(stateDir, "pipeline_progress.json"), JSON.stringify({
@@ -68,23 +71,23 @@ async function writeStateFixture(
     percent: 82,
     detail: "ATLAS is coordinating the current repo session.",
     steps: [],
-    updatedAt: "2026-04-22T08:15:00.000Z",
+    updatedAt: pipelineUpdatedAt,
     startedAt: "cycle-1",
   }), "utf8");
   await fs.writeFile(path.join(stateDir, "worker_cycle_artifacts.json"), JSON.stringify({
     schemaVersion: 1,
-    updatedAt: "2026-04-22T08:15:00.000Z",
+    updatedAt: pipelineUpdatedAt,
     latestCycleId: "cycle-1",
     cycles: {
       "cycle-1": {
         cycleId: "cycle-1",
-        updatedAt: "2026-04-22T08:15:00.000Z",
+        updatedAt: pipelineUpdatedAt,
         status: "in_progress",
         workerSessions,
         workerActivity: {
           "quality-worker": [
             {
-              at: "2026-04-22T08:14:00.000Z",
+              at: workerActiveAt,
               from: "quality-worker",
               status: "working",
               task: "Validated the home route detail contract",
@@ -110,18 +113,18 @@ describe("atlas home route", () => {
     try {
       const stateDir = await writeStateFixture(tempRoot, {
         "quality-worker": {
-          role: "quality-worker",
-          status: "working",
-          lastTask: "Validate the ATLAS route coverage",
-          lastActiveAt: "2026-04-22T08:14:00.000Z",
-          workerIdentityLabel: "Route quality worker",
-          currentStage: "snapshot_refresh",
-          currentStageLabel: "Refreshing detail",
-          latestMeaningfulAction: "Published the refreshed home detail contract",
-          latestMeaningfulActionAt: "2026-04-22T08:14:30.000Z",
-          currentBranch: "feat/home-detail",
-          createdPRs: ["https://example.com/pr/home"],
-          filesTouched: ["src/atlas/routes/home.ts"],
+            role: "quality-worker",
+            status: "working",
+            lastTask: "Validate the ATLAS route coverage",
+            lastActiveAt: new Date(Date.now() - 50_000).toISOString(),
+            workerIdentityLabel: "Route quality worker",
+            currentStage: "snapshot_refresh",
+            currentStageLabel: "Refreshing detail",
+            latestMeaningfulAction: "Published the refreshed home detail contract",
+            latestMeaningfulActionAt: new Date(Date.now() - 30_000).toISOString(),
+            currentBranch: "feat/home-detail",
+            createdPRs: ["https://example.com/pr/home"],
+            filesTouched: ["src/atlas/routes/home.ts"],
           resolvedRole: "quality-worker",
           logicalRole: "quality-worker",
         },
@@ -166,18 +169,18 @@ describe("atlas home route", () => {
     try {
       const stateDir = await writeStateFixture(tempRoot, {
         "quality-worker": {
-          role: "quality-worker",
-          status: "working",
-          lastTask: "Validate the ATLAS route coverage",
-          lastActiveAt: "2026-04-22T08:14:00.000Z",
-          workerIdentityLabel: "Route quality worker",
-          currentStage: "snapshot_refresh",
-          currentStageLabel: "Refreshing detail",
-          latestMeaningfulAction: "Published the refreshed home detail contract",
-          latestMeaningfulActionAt: "2026-04-22T08:14:30.000Z",
-          currentBranch: "feat/home-detail",
-          createdPRs: ["https://example.com/pr/home"],
-          filesTouched: ["src/atlas/routes/home.ts"],
+            role: "quality-worker",
+            status: "working",
+            lastTask: "Validate the ATLAS route coverage",
+            lastActiveAt: new Date(Date.now() - 50_000).toISOString(),
+            workerIdentityLabel: "Route quality worker",
+            currentStage: "snapshot_refresh",
+            currentStageLabel: "Refreshing detail",
+            latestMeaningfulAction: "Published the refreshed home detail contract",
+            latestMeaningfulActionAt: new Date(Date.now() - 30_000).toISOString(),
+            currentBranch: "feat/home-detail",
+            createdPRs: ["https://example.com/pr/home"],
+            filesTouched: ["src/atlas/routes/home.ts"],
           resolvedRole: "quality-worker",
           logicalRole: "quality-worker",
         },
@@ -236,10 +239,10 @@ describe("atlas home route", () => {
 
       assert.equal(res.statusCode, 200);
       assert.match(documentMarkup, /data-role="new-session-view"/);
-      assert.match(documentMarkup, /The selected session is waiting for its next live update/);
-      assert.match(documentMarkup, /Selected detail unavailable/);
-      assert.doesNotMatch(documentMarkup, /data-role="selected-session-view"/);
-      assert.doesNotMatch(documentMarkup, /missing-worker/);
+       assert.match(documentMarkup, /The selected session is waiting for its next live update/);
+       assert.match(documentMarkup, /Selected detail unavailable/);
+       assert.doesNotMatch(documentMarkup, /data-role="selected-session-view"/);
+       assert.doesNotMatch(documentMarkup, /missing-worker/);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }

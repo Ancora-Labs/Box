@@ -11,8 +11,20 @@ import {
   type AtlasHomeRouteOptions,
 } from "./routes/home.js";
 import { handleAtlasLifecycleRequest } from "./routes/lifecycle.js";
-import { handleAtlasOnboardingRequest } from "./routes/onboarding.js";
-import { handleAtlasSessionsRequest } from "./routes/sessions.js";
+import { handleAtlasWorkspaceSessionBriefRequest } from "./routes/onboarding.js";
+
+const ATLAS_WORKSPACE_SESSION_BRIEF_PATH = "/api/workspace/session-brief";
+const ATLAS_LEGACY_ONBOARDING_STATUS_PATH = "/api/onboarding/status";
+const ATLAS_LEGACY_ONBOARDING_SUBMIT_PATH = "/api/onboarding/clarify";
+
+function writeTemporaryRedirect(res: ServerResponse, location: string): void {
+  res.writeHead(307, {
+    location,
+    "cache-control": "no-store",
+    "content-type": "text/plain; charset=utf-8",
+  });
+  res.end(`Temporary Redirect: ${location}`);
+}
 
 export const ATLAS_DEFAULT_PORT = 8788;
 
@@ -56,8 +68,19 @@ async function routeAtlasRequest(
   const url = new URL(req.url || "/", "http://127.0.0.1");
 
   try {
-    if (url.pathname === "/api/onboarding/status" || url.pathname === "/api/onboarding/clarify") {
-      await handleAtlasOnboardingRequest(req, res, {
+    if (url.pathname === ATLAS_LEGACY_ONBOARDING_STATUS_PATH || url.pathname === ATLAS_LEGACY_ONBOARDING_SUBMIT_PATH) {
+      const canonicalMethod = url.pathname === ATLAS_LEGACY_ONBOARDING_STATUS_PATH ? "GET" : "POST";
+      const pathname = ATLAS_WORKSPACE_SESSION_BRIEF_PATH;
+      const redirectUrl = new URL(pathname, "http://127.0.0.1");
+      if (canonicalMethod === "GET") {
+        redirectUrl.search = url.search;
+      }
+      writeTemporaryRedirect(res, redirectUrl.pathname + redirectUrl.search);
+      return;
+    }
+
+    if (url.pathname === ATLAS_WORKSPACE_SESSION_BRIEF_PATH) {
+      await handleAtlasWorkspaceSessionBriefRequest(req, res, {
         stateDir: options.stateDir,
         sessionId: options.desktopSessionId || undefined,
         targetRepo: options.targetRepo,
@@ -78,7 +101,14 @@ async function routeAtlasRequest(
     }
 
     if (url.pathname === "/sessions") {
-      await handleAtlasSessionsRequest(req, res, options);
+      if (String(req.method || "GET").toUpperCase() !== "GET") {
+        res.writeHead(405, { "content-type": "text/html; charset=utf-8" });
+        res.end("<!doctype html><html><body><h1>Method Not Allowed</h1></body></html>");
+        return;
+      }
+      const redirectUrl = new URL("/", "http://127.0.0.1");
+      redirectUrl.search = url.search;
+      writeTemporaryRedirect(res, redirectUrl.pathname + redirectUrl.search);
       return;
     }
 

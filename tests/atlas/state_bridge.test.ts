@@ -64,12 +64,14 @@ describe("state_bridge", () => {
     assert.deepEqual(sessions.Athena.pullRequests, ["https://example.com/pr/1"]);
     assert.deepEqual(sessions.Athena.touchedFiles, ["src/atlas/state_bridge.ts", "tests/atlas/state_bridge.test.ts"]);
     assert.equal(sessions.Athena.lastThinking, "reviewing failures");
-    assert.equal(sessions.Athena.freshnessLabel, "Live update recorded");
+    assert.equal(sessions.Athena.freshnessState, "stale");
+    assert.equal(sessions.Athena.freshnessLabel, "Live update stale");
+    assert.match(sessions.Athena.freshnessPolicyDetail, /older than 5 minutes/i);
     assert.equal(sessions.Athena.logStateLabel, "Waiting for live log");
-    assert.equal(sessions.Athena.liveStatusTone, "active");
-    assert.equal(sessions.Athena.liveStatusLabel, "Live");
-    assert.equal(sessions.Athena.liveStatusPulse, true);
-    assert.match(sessions.Athena.liveStatusAssistiveText, /currently running live work/);
+    assert.equal(sessions.Athena.liveStatusTone, "attention");
+    assert.equal(sessions.Athena.liveStatusLabel, "Stale");
+    assert.equal(sessions.Athena.liveStatusPulse, false);
+    assert.match(sessions.Athena.liveStatusAssistiveText, /stale recorded context/);
     assert.equal(sessions.Athena.canArchive, false);
     assert.equal(sessions.Prometheus.statusLabel, "Needs attention");
     assert.equal(sessions.Prometheus.readinessLabel, "Needs your input");
@@ -168,7 +170,9 @@ describe("state_bridge", () => {
         logSource: null,
         logUpdatedAt: null,
         freshnessAt: null,
+        freshnessState: "unknown",
         freshnessLabel: "Waiting for live update",
+        freshnessPolicyDetail: "ATLAS does not have a current live update timestamp for this session yet.",
         logStateLabel: "Waiting for live log",
         liveStatusTone: "idle",
         liveStatusLabel: "Ready",
@@ -329,6 +333,8 @@ describe("state_bridge", () => {
       ]);
       assert.equal(sessions["quality-worker"].logSource, "worker_cycle_artifacts.json");
       assert.equal(sessions["quality-worker"].freshnessAt, "2026-04-21T11:58:30.000Z");
+      assert.equal(sessions["quality-worker"].freshnessState, "stale");
+      assert.equal(sessions["quality-worker"].freshnessLabel, "Live update stale");
 
       assert.equal(sessions.Atlas.status, "idle");
       assert.equal(sessions.Atlas.readinessLabel, "Ready to start");
