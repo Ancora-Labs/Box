@@ -6,6 +6,10 @@ import { describe, it } from "node:test";
 
 import { ATLAS_WINDOWS_APP_ID } from "../../electron/single_instance.ts";
 import {
+  buildAtlasDesktopLocationPath,
+  parseAtlasDesktopLocationFromUrl,
+} from "../../src/atlas/desktop_state.ts";
+import {
   createAtlasDesktopPackageLayout,
   publishAtlasDesktopPortableRelease,
   resetAtlasDesktopReleaseSurface,
@@ -137,6 +141,26 @@ describe("atlas regression fence", () => {
       () => createAtlasDesktopPackageLayout(path.join("C:", "ATLAS Release Root"), "   "),
       /non-empty string/i,
     );
+  });
+
+  it("keeps the root workspace route authoritative for session selection and New Session reset links", () => {
+    assert.equal(buildAtlasDesktopLocationPath(), "/");
+    assert.equal(
+      buildAtlasDesktopLocationPath({ surface: "workspace", focusedSessionRole: "quality-worker" }),
+      "/?focusRole=quality-worker",
+    );
+    assert.deepEqual(parseAtlasDesktopLocationFromUrl("/"), {
+      surface: "workspace",
+      focusedSessionRole: null,
+    });
+    assert.deepEqual(parseAtlasDesktopLocationFromUrl("/?focusRole=quality-worker"), {
+      surface: "workspace",
+      focusedSessionRole: "quality-worker",
+    });
+    assert.deepEqual(parseAtlasDesktopLocationFromUrl("/sessions?focusRole=quality-worker"), {
+      surface: "workspace",
+      focusedSessionRole: "quality-worker",
+    });
   });
 
   it("keeps dist\\ATLAS as the only Windows handoff surface after packaging", async () => {

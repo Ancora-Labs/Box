@@ -142,6 +142,10 @@ describe("atlas renderer", () => {
     assert.match(documentMarkup, /data-role="brand-reset"/);
     assert.match(documentMarkup, /data-role="new-session-link"/);
     assert.match(documentMarkup, /data-role="session-rail"/);
+    assert.match(documentMarkup, /href="\/" data-role="brand-reset"/);
+    assert.match(documentMarkup, /href="\/"[\s\S]*?data-role="new-session-link"/);
+    assert.match(documentMarkup, /href="\/\?focusRole=Athena"[\s\S]*?data-session-role="Athena"/);
+    assert.match(documentMarkup, /href="\/\?focusRole=Prometheus"[\s\S]*?data-session-role="Prometheus"/);
     assert.match(documentMarkup, /data-role="new-session-view"/);
     assert.match(documentMarkup, /Start a new session from a clean workspace/);
     assert.match(documentMarkup, /What should ATLAS do next\?/);
@@ -164,6 +168,7 @@ describe("atlas renderer", () => {
     assert.match(documentMarkup, /data-role="selected-session-view"/);
     assert.match(documentMarkup, /data-role="selected-session-name">Athena/);
     assert.match(documentMarkup, /data-role="selected-session-status-light"/);
+    assert.match(documentMarkup, /live-status-active[\s\S]*?data-role="selected-session-status-light"/);
     assert.match(documentMarkup, /live-status-pulse/);
     assert.match(documentMarkup, /aria-label="Athena is currently running live work\."/);
     assert.match(documentMarkup, /data-role="selected-session-identity"/);
@@ -177,6 +182,10 @@ describe("atlas renderer", () => {
     assert.match(documentMarkup, /feat\/atlas-home/);
     assert.match(documentMarkup, /https:\/\/example\.com\/pr\/1/);
     assert.match(documentMarkup, /focused panel refreshed/);
+    assert.match(documentMarkup, /href="\/"[\s\S]*?data-role="new-session-link"/);
+    assert.match(documentMarkup, /data-role="selected-session-actions"[\s\S]*?<a class="action-button primary" href="\/">New Session<\/a>/);
+    assert.match(documentMarkup, /live-status-attention[\s\S]*?data-role="session-row-status-light"/);
+    assert.match(documentMarkup, /aria-label="Prometheus needs attention before it can continue\."/);
     assert.doesNotMatch(documentMarkup, /data-role="product-composer-input"/);
     assert.doesNotMatch(documentMarkup, /Inline session ledger|Runtime status|dashboard/i);
   });

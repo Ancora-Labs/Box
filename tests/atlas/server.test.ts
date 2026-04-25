@@ -227,31 +227,42 @@ describe("atlas server", () => {
   it("serves the home and sessions routes from the dedicated ATLAS server", async () => {
     const homeResponse = await requestText(port, "/");
     const sessionsResponse = await requestText(port, "/sessions");
+    const focusedHomeResponse = await requestText(port, "/?focusRole=quality-worker");
+    const homeMarkup = homeResponse.text.split("<script>")[0] || homeResponse.text;
+    const sessionsMarkup = sessionsResponse.text.split("<script>")[0] || sessionsResponse.text;
+    const focusedHomeMarkup = focusedHomeResponse.text.split("<script>")[0] || focusedHomeResponse.text;
 
     assert.equal(homeResponse.status, 200);
-    assert.match(homeResponse.text, /<title>ATLAS Workspace<\/title>/);
-    assert.match(homeResponse.text, /aria-label="ATLAS desktop surface"/);
-    assert.match(homeResponse.text, /aria-label="ATLAS desktop sidebar"/);
-    assert.match(homeResponse.text, /aria-label="ATLAS work canvas"/);
-    assert.match(homeResponse.text, /Start a new session from a clean workspace/);
-    assert.match(homeResponse.text, /data-role="new-session-view"/);
-    assert.match(homeResponse.text, /snapshot endpoint ready/);
-    assert.match(homeResponse.text, /data-role="product-composer-input"/);
+    assert.match(homeMarkup, /<title>ATLAS Workspace<\/title>/);
+    assert.match(homeMarkup, /aria-label="ATLAS desktop surface"/);
+    assert.match(homeMarkup, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(homeMarkup, /aria-label="ATLAS work canvas"/);
+    assert.match(homeMarkup, /Start a new session from a clean workspace/);
+    assert.match(homeMarkup, /data-role="new-session-view"/);
+    assert.match(homeMarkup, /data-role="session-row-status-light"/);
+    assert.match(homeMarkup, /data-role="product-composer-input"/);
+    assert.match(homeMarkup, /href="\/\?focusRole=quality-worker"[\s\S]*?data-session-role="quality-worker"/);
     assert.match(homeResponse.text, /bridge\?\.refreshSnapshot/);
     assert.match(homeResponse.text, /ATLAS snapshot refresh requires the Electron desktop bridge\./);
     assert.doesNotMatch(homeResponse.text, /default browser|localhost page/i);
 
+    assert.equal(focusedHomeResponse.status, 200);
+    assert.match(focusedHomeMarkup, /data-role="selected-session-view"/);
+    assert.match(focusedHomeMarkup, /live-status-active[\s\S]*?data-role="selected-session-status-light"/);
+    assert.match(focusedHomeMarkup, /data-role="selected-session-actions"[\s\S]*?<a class="action-button primary" href="\/">New Session<\/a>/);
+    assert.doesNotMatch(focusedHomeMarkup, /data-role="product-composer-input"/);
+
     assert.equal(sessionsResponse.status, 200);
-    assert.match(sessionsResponse.text, /<title>ATLAS Workspace<\/title>/);
-    assert.match(sessionsResponse.text, /aria-label="ATLAS desktop surface"/);
-    assert.match(sessionsResponse.text, /aria-label="ATLAS desktop sidebar"/);
-    assert.match(sessionsResponse.text, /aria-label="ATLAS work canvas"/);
-    assert.match(sessionsResponse.text, /data-role="new-session-view"/);
-    assert.match(sessionsResponse.text, /What should ATLAS do next\?/);
-    assert.match(sessionsResponse.text, />ATLAS control</);
-    assert.match(sessionsResponse.text, />Quality lane</);
-    assert.match(sessionsResponse.text, /2 tracked sessions/);
-    assert.match(sessionsResponse.text, /data-role="product-composer-input"/);
+    assert.match(sessionsMarkup, /<title>ATLAS Workspace<\/title>/);
+    assert.match(sessionsMarkup, /aria-label="ATLAS desktop surface"/);
+    assert.match(sessionsMarkup, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(sessionsMarkup, /aria-label="ATLAS work canvas"/);
+    assert.match(sessionsMarkup, /data-role="new-session-view"/);
+    assert.match(sessionsMarkup, /What should ATLAS do next\?/);
+    assert.match(sessionsMarkup, />Quality lane</);
+    assert.match(sessionsMarkup, /2 tracked sessions/);
+    assert.match(sessionsMarkup, /data-role="product-composer-input"/);
+    assert.match(sessionsMarkup, /href="\/"[\s\S]*?data-role="new-session-link"/);
     assert.doesNotMatch(sessionsResponse.text, /default browser|localhost page/i);
     assert.doesNotMatch(sessionsResponse.text, /BOX Mission Control/i);
   });
@@ -367,6 +378,33 @@ describe("atlas server", () => {
 
     const legacyResponse = await requestText(port, "/api/snapshot?view=sessions&focusRole=quality-worker");
     assert.equal(legacyResponse.status, 200);
+  });
+
+  it("keeps snapshot continuity live-only and clears missing focus instead of serving stale selected detail", async () => {
+    const snapshotResponse = await requestText(port, "/api/atlas/snapshot?focusRole=missing-worker");
+    assert.equal(snapshotResponse.status, 200);
+
+    const payload = JSON.parse(snapshotResponse.text) as {
+      ok: boolean;
+      continuitySource: string;
+      continuityDetail: string;
+      pageData: {
+        focusedSessionRole: string | null;
+        missingFocusedSnapshot: boolean;
+        continuityStatusLabel: string;
+        continuityStatusDetail: string;
+        sessions: Array<{ role: string; }>;
+      };
+    };
+
+    assert.equal(payload.ok, true);
+    assert.equal(payload.continuitySource, "live");
+    assert.equal(payload.pageData.focusedSessionRole, null);
+    assert.equal(payload.pageData.missingFocusedSnapshot, true);
+    assert.equal(payload.pageData.continuityStatusLabel, "Selected detail unavailable");
+    assert.match(payload.continuityDetail, /falls back to the blank new-session view instead of showing stale detail/);
+    assert.match(payload.pageData.continuityStatusDetail, /falls back to the blank new-session view instead of showing stale detail/);
+    assert.equal(payload.pageData.sessions.some((session) => session.role === "missing-worker"), false);
   });
 
   it("rejects desktop snapshot requests without the configured desktop token", async () => {
@@ -545,7 +583,7 @@ describe("atlas server", () => {
       assert.equal(clarifyResponse.status, 400);
       assert.match(clarifyResponse.text, /"code":"missing_objective"/);
       assert.equal(blockedHome.status, 200);
-      assert.match(blockedHome.text, /Where should we start\?/);
+      assert.match(blockedHome.text, /Where should ATLAS start\?/);
       assert.equal(onboardingStatus.status, 200);
       assert.match(onboardingStatus.text, /"ready":true/);
       assert.match(onboardingStatus.text, /"started":false/);

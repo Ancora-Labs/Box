@@ -155,6 +155,7 @@ describe("atlas sessions route", () => {
       assert.match(documentMarkup, /<title>ATLAS Workspace<\/title>/);
       assert.match(documentMarkup, /data-role="selected-session-view"/);
       assert.match(documentMarkup, /data-role="selected-session-status-light"/);
+      assert.match(documentMarkup, /live-status-attention[\s\S]*?data-role="selected-session-status-light"/);
       assert.match(documentMarkup, /Quality review worker/);
       assert.match(documentMarkup, /Waiting for approval/);
       assert.match(documentMarkup, /Waiting for review feedback/);
@@ -162,6 +163,10 @@ describe("atlas sessions route", () => {
       assert.match(documentMarkup, /feat\/quality-review/);
       assert.match(documentMarkup, /https:\/\/example\.com\/pr\/1/);
       assert.match(documentMarkup, /src\/atlas\/server\.ts/);
+      assert.match(documentMarkup, /href="\/" data-role="brand-reset"/);
+      assert.match(documentMarkup, /href="\/"[\s\S]*?data-role="new-session-link"/);
+      assert.match(documentMarkup, /href="\/\?focusRole=quality-worker"[\s\S]*?data-session-role="quality-worker"/);
+      assert.match(documentMarkup, /data-role="selected-session-actions"[\s\S]*?<a class="action-button primary" href="\/">New Session<\/a>/);
       assert.match(documentMarkup, />Pause lane</);
       assert.match(documentMarkup, />Archive session</);
       assert.match(documentMarkup, /method="post" action="\/lifecycle"/);
@@ -214,6 +219,7 @@ describe("atlas sessions route", () => {
 
       assert.equal(res.statusCode, 200);
       assert.match(documentMarkup, /data-role="new-session-view"/);
+      assert.match(documentMarkup, /href="\/"[\s\S]*?data-role="new-session-link"/);
       assert.match(documentMarkup, /The selected session is waiting for its next live update/);
       assert.match(documentMarkup, /Selected detail unavailable/);
       assert.doesNotMatch(documentMarkup, /missing-worker/);
