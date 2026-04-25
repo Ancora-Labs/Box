@@ -81,16 +81,30 @@ async function writeStateFixture(
         updatedAt: "2026-04-22T08:25:00.000Z",
         status: "in_progress",
         workerSessions,
-        workerActivity: {},
+        workerActivity: {
+          "quality-worker": [
+            {
+              at: "2026-04-22T08:24:00.000Z",
+              from: "quality-worker",
+              status: "blocked",
+              task: "Waiting for review feedback",
+            },
+          ],
+        },
         completedTaskIds: [],
       },
     },
   }), "utf8");
+  await fs.writeFile(path.join(stateDir, "live_worker_quality-worker.log"), [
+    "[leadership_live]",
+    "waiting for review feedback",
+    "rail detail refresh ready",
+  ].join("\n"), "utf8");
   return stateDir;
 }
 
 describe("atlas sessions route", () => {
-  it("returns a trust-first work ledger with readiness derived from worker state", async () => {
+  it("returns the single-workspace ledger with inline session detail and lifecycle actions", async () => {
     const tempRoot = await createTempRoot();
 
     try {
@@ -106,17 +120,22 @@ describe("atlas sessions route", () => {
           status: "blocked",
           lastTask: "Waiting for review feedback",
           lastActiveAt: "2026-04-22T08:24:00.000Z",
+          currentBranch: "feat/quality-review",
+          createdPRs: ["https://example.com/pr/1"],
+          filesTouched: ["src/atlas/server.ts"],
+          resolvedRole: "quality-worker",
+          logicalRole: "quality-worker",
         },
         "integration-worker": {
           role: "integration-worker",
           status: "partial",
           lastTask: "Resume the standalone server patch",
           lastActiveAt: "2026-04-22T08:20:00.000Z",
-          createdPRs: ["https://example.com/pr/1"],
+          createdPRs: ["https://example.com/pr/2"],
           filesTouched: ["src/atlas/server.ts"],
         },
       });
-      const req = createRequest();
+      const req = createRequest("GET", "/sessions?focusRole=quality-worker");
       const res = createResponseCapture();
 
       await handleAtlasSessionsRequest(req, res, {
@@ -128,19 +147,21 @@ describe("atlas sessions route", () => {
       assert.equal(res.statusCode, 200);
       assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
       assert.match(res.body, /<title>ATLAS Sessions<\/title>/);
-      assert.match(res.body, /Trust-first work ledger/);
       assert.match(res.body, /aria-label="ATLAS desktop surface"/);
       assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
       assert.match(res.body, /aria-label="ATLAS work canvas"/);
-      assert.match(res.body, />Tracked sessions</);
-      assert.match(res.body, /Session ledger keeps delivery trust anchored in the desktop lifecycle\./);
-      assert.match(res.body, />ATLAS control</);
-      assert.match(res.body, />Quality lane</);
-      assert.match(res.body, />Integration lane</);
+      assert.match(res.body, /Trust-first work ledger/);
+      assert.match(res.body, /Focused session detail/);
+      assert.match(res.body, /quality-worker/);
+      assert.match(res.body, /Waiting for review feedback/);
+      assert.match(res.body, /rail detail refresh ready/);
+      assert.match(res.body, /feat\/quality-review/);
+      assert.match(res.body, /https:\/\/example\.com\/pr\/1/);
+      assert.match(res.body, /src\/atlas\/server\.ts/);
       assert.match(res.body, />3 tracked sessions</);
       assert.match(res.body, />2 resumable</);
-      assert.match(res.body, />Needs attention · Needs your input</);
-      assert.match(res.body, />Ready · Ready to continue</);
+      assert.match(res.body, />1 needing input</);
+      assert.match(res.body, />0 paused lanes</);
       assert.match(res.body, />Pause lane</);
       assert.match(res.body, />Archive session</);
       assert.match(res.body, /method="post" action="\/lifecycle"/);
@@ -178,12 +199,6 @@ describe("atlas sessions route", () => {
           lastTask: "",
           lastActiveAt: "2026-04-22T08:10:00.000Z",
         },
-        "quality-worker": {
-          role: "quality-worker",
-          status: "working",
-          lastTask: "Validate the product shell recovery flow",
-          lastActiveAt: "2026-04-22T08:24:00.000Z",
-        },
       });
       const req = createRequest("GET", "/sessions?focusRole=missing-worker");
       const res = createResponseCapture();
@@ -195,14 +210,15 @@ describe("atlas sessions route", () => {
       });
 
       assert.equal(res.statusCode, 200);
-      assert.match(res.body, /Focus restored without a live session snapshot/);
-      assert.match(res.body, /The saved focus target is still waiting on its next live session snapshot\./);
+      assert.match(res.body, /Start the next session while the old focus recovers/);
+      assert.match(res.body, /The previous focus is missing its next live snapshot, but you can still write the next outcome here and keep the workspace moving\./);
       assert.match(res.body, />Clear focus</);
       assert.doesNotMatch(res.body, /missing-worker/);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
   });
+
   it("[NEGATIVE] keeps the session ledger shell stable when state is sparse", async () => {
     const tempRoot = await createTempRoot();
 
@@ -223,9 +239,7 @@ describe("atlas sessions route", () => {
       assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
       assert.match(res.body, /aria-label="ATLAS work canvas"/);
       assert.match(res.body, /No session state is available yet\./);
-      assert.match(res.body, />0 tracked sessions</);
-      assert.match(res.body, />0 resumable</);
-      assert.match(res.body, /Desktop composer/);
+      assert.match(res.body, /No live session focus yet/);
       assert.doesNotMatch(res.body, /dashboard-card|BOX Mission Control|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });

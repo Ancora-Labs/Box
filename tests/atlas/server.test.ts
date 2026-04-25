@@ -121,15 +121,32 @@ describe("atlas server", () => {
               status: "working",
               lastTask: "Wire the ATLAS server boundary",
               lastActiveAt: "2026-04-21T12:00:00.000Z",
+              currentBranch: "feat/server-snapshot",
               createdPRs: ["https://example.com/pr/1"],
               filesTouched: ["src/atlas/server.ts", "src/atlas/routes/sessions.ts"],
+              resolvedRole: "quality-worker",
+              logicalRole: "quality-worker",
             },
           },
-          workerActivity: {},
+          workerActivity: {
+            "quality-worker": [
+              {
+                at: "2026-04-21T12:00:00.000Z",
+                from: "quality-worker",
+                status: "working",
+                task: "Wired the ATLAS snapshot route",
+              },
+            ],
+          },
           completedTaskIds: [],
         },
       },
     }), "utf8");
+    await fs.writeFile(path.join(stateDir, "live_worker_quality-worker.log"), [
+      "[leadership_live]",
+      "snapshot endpoint ready",
+      "focused detail refresh ready",
+    ].join("\n"), "utf8");
 
     await fs.writeFile(path.join(stateDir, "pipeline_progress.json"), JSON.stringify({
       stage: "workers_running",
@@ -202,14 +219,15 @@ describe("atlas server", () => {
     assert.equal(homeResponse.status, 200);
     assert.match(homeResponse.text, /<title>ATLAS Home<\/title>/);
     assert.match(homeResponse.text, /aria-label="ATLAS desktop surface"/);
-    assert.match(homeResponse.text, /aria-label="ATLAS desktop sidebar"/);
+    assert.match(homeResponse.text, /aria-label="ATLAS session sidebar"/);
     assert.match(homeResponse.text, /aria-label="ATLAS work canvas"/);
-    assert.match(homeResponse.text, /ATLAS keeps the live delivery state in the desktop window\./);
-    assert.match(homeResponse.text, /Desktop continuity/);
-    assert.match(homeResponse.text, /Ancora-Labs\/ATLAS/);
+    assert.match(homeResponse.text, /What should ATLAS do next\?/);
+    assert.match(homeResponse.text, /Focused session detail/);
+    assert.match(homeResponse.text, /What should ATLAS do next\?/);
+    assert.match(homeResponse.text, /Focused session detail/);
+    assert.match(homeResponse.text, /snapshot endpoint ready/);
     assert.match(homeResponse.text, /data-role="product-composer-input"/);
-    assert.match(homeResponse.text, /Wire the ATLAS server boundary/);
-    assert.match(homeResponse.text, />Stop runtime</);
+    assert.match(homeResponse.text, /window\.fetch\("\/api\/snapshot\?"/);
     assert.doesNotMatch(homeResponse.text, /default browser|localhost page/i);
 
     assert.equal(sessionsResponse.status, 200);
@@ -217,7 +235,8 @@ describe("atlas server", () => {
     assert.match(sessionsResponse.text, /aria-label="ATLAS desktop surface"/);
     assert.match(sessionsResponse.text, /aria-label="ATLAS desktop sidebar"/);
     assert.match(sessionsResponse.text, /aria-label="ATLAS work canvas"/);
-    assert.match(sessionsResponse.text, />Tracked sessions</);
+    assert.match(sessionsResponse.text, /Focused session detail/);
+    assert.match(sessionsResponse.text, /Readable log excerpt/);
     assert.match(sessionsResponse.text, />ATLAS control</);
     assert.match(sessionsResponse.text, />Quality lane</);
     assert.match(sessionsResponse.text, />2 tracked sessions</);
@@ -226,7 +245,95 @@ describe("atlas server", () => {
     assert.doesNotMatch(sessionsResponse.text, /BOX Mission Control/i);
   });
 
-  it("blocks home handoff until the session-bound clarification packet exists and keeps the desktop continuity surface stable after relaunch", async () => {
+  it("serves a live JSON snapshot that reflects updated session detail and log excerpts", async () => {
+    const firstResponse = await requestText(port, "/api/snapshot?view=sessions&focusRole=quality-worker");
+    assert.equal(firstResponse.status, 200);
+    const firstPayload = JSON.parse(firstResponse.text) as {
+      ok: boolean;
+      pageData: {
+        pipelineDetail: string;
+        sessions: Array<{
+          role: string;
+          latestMeaningfulAction: string;
+          logExcerpt: string[];
+          currentBranch: string | null;
+          touchedFiles: string[];
+        }>;
+      };
+    };
+    assert.equal(firstPayload.ok, true);
+    assert.equal(firstPayload.pageData.sessions[1]?.role, "quality-worker");
+    assert.equal(firstPayload.pageData.sessions[1]?.currentBranch, "feat/server-snapshot");
+    assert.equal(firstPayload.pageData.sessions[1]?.latestMeaningfulAction, "Wired the ATLAS snapshot route");
+    assert.equal(firstPayload.pageData.sessions[1]?.logExcerpt.at(-1), "focused detail refresh ready");
+    assert.equal(firstPayload.pageData.sessions[1]?.touchedFiles[0], "src/atlas/server.ts");
+
+    await fs.writeFile(path.join(stateDir, "pipeline_progress.json"), JSON.stringify({
+      stage: "workers_finishing",
+      stageLabel: "Workers Finishing",
+      percent: 95,
+      detail: "Publishing the live refresh contract",
+      steps: [],
+      updatedAt: "2026-04-21T12:05:00.000Z",
+      startedAt: "cycle-1",
+    }), "utf8");
+    await fs.writeFile(path.join(stateDir, "worker_cycle_artifacts.json"), JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: "2026-04-21T12:05:00.000Z",
+      latestCycleId: "cycle-1",
+      cycles: {
+        "cycle-1": {
+          cycleId: "cycle-1",
+          updatedAt: "2026-04-21T12:05:00.000Z",
+          status: "in_progress",
+          workerSessions: {
+            Atlas: {
+              role: "Atlas",
+              status: "idle",
+              lastTask: "",
+              lastActiveAt: "2026-04-21T11:15:00.000Z",
+            },
+            "quality-worker": {
+              role: "quality-worker",
+              status: "working",
+              lastTask: "Refresh the focused session surface",
+              lastActiveAt: "2026-04-21T12:05:00.000Z",
+              currentBranch: "feat/live-refresh",
+              createdPRs: ["https://example.com/pr/1"],
+              filesTouched: ["src/atlas/routes/home.ts", "src/atlas/renderer.ts"],
+            },
+          },
+          workerActivity: {
+            "quality-worker": [
+              {
+                at: "2026-04-21T12:05:00.000Z",
+                from: "quality-worker",
+                status: "working",
+                task: "Refreshed the focused session surface",
+              },
+            ],
+          },
+          completedTaskIds: [],
+        },
+      },
+    }), "utf8");
+    await fs.writeFile(path.join(stateDir, "live_worker_quality-worker.log"), [
+      "[leadership_live]",
+      "snapshot endpoint ready",
+      "refreshed focused detail and log excerpt",
+    ].join("\n"), "utf8");
+
+    const secondResponse = await requestText(port, "/api/snapshot?view=sessions&focusRole=quality-worker");
+    assert.equal(secondResponse.status, 200);
+    const secondPayload = JSON.parse(secondResponse.text) as typeof firstPayload;
+    assert.equal(secondPayload.pageData.pipelineDetail, "Publishing the live refresh contract");
+    assert.equal(secondPayload.pageData.sessions[1]?.currentBranch, "feat/live-refresh");
+    assert.equal(secondPayload.pageData.sessions[1]?.latestMeaningfulAction, "Refreshed the focused session surface");
+    assert.equal(secondPayload.pageData.sessions[1]?.logExcerpt.at(-1), "refreshed focused detail and log excerpt");
+    assert.equal(secondPayload.pageData.sessions[1]?.touchedFiles[0], "src/atlas/routes/home.ts");
+  });
+
+  it("keeps onboarding status session-bound while the home workspace remains available after relaunch", async () => {
     const gatedRoot = await createTempRoot();
     const gatedStateDir = path.join(gatedRoot, "state");
     await fs.mkdir(gatedStateDir, { recursive: true });
@@ -277,12 +384,12 @@ describe("atlas server", () => {
 
     try {
       const blockedHome = await requestText(gatedPort, "/");
-      assert.equal(blockedHome.status, 412);
-      assert.match(blockedHome.text, /Finish clarification in the ATLAS desktop window/i);
+      assert.equal(blockedHome.status, 200);
+      assert.match(blockedHome.text, /What should ATLAS do next\?/);
 
       const blockedSessions = await requestText(gatedPort, "/sessions?focusRole=quality-worker");
-      assert.equal(blockedSessions.status, 412);
-      assert.match(blockedSessions.text, /Finish clarification in the ATLAS desktop window/i);
+      assert.equal(blockedSessions.status, 200);
+      assert.match(blockedSessions.text, /Focused session detail/);
 
       const onboardingStatus = await requestText(gatedPort, "/api/onboarding/status");
       assert.equal(onboardingStatus.status, 200);
@@ -296,21 +403,21 @@ describe("atlas server", () => {
 
       const unblockedHome = await requestText(gatedPort, "/");
       assert.equal(unblockedHome.status, 200);
-      assert.match(unblockedHome.text, /Desktop continuity/);
-      assert.match(unblockedHome.text, /ATLAS keeps the live delivery state in the desktop window\./);
+      assert.match(unblockedHome.text, /What should ATLAS do next\?/);
+      assert.match(unblockedHome.text, /Focused session detail/);
 
       const repeatHome = await requestText(gatedPort, "/");
       const repeatOnboardingStatus = await requestText(gatedPort, "/api/onboarding/status");
 
       assert.equal(repeatHome.status, 200);
-      assert.match(repeatHome.text, /Active delivery focus/);
+      assert.match(repeatHome.text, /data-role="product-composer-input"/);
       assert.doesNotMatch(repeatHome.text, /default browser|localhost page/i);
       assert.equal(repeatOnboardingStatus.status, 200);
       assert.match(repeatOnboardingStatus.text, /"ready":true/);
 
       const focusedSessions = await requestText(gatedPort, "/sessions?focusRole=atlas");
       assert.equal(focusedSessions.status, 200);
-      assert.match(focusedSessions.text, />Focused workspace</);
+      assert.match(focusedSessions.text, /Focused session detail/);
     } finally {
       if (gatedServer.listening) {
         await new Promise<void>((resolve) => {
@@ -321,7 +428,7 @@ describe("atlas server", () => {
     }
   });
 
-  it("[NEGATIVE] keeps onboarding blocked when clarification refresh fails and does not write a packet", async () => {
+  it("[NEGATIVE] keeps onboarding status unready when clarification refresh fails and does not write a packet", async () => {
     const tempRoot = await createTempRoot();
     const stateDir = path.join(tempRoot, "state");
     await fs.mkdir(stateDir, { recursive: true });
@@ -371,8 +478,8 @@ describe("atlas server", () => {
       assert.equal(clarifyResponse.status, 502);
       assert.match(clarifyResponse.text, /"code":"clarification_invocation_failed"/);
       assert.match(clarifyResponse.text, /Clarification provider unavailable\./);
-      assert.equal(blockedHome.status, 412);
-      assert.match(blockedHome.text, /Finish clarification in the ATLAS desktop window/i);
+      assert.equal(blockedHome.status, 200);
+      assert.match(blockedHome.text, /Where should we start\?/);
       assert.equal(onboardingStatus.status, 200);
       assert.match(onboardingStatus.text, /"ready":false/);
       await assert.rejects(
@@ -442,9 +549,9 @@ describe("atlas server", () => {
     const response = await requestText(port, "/sessions?focusRole=missing-worker");
 
     assert.equal(response.status, 200);
-    assert.match(response.text, />Tracked sessions</);
-    assert.match(response.text, /Focus restored without a live session snapshot/);
-    assert.match(response.text, /The saved focus target is still waiting on its next live session snapshot\./);
+    assert.match(response.text, /Focused session detail/);
+    assert.match(response.text, /Start the next session while the old focus recovers/);
+    assert.match(response.text, /The previous focus is missing its next live snapshot, but you can still write the next outcome here and keep the workspace moving\./);
     assert.match(response.text, />Clear focus</);
     assert.doesNotMatch(response.text, /missing-worker/);
   });
@@ -470,7 +577,7 @@ describe("atlas server", () => {
       assert.match(homeResponse.text, /data-role="product-composer-input"/);
       assert.equal(sessionsResponse.status, 200);
       assert.match(sessionsResponse.text, /No session state is available yet\./);
-      assert.match(sessionsResponse.text, /Desktop composer/);
+      assert.match(sessionsResponse.text, /Focused session detail/);
       assert.doesNotMatch(`${homeResponse.text}\n${sessionsResponse.text}`, /dashboard-card|window-controls|traffic-light/i);
     } finally {
       if (sparseServer.listening) {

@@ -56,8 +56,13 @@ describe("state_bridge", () => {
     assert.equal(sessions.Athena.statusLabel, "In progress");
     assert.equal(sessions.Athena.readinessLabel, "In progress");
     assert.equal(sessions.Athena.lane, null);
+    assert.equal(sessions.Athena.workerIdentityLabel, "Athena");
+    assert.equal(sessions.Athena.currentStageLabel, "Working");
+    assert.equal(sessions.Athena.latestMeaningfulAction, "Validate the regression suite");
     assert.equal(sessions.Athena.pullRequestCount, 1);
     assert.equal(sessions.Athena.touchedFileCount, 2);
+    assert.deepEqual(sessions.Athena.pullRequests, ["https://example.com/pr/1"]);
+    assert.deepEqual(sessions.Athena.touchedFiles, ["src/atlas/state_bridge.ts", "tests/atlas/state_bridge.test.ts"]);
     assert.equal(sessions.Athena.lastThinking, "reviewing failures");
     assert.equal(sessions.Athena.canArchive, false);
     assert.equal(sessions.Prometheus.statusLabel, "Needs attention");
@@ -93,10 +98,13 @@ describe("state_bridge", () => {
     assert.equal(sessions.Athena.statusLabel, "Ready");
     assert.equal(sessions.Athena.readinessLabel, "Ready to continue");
     assert.equal(sessions.Athena.isResumable, true);
+    assert.equal(sessions.Athena.latestMeaningfulAction, "Left follow-up notes");
+    assert.equal(sessions.Athena.recentActions[0]?.statusLabel, "Ready");
 
     assert.equal(sessions.Hermes.status, "error");
     assert.equal(sessions.Hermes.readinessLabel, "Needs your input");
     assert.equal(sessions.Hermes.needsInput, true);
+    assert.equal(sessions.Hermes.latestMeaningfulAction, "Push failed");
   });
 
   it("[NEGATIVE] ignores invalid entries and falls back to ready labels for unknown statuses", () => {
@@ -135,9 +143,23 @@ describe("state_bridge", () => {
         lastActiveAt: null,
         historyLength: 0,
         lastThinking: "",
+        latestMeaningfulAction: "",
+        latestMeaningfulActionAt: null,
+        recentActions: [],
+        resolvedRole: null,
+        logicalRole: null,
+        workerIdentityLabel: "Atlas",
+        currentStage: "idle",
+        currentStageLabel: "Idle",
         currentBranch: null,
+        pullRequests: [],
         pullRequestCount: 0,
+        touchedFiles: [],
         touchedFileCount: 0,
+        logExcerpt: [],
+        logSource: null,
+        logUpdatedAt: null,
+        freshnessAt: null,
         needsInput: false,
         isResumable: false,
         isPaused: false,
@@ -230,6 +252,11 @@ describe("state_bridge", () => {
           reason: "atlas:test",
         },
       }), "utf8");
+      await fs.writeFile(path.join(stateDir, "live_worker_athena.log"), [
+        "[leadership_live]",
+        "validated session bridge snapshot",
+        "live refresh ready",
+      ].join("\n"), "utf8");
 
       const sessions = await listAtlasSessions({
         stateDir,
@@ -239,6 +266,8 @@ describe("state_bridge", () => {
       assert.equal(sessions.Athena.status, "working");
       assert.equal(sessions.Athena.statusLabel, "In progress");
       assert.equal(sessions.Athena.lastThinking, "validating canonical state");
+      assert.equal(sessions.Athena.logExcerpt.at(-1), "live refresh ready");
+      assert.equal(sessions.Athena.logSource, "live_worker_athena.log");
 
       assert.equal(sessions.Hermes.status, "partial");
       assert.equal(sessions.Hermes.readinessLabel, "Ready to continue");
