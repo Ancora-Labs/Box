@@ -96,9 +96,9 @@ async function assertDesktopResourcePath(resourcePath: string, label: string): P
 
 async function validateDesktopResources(): Promise<void> {
   await assertDesktopResourcePath(atlasDesktopResources.preloadPath, "preload script");
-  await assertDesktopResourcePath(atlasDesktopResources.onboardingHtmlPath, "onboarding shell");
-  await assertDesktopResourcePath(atlasDesktopResources.onboardingScriptPath, "onboarding renderer");
-  await assertDesktopResourcePath(atlasDesktopResources.onboardingLayoutPath, "onboarding layout helper");
+  await assertDesktopResourcePath(atlasDesktopResources.rendererHtmlPath, "desktop renderer shell");
+  await assertDesktopResourcePath(atlasDesktopResources.rendererScriptPath, "desktop renderer bootstrap");
+  await assertDesktopResourcePath(atlasDesktopResources.rendererLayoutPath, "desktop renderer layout helper");
 }
 
 function alignPackagedWorkingDirectory(): void {
@@ -126,7 +126,7 @@ async function initializeDesktopState(): Promise<void> {
 }
 
 async function updateDesktopState(
-  patch: Partial<Pick<AtlasDesktopState, "sessionId" | "onboardingDraft" | "productDraft" | "productComposerFocused" | "windowBounds" | "lastProductSurface" | "focusedSessionRole">>,
+  patch: Partial<Pick<AtlasDesktopState, "sessionId" | "onboardingDraft" | "productDraft" | "productComposerFocused" | "windowBounds" | "focusedSessionRole">>,
 ): Promise<void> {
   if (!atlasDesktopStatePath) {
     throw new Error("ATLAS desktop state path is not initialized.");
@@ -173,7 +173,7 @@ function getPersistedWindowBounds(): AtlasDesktopWindowBounds | null {
 
 function getPersistedProductLocation(): AtlasDesktopLocation {
   return {
-    surface: "home",
+    surface: "workspace",
     focusedSessionRole: atlasDesktopState?.focusedSessionRole || null,
   };
 }
@@ -321,7 +321,6 @@ function buildAtlasSnapshotUrl(request: AtlasSnapshotRequestPayload = {}): URL {
   }
 
   const snapshotUrl = new URL(ATLAS_SNAPSHOT_PATH, atlasBootstrap.serverUrl);
-  snapshotUrl.searchParams.set("view", request.view === "sessions" ? "sessions" : "home");
   const focusRole = String(request.focusRole || "").trim();
   if (focusRole) {
     snapshotUrl.searchParams.set("focusRole", focusRole);

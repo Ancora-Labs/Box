@@ -47,6 +47,6 @@ contextBridge.exposeInMainWorld("atlasDesktop", {
     return ipcRenderer.invoke("atlas-desktop:start-session", { objective });
   },
   submitClarification(objective: string): Promise<AtlasDesktopClarificationResult> {
-    return ipcRenderer.invoke("atlas-desktop:start-session", { objective });
+    return ipcRenderer.invoke("atlas-desktop:submit-clarification", { objective });
   },
 });

@@ -5,9 +5,9 @@ export interface AtlasDesktopResourcePaths {
   appRoot: string;
   mainModuleDir: string;
   preloadPath: string;
-  onboardingHtmlPath: string;
-  onboardingScriptPath: string;
-  onboardingLayoutPath: string;
+  rendererHtmlPath: string;
+  rendererScriptPath: string;
+  rendererLayoutPath: string;
 }
 
 export interface ResolveAtlasDesktopShellCommandOptions {
@@ -81,8 +81,8 @@ export function resolveAtlasDesktopResourcePaths(
     appRoot,
     mainModuleDir,
     preloadPath: path.join(mainModuleDir, "preload.js"),
-    onboardingHtmlPath: path.join(appRoot, "electron", "renderer", "index.html"),
-    onboardingScriptPath: path.join(appRoot, "electron", "renderer", "app.js"),
-    onboardingLayoutPath: path.join(appRoot, "electron", "renderer", "layout.js"),
+    rendererHtmlPath: path.join(appRoot, "electron", "renderer", "index.html"),
+    rendererScriptPath: path.join(appRoot, "electron", "renderer", "app.js"),
+    rendererLayoutPath: path.join(appRoot, "electron", "renderer", "layout.js"),
   };
 }

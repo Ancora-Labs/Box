@@ -27,8 +27,6 @@ export interface AtlasPageData {
   sessions: AtlasSessionDto[];
 }
 
-type AtlasView = "home" | "sessions";
-
 interface AtlasSessionCounts {
   total: number;
   active: number;
@@ -74,8 +72,7 @@ function getPrimarySession(sessions: AtlasSessionDto[]): AtlasSessionDto | null 
     || null;
 }
 
-function buildSurfaceHref(view: AtlasView, focusedSessionRole: string | null): string {
-  void view;
+function buildSurfaceHref(focusedSessionRole: string | null): string {
   const params = new URLSearchParams();
   if (focusedSessionRole) {
     params.set("focusRole", focusedSessionRole);
@@ -138,7 +135,7 @@ function getSessionActivityLabel(session: AtlasSessionDto): string {
   return session.latestMeaningfulAction || session.lastTask || "Waiting for the next product-facing task.";
 }
 
-function renderNavigation(_view: AtlasView, _focusedSessionRole: string | null): string {
+function renderNavigation(): string {
   return `<div class="nav-shell" aria-label="ATLAS workspace mode">
     <span class="nav-link nav-link-static">Single workspace shell</span>
   </div>`;
@@ -164,20 +161,20 @@ function renderLinkAction(label: string, href: string): string {
 function renderSessionActions(session: AtlasSessionDto, focusedSessionRole: string | null): string {
   const actions: string[] = [
     session.role === focusedSessionRole
-      ? renderLinkAction("Clear focus", buildSurfaceHref("sessions", null))
-      : renderLinkAction("Focus session", buildSurfaceHref("sessions", session.role)),
+      ? renderLinkAction("Clear focus", buildSurfaceHref(null))
+      : renderLinkAction("Focus session", buildSurfaceHref(session.role)),
   ];
 
   if (session.lane) {
     actions.push(session.isPaused
-      ? renderLifecycleForm("Resume lane", "resume", { role: session.role, returnTo: buildSurfaceHref("sessions", session.role) })
-      : renderLifecycleForm("Pause lane", "pause", { role: session.role, returnTo: buildSurfaceHref("sessions", session.role) }));
+      ? renderLifecycleForm("Resume lane", "resume", { role: session.role, returnTo: buildSurfaceHref(session.role) })
+      : renderLifecycleForm("Pause lane", "pause", { role: session.role, returnTo: buildSurfaceHref(session.role) }));
   }
 
   if (session.canArchive) {
     actions.push(renderLifecycleForm("Archive session", "archive", {
       role: session.role,
-      returnTo: buildSurfaceHref("sessions", session.role),
+      returnTo: buildSurfaceHref(session.role),
     }));
   }
 
@@ -231,7 +228,6 @@ function renderRecentActions(session: AtlasSessionDto): string {
 function renderFocusedSessionDetail(
   session: AtlasSessionDto | null,
   pageData: AtlasPageData,
-  view: AtlasView,
 ): string {
   if (!session) {
     return `<section class="canvas-section focused-session-panel" aria-label="Focused session detail" data-role="focused-session-panel" aria-live="polite">
@@ -264,9 +260,7 @@ function renderFocusedSessionDetail(
         <div class="eyebrow">Focused session detail</div>
         <h2 data-role="focused-session-name">${escapeHtml(session.name)}</h2>
       </div>
-      ${pageData.focusedSessionRole
-        ? renderLinkAction(view === "home" ? "Open detail workspace" : "Clear focus", view === "home" ? buildSurfaceHref("sessions", session.role) : buildSurfaceHref(view, null))
-        : ""}
+      ${pageData.focusedSessionRole ? renderLinkAction("Clear focus", buildSurfaceHref(null)) : ""}
     </div>
     <p class="support-copy" data-role="focused-session-activity">${escapeHtml(getSessionActivityLabel(session))}</p>
     <div class="chip-row">
@@ -341,9 +335,8 @@ function renderFocusedSessionDetail(
 function renderFocusedSessionHost(
   session: AtlasSessionDto | null,
   pageData: AtlasPageData,
-  view: AtlasView,
 ): string {
-  return `<div data-role="focused-session-panel-host">${renderFocusedSessionDetail(session, pageData, view)}</div>`;
+  return `<div data-role="focused-session-panel-host">${renderFocusedSessionDetail(session, pageData)}</div>`;
 }
 
 function renderSessionCard(session: AtlasSessionDto, focusedSessionRole: string | null): string {
@@ -380,7 +373,7 @@ function renderSessionCard(session: AtlasSessionDto, focusedSessionRole: string 
   </article>`;
 }
 
-function renderSidebarSessionRail(pageData: AtlasPageData, _view: AtlasView): string {
+function renderSidebarSessionRail(pageData: AtlasPageData): string {
   if (pageData.sessions.length === 0) {
     return `<div class="sidebar-empty">
       <strong>No session state is available yet.</strong>
@@ -392,7 +385,7 @@ function renderSidebarSessionRail(pageData: AtlasPageData, _view: AtlasView): st
     ${pageData.sessions.map((session) => {
       const isSelected = session.role === pageData.focusedSessionRole || (!pageData.focusedSessionRole && session === pageData.sessions[0]);
       const containerTag = "a";
-      const hrefAttribute = ` href="${escapeHtml(buildSurfaceHref("sessions", session.role))}"`;
+      const hrefAttribute = ` href="${escapeHtml(buildSurfaceHref(session.role))}"`;
       const currentAttribute = isSelected ? ' aria-current="true"' : "";
       return `<${containerTag} class="session-rail-link${isSelected ? " session-rail-link-selected" : ""}"${hrefAttribute}${currentAttribute}>
         <span class="session-rail-copy">
@@ -405,7 +398,7 @@ function renderSidebarSessionRail(pageData: AtlasPageData, _view: AtlasView): st
   </div>`;
 }
 
-function renderSidebar(pageData: AtlasPageData, view: AtlasView, counts: AtlasSessionCounts, activeSession: AtlasSessionDto | null): string {
+function renderSidebar(pageData: AtlasPageData, counts: AtlasSessionCounts, activeSession: AtlasSessionDto | null): string {
   const sessionSummary = getSessionSummary(activeSession);
   return `<aside class="desktop-sidebar" aria-label="ATLAS desktop sidebar">
     <div class="sidebar-top">
@@ -418,7 +411,7 @@ function renderSidebar(pageData: AtlasPageData, view: AtlasView, counts: AtlasSe
         </div>
       </div>
       <div class="repo-tag">${escapeHtml(pageData.repoLabel)}</div>
-      ${renderNavigation(view, pageData.focusedSessionRole)}
+      ${renderNavigation()}
     </div>
 
     <section class="sidebar-section" aria-label="Runtime status">
@@ -452,7 +445,7 @@ function renderSidebar(pageData: AtlasPageData, view: AtlasView, counts: AtlasSe
           <h2>${escapeHtml(sessionSummary.heading)}</h2>
         </div>
         ${activeSession && (pageData.focusedSessionRole || pageData.missingFocusedSnapshot)
-          ? renderLinkAction("Clear focus", buildSurfaceHref(view, null))
+          ? renderLinkAction("Clear focus", buildSurfaceHref(null))
           : ""}
       </div>
       <p class="support-copy">${escapeHtml(sessionSummary.detail)}</p>
@@ -476,7 +469,7 @@ function renderSidebar(pageData: AtlasPageData, view: AtlasView, counts: AtlasSe
         </div>
         <span class="meta-copy">${escapeHtml(String(counts.resumable))} resumable</span>
       </div>
-      ${renderSidebarSessionRail(pageData, view)}
+      ${renderSidebarSessionRail(pageData)}
     </section>
   </aside>`;
 }
@@ -502,7 +495,7 @@ function renderWorkspaceCanvas(pageData: AtlasPageData, counts: AtlasSessionCoun
       </div>
     </section>
 
-    ${renderFocusedSessionHost(activeSession, pageData, "home")}
+    ${renderFocusedSessionHost(activeSession, pageData)}
 
     <section class="canvas-section" aria-label="Tracked sessions">
       <div class="section-heading">
@@ -519,13 +512,13 @@ function renderWorkspaceCanvas(pageData: AtlasPageData, counts: AtlasSessionCoun
   </section>`;
 }
 
-function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession: AtlasSessionDto | null): string {
+function renderComposer(pageData: AtlasPageData, activeSession: AtlasSessionDto | null): string {
   const continuity = resolveAtlasSessionSnapshotContinuity(
     pageData.sessions,
     pageData.focusedSessionRole,
     pageData.missingFocusedSnapshot === true,
   );
-  const returnTo = buildSurfaceHref(view, pageData.focusedSessionRole);
+  const returnTo = buildSurfaceHref(pageData.focusedSessionRole);
   const composerHeading = continuity.missingFocusedSnapshot
     ? "Start the next session while the old focus recovers"
     : (!continuity.hasLiveSessions ? "Start a new session" : "Start the next session");
@@ -545,9 +538,9 @@ function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession:
   ];
 
   if (activeSession) {
-    actions.push(activeSession.role === pageData.focusedSessionRole
-      ? renderLinkAction("Clear focus", buildSurfaceHref(view, null))
-      : renderLinkAction("Focus session", buildSurfaceHref(view, activeSession.role)));
+      actions.push(activeSession.role === pageData.focusedSessionRole
+        ? renderLinkAction("Clear focus", buildSurfaceHref(null))
+        : renderLinkAction("Focus session", buildSurfaceHref(activeSession.role)));
 
     if (activeSession.lane) {
       actions.push(activeSession.isPaused
@@ -561,14 +554,14 @@ function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession:
   }
 
   if (pageData.missingFocusedSnapshot) {
-    actions.push(renderLinkAction("Clear focus", buildSurfaceHref(view, null)));
+    actions.push(renderLinkAction("Clear focus", buildSurfaceHref(null)));
   }
 
   return `<section
     class="desktop-composer"
     aria-label="Desktop composer"
     data-role="product-composer"
-    data-view="${escapeHtml(view)}"
+    data-surface="workspace"
     data-focused-session-role="${escapeHtml(pageData.focusedSessionRole || "")}"
     data-missing-focused-snapshot="${continuity.missingFocusedSnapshot ? "true" : "false"}"
     data-has-live-sessions="${continuity.hasLiveSessions ? "true" : "false"}">
@@ -595,7 +588,7 @@ function renderComposer(view: AtlasView, pageData: AtlasPageData, activeSession:
         </div>
       </form>
       <div class="composer-actions">
-        <button class="action-button primary" type="submit" form="atlas-product-composer-form">${escapeHtml(view === "sessions" && activeSession ? "Update session brief" : "Start session")}</button>
+        <button class="action-button primary" type="submit" form="atlas-product-composer-form">Start session</button>
         ${actions.join("")}
       </div>
     </div>
@@ -670,7 +663,7 @@ function renderComposerScript(): string {
     || null;
   const getActiveSession = (pageData) => pageData.sessions.find((session) => session.role === pageData.focusedSessionRole)
     || getPrimarySession(pageData.sessions);
-  const buildSurfaceHref = (_view, focusedSessionRole) => {
+  const buildSurfaceHref = (focusedSessionRole) => {
     const params = new URLSearchParams();
     if (focusedSessionRole) {
       params.set("focusRole", focusedSessionRole);
@@ -682,7 +675,7 @@ function renderComposerScript(): string {
   const renderSessionRail = (pageData) => pageData.sessions.map((session, index) => {
     const isSelected = session.role === pageData.focusedSessionRole || (!pageData.focusedSessionRole && index === 0);
     return '<a class="session-rail-link' + (isSelected ? " session-rail-link-selected" : "") + '" href="'
-      + escapeHtml(buildSurfaceHref("sessions", session.role)) + '"' + (isSelected ? ' aria-current="true"' : "") + '>'
+      + escapeHtml(buildSurfaceHref(session.role)) + '"' + (isSelected ? ' aria-current="true"' : "") + '>'
       + '<span class="session-rail-copy"><strong>' + escapeHtml(session.name) + '</strong><span>'
       + escapeHtml(session.statusLabel) + " · " + escapeHtml(session.readinessLabel) + "</span></span>"
       + '<span class="session-rail-meta">' + escapeHtml(session.currentBranch || "No branch") + "</span></a>";
@@ -717,7 +710,7 @@ function renderComposerScript(): string {
         + escapeHtml(pageData.continuityStatusLabel || "Waiting for live snapshot")
         + '</p><pre class="log-excerpt" data-role="focused-session-log">No live worker log lines are available yet.</pre></div></details></section>';
     }
-    const actionHref = buildSurfaceHref("home", null);
+      const actionHref = buildSurfaceHref(null);
     const actionLabel = "Clear focus";
     const logMeta = session.logSource
       ? session.logSource + " · " + formatTimestamp(session.logUpdatedAt)
@@ -804,7 +797,6 @@ function renderComposerScript(): string {
     const focusedSessionRole = String(composerRoot.dataset.focusedSessionRole || "");
     if (bridge?.refreshSnapshot) {
       return bridge.refreshSnapshot({
-        view: "home",
         focusRole: focusedSessionRole || null,
       });
     }
@@ -1017,9 +1009,9 @@ function renderComposerScript(): string {
   </script>`;
 }
 
-function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
+function renderAtlasAppShell(pageData: AtlasPageData): string {
   const counts = countSessions(pageData.sessions);
-  const pageTitle = view === "sessions" ? "ATLAS Sessions" : pageData.title;
+  const pageTitle = "ATLAS Workspace";
   const activeSession = getActiveSessionFocus(pageData);
 
   return `<!doctype html>
@@ -1512,10 +1504,10 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
   <body>
     <main>
       <section class="shell" aria-label="ATLAS desktop surface">
-        ${renderSidebar(pageData, view, counts, activeSession)}
+        ${renderSidebar(pageData, counts, activeSession)}
         <section class="workspace-shell" aria-label="ATLAS work canvas">
           ${renderWorkspaceCanvas(pageData, counts, activeSession)}
-          ${renderComposer(view, pageData, activeSession)}
+          ${renderComposer(pageData, activeSession)}
         </section>
       </section>
     </main>
@@ -1524,10 +1516,14 @@ function renderAtlasAppShell(pageData: AtlasPageData, view: AtlasView): string {
 </html>`;
 }
 
+export function renderAtlasWorkspaceHtml(pageData: AtlasPageData): string {
+  return renderAtlasAppShell(pageData);
+}
+
 export function renderAtlasHomeHtml(pageData: AtlasPageData): string {
-  return renderAtlasAppShell(pageData, "home");
+  return renderAtlasWorkspaceHtml(pageData);
 }
 
 export function renderAtlasSessionsHtml(pageData: AtlasPageData): string {
-  return renderAtlasAppShell(pageData, "sessions");
+  return renderAtlasWorkspaceHtml(pageData);
 }

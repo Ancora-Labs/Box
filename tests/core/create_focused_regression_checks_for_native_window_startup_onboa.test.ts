@@ -11,7 +11,9 @@ import {
   getAtlasClarificationPacketPath,
 } from "../../src/atlas/clarification.ts";
 import {
+  buildAtlasDesktopLocationPath,
   createAtlasDesktopClarificationHandoffState,
+  parseAtlasDesktopLocationFromUrl,
   readAtlasDesktopState,
   resolveAtlasDesktopStatePath,
   resolveAtlasDesktopStateRoot,
@@ -70,7 +72,7 @@ describe("atlas desktop regression checks", () => {
         onboardingDraft: "Reopen the desktop shell without losing this draft.",
         productDraft: "Restore the product-side composer draft after a relaunch.",
         productComposerFocused: true,
-        lastProductSurface: "sessions",
+        lastProductSurface: "workspace",
         focusedSessionRole: "quality-worker",
         windowBounds: {
           x: 120,
@@ -88,7 +90,7 @@ describe("atlas desktop regression checks", () => {
       assert.equal(restoredState.onboardingDraft, "Reopen the desktop shell without losing this draft.");
       assert.equal(restoredState.productDraft, "Restore the product-side composer draft after a relaunch.");
       assert.equal(restoredState.productComposerFocused, true);
-      assert.equal(restoredState.lastProductSurface, "sessions");
+      assert.equal(restoredState.lastProductSurface, "workspace");
       assert.equal(restoredState.focusedSessionRole, "quality-worker");
       assert.deepEqual(restoredState.windowBounds, {
         x: 120,
@@ -122,7 +124,7 @@ describe("atlas desktop regression checks", () => {
     );
   });
 
-  it("resolves packaged preload and onboarding assets from the bundled desktop entrypoint instead of process.cwd()", async () => {
+  it("resolves packaged preload and renderer handoff assets from the bundled desktop entrypoint instead of process.cwd()", async () => {
     const tempRoot = await createTempRoot();
     const originalCwd = process.cwd();
     const packagedAppRoot = path.join(tempRoot, "ATLAS", "resources", "app");
@@ -136,8 +138,19 @@ describe("atlas desktop regression checks", () => {
 
       assert.equal(resourcePaths.appRoot, packagedAppRoot);
       assert.equal(resourcePaths.preloadPath, path.join(packagedAppRoot, ".electron-build", "electron", "preload.js"));
-      assert.equal(resourcePaths.onboardingHtmlPath, path.join(packagedAppRoot, "electron", "renderer", "index.html"));
-      assert.notEqual(resourcePaths.onboardingHtmlPath, path.join(process.cwd(), "electron", "renderer", "index.html"));
+      assert.equal(resourcePaths.rendererHtmlPath, path.join(packagedAppRoot, "electron", "renderer", "index.html"));
+      assert.equal(resourcePaths.rendererScriptPath, path.join(packagedAppRoot, "electron", "renderer", "app.js"));
+      assert.equal(resourcePaths.rendererLayoutPath, path.join(packagedAppRoot, "electron", "renderer", "layout.js"));
+      assert.notEqual(resourcePaths.rendererHtmlPath, path.join(process.cwd(), "electron", "renderer", "index.html"));
+      assert.equal(buildAtlasDesktopLocationPath({ surface: "workspace" }), "/");
+      assert.equal(
+        buildAtlasDesktopLocationPath({ surface: "workspace", focusedSessionRole: "quality-worker" }),
+        "/?focusRole=quality-worker",
+      );
+      assert.deepEqual(parseAtlasDesktopLocationFromUrl("http://127.0.0.1/sessions?focusRole=quality-worker"), {
+        surface: "workspace",
+        focusedSessionRole: "quality-worker",
+      });
     } finally {
       process.chdir(originalCwd);
       await fs.rm(tempRoot, { recursive: true, force: true });

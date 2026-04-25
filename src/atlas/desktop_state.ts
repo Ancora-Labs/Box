@@ -9,7 +9,7 @@ export interface AtlasDesktopWindowBounds {
   y?: number;
 }
 
-export type AtlasDesktopProductSurface = "home" | "sessions";
+export type AtlasDesktopProductSurface = "workspace";
 
 export interface AtlasDesktopLocation {
   surface: AtlasDesktopProductSurface;
@@ -53,7 +53,7 @@ export function createDefaultAtlasDesktopState(): AtlasDesktopState {
     productDraft: "",
     productComposerFocused: false,
     windowBounds: null,
-    lastProductSurface: "home",
+    lastProductSurface: "workspace",
     focusedSessionRole: null,
     updatedAt: null,
   };
@@ -93,7 +93,7 @@ function normalizeBoolean(value: unknown): boolean {
 }
 
 export function normalizeAtlasDesktopProductSurface(value: unknown): AtlasDesktopProductSurface {
-  return value === "home" || value === "sessions" ? "home" : "home";
+  return value === "workspace" || value === "home" || value === "sessions" ? "workspace" : "workspace";
 }
 
 export function normalizeAtlasDesktopWindowBounds(value: unknown): AtlasDesktopWindowBounds | null {
@@ -118,7 +118,7 @@ export function normalizeAtlasDesktopWindowBounds(value: unknown): AtlasDesktopW
 export function normalizeAtlasDesktopLocation(value: unknown): AtlasDesktopLocation {
   if (!isRecord(value)) {
     return {
-      surface: "home",
+      surface: "workspace",
       focusedSessionRole: null,
     };
   }
@@ -150,7 +150,7 @@ export function parseAtlasDesktopLocationFromUrl(input: string | URL): AtlasDesk
       ? input
       : new URL(String(input || "/"), "http://127.0.0.1");
     const surface = parsedUrl.pathname === "/" || parsedUrl.pathname === "/sessions"
-      ? "home"
+      ? "workspace"
       : null;
     if (!surface) {
       return null;
