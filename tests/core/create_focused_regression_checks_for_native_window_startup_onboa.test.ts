@@ -12,7 +12,7 @@ import {
 } from "../../src/atlas/clarification.ts";
 import {
   buildAtlasDesktopLocationPath,
-  createAtlasDesktopClarificationHandoffState,
+  createAtlasDesktopWorkspaceHandoffState,
   parseAtlasDesktopLocationFromUrl,
   readAtlasDesktopState,
   resolveAtlasDesktopStatePath,
@@ -69,10 +69,9 @@ describe("atlas desktop regression checks", () => {
     try {
       const storedState = await writeAtlasDesktopState(statePath, {
         sessionId: "desktop-session-restore",
-        onboardingDraft: "Reopen the desktop shell without losing this draft.",
-        productDraft: "Restore the product-side composer draft after a relaunch.",
-        productComposerFocused: true,
-        lastProductSurface: "workspace",
+        workspaceDraft: "Restore the product-side composer draft after a relaunch.",
+        workspaceComposerFocused: true,
+        lastWorkspaceSurface: "workspace",
         focusedSessionRole: "quality-worker",
         windowBounds: {
           x: 120,
@@ -87,10 +86,9 @@ describe("atlas desktop regression checks", () => {
       assert.equal(stateRoot, portableRoot);
       assert.equal(statePath, path.join(portableRoot, "state", "atlas", "desktop_state.json"));
       assert.equal(restoredState.sessionId, "desktop-session-restore");
-      assert.equal(restoredState.onboardingDraft, "Reopen the desktop shell without losing this draft.");
-      assert.equal(restoredState.productDraft, "Restore the product-side composer draft after a relaunch.");
-      assert.equal(restoredState.productComposerFocused, true);
-      assert.equal(restoredState.lastProductSurface, "workspace");
+      assert.equal(restoredState.workspaceDraft, "Restore the product-side composer draft after a relaunch.");
+      assert.equal(restoredState.workspaceComposerFocused, true);
+      assert.equal(restoredState.lastWorkspaceSurface, "workspace");
       assert.equal(restoredState.focusedSessionRole, "quality-worker");
       assert.deepEqual(restoredState.windowBounds, {
         x: 120,
@@ -107,19 +105,17 @@ describe("atlas desktop regression checks", () => {
 
   it("keeps the product-side draft and composer focus ready after clarification handoff", () => {
     assert.deepEqual(
-      createAtlasDesktopClarificationHandoffState("  Keep the reopened shell focused on the saved draft.  "),
+      createAtlasDesktopWorkspaceHandoffState("  Keep the reopened shell focused on the saved draft.  "),
       {
-        onboardingDraft: "",
-        productDraft: "Keep the reopened shell focused on the saved draft.",
-        productComposerFocused: true,
+        workspaceDraft: "Keep the reopened shell focused on the saved draft.",
+        workspaceComposerFocused: true,
       },
     );
     assert.deepEqual(
-      createAtlasDesktopClarificationHandoffState("   "),
+      createAtlasDesktopWorkspaceHandoffState("   "),
       {
-        onboardingDraft: "",
-        productDraft: "",
-        productComposerFocused: false,
+        workspaceDraft: "",
+        workspaceComposerFocused: false,
       },
     );
   });
@@ -147,10 +143,7 @@ describe("atlas desktop regression checks", () => {
         buildAtlasDesktopLocationPath({ surface: "workspace", focusedSessionRole: "quality-worker" }),
         "/?focusRole=quality-worker",
       );
-      assert.deepEqual(parseAtlasDesktopLocationFromUrl("http://127.0.0.1/sessions?focusRole=quality-worker"), {
-        surface: "workspace",
-        focusedSessionRole: "quality-worker",
-      });
+      assert.equal(parseAtlasDesktopLocationFromUrl("http://127.0.0.1/sessions?focusRole=quality-worker"), null);
     } finally {
       process.chdir(originalCwd);
       await fs.rm(tempRoot, { recursive: true, force: true });
@@ -218,9 +211,8 @@ describe("atlas desktop regression checks", () => {
 
       const restoredState = await readAtlasDesktopState(statePath);
       assert.equal(restoredState.sessionId, null);
-      assert.equal(restoredState.onboardingDraft, "");
-      assert.equal(restoredState.productDraft, "");
-      assert.equal(restoredState.productComposerFocused, false);
+      assert.equal(restoredState.workspaceDraft, "");
+      assert.equal(restoredState.workspaceComposerFocused, false);
       assert.equal(restoredState.windowBounds, null);
       assert.equal(restoredState.updatedAt, null);
     } finally {
