@@ -1,15 +1,15 @@
 <p align="center">
-	<img src="public/cube.webp" alt="BOX Showroom" width="320" />
+	<img src="atlas.png" alt="ATLAS autonomous agent system" width="100%" />
 </p>
 
-# BOX
+# ATLAS
 
-BOX is an orchestration runtime framework for autonomous software delivery operations.
+ATLAS is an orchestration runtime framework for autonomous software delivery operations.
 It should not be interpreted as a single-command automation utility; rather, it is a
 multi-role operational system that performs state interpretation, planning, execution,
 observability, and iterative self-optimization within a governed cycle model.
 
-At its operational core, BOX performs the following functions:
+At its operational core, ATLAS performs the following functions:
 
 - Ingests and normalizes system state.
 - Routes work packages to role-appropriate execution units.
@@ -19,7 +19,7 @@ At its operational core, BOX performs the following functions:
 
 ## Development Status
 
-BOX is currently under active development.
+ATLAS is currently under active development.
 
 This implies the following:
 
@@ -48,9 +48,7 @@ against implementation feasibility and consolidation requirements.
 Executes adversarial review of plans and implementations, validates assumptions,
 and functions as a quality and governance gate prior to major progression events.
 
-<p align="center">
-	<img src="public/divider.gif" alt="divider" width="240" />
-</p>
+---
 
 ### Research Layer
 
@@ -64,9 +62,7 @@ Transforms Scout artifacts into topic-organized, decision-ready synthesis output
 Reduces informational noise, preserves high-signal findings, and supplies planning
 layers with higher-quality strategic inputs.
 
-<p align="center">
-	<img src="public/divider.gif" alt="divider" width="240" />
-</p>
+---
 
 ### Worker Layer
 
@@ -94,13 +90,11 @@ across subsystem boundaries.
 Collects telemetry, health indicators, and runtime signals, then performs anomaly
 detection and early warning escalation when pattern behavior deviates.
 
-<p align="center">
-	<img src="public/divider.gif" alt="divider" width="240" />
-</p>
+---
 
-## BOX Mindset
+## ATLAS Mindset
 
-BOX is ambitious not because it is static or flawless, but because it is capable
+ATLAS is ambitious not because it is static or flawless, but because it is capable
 of institutional learning under iterative constraints.
 Its objective is not one-shot perfection; its objective is progressive gains in
 robustness, intelligence, and autonomy across successive operational cycles.
