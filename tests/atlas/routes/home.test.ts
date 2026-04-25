@@ -18,8 +18,8 @@ function createTempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "atlas-home-route-"));
 }
 
-function createRequest(method = "GET"): IncomingMessage {
-  return { method } as IncomingMessage;
+function createRequest(method = "GET", url = "/"): IncomingMessage {
+  return { method, url } as IncomingMessage;
 }
 
 function createResponseCapture(): ServerResponse<IncomingMessage> & ResponseCapture {
@@ -81,16 +81,30 @@ async function writeStateFixture(
         updatedAt: "2026-04-22T08:15:00.000Z",
         status: "in_progress",
         workerSessions,
-        workerActivity: {},
+        workerActivity: {
+          "quality-worker": [
+            {
+              at: "2026-04-22T08:14:00.000Z",
+              from: "quality-worker",
+              status: "working",
+              task: "Validated the home route detail contract",
+            },
+          ],
+        },
         completedTaskIds: [],
       },
     },
   }), "utf8");
+  await fs.writeFile(path.join(stateDir, "live_worker_quality-worker.log"), [
+    "[leadership_live]",
+    "validated route detail",
+    "ready for snapshot refresh",
+  ].join("\n"), "utf8");
   return stateDir;
 }
 
 describe("atlas home route", () => {
-  it("returns ATLAS product HTML with desktop continuity, delivery focus, and repo state", async () => {
+  it("returns single-workspace home HTML with inline worker detail and readable log context", async () => {
     const tempRoot = await createTempRoot();
 
     try {
@@ -100,6 +114,11 @@ describe("atlas home route", () => {
           status: "working",
           lastTask: "Validate the ATLAS route coverage",
           lastActiveAt: "2026-04-22T08:14:00.000Z",
+          currentBranch: "feat/home-detail",
+          createdPRs: ["https://example.com/pr/home"],
+          filesTouched: ["src/atlas/routes/home.ts"],
+          resolvedRole: "quality-worker",
+          logicalRole: "quality-worker",
         },
         "governance-worker": {
           role: "governance-worker",
@@ -121,27 +140,25 @@ describe("atlas home route", () => {
       assert.equal(res.statusCode, 200);
       assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
       assert.match(res.body, /<title>ATLAS Home<\/title>/);
-      assert.match(res.body, /Native desktop workspace/);
       assert.match(res.body, /aria-label="ATLAS desktop surface"/);
-      assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
+      assert.match(res.body, /aria-label="ATLAS session sidebar"/);
       assert.match(res.body, /aria-label="ATLAS work canvas"/);
-      assert.match(res.body, /Desktop continuity/);
-      assert.match(res.body, /ATLAS keeps the live delivery state in the desktop window\./);
-      assert.match(res.body, /Active delivery focus/);
-      assert.match(res.body, /Repo state/);
-      assert.match(res.body, />Ready to resume</);
-      assert.match(res.body, />Resume session flow</);
-      assert.match(res.body, />Stop runtime</);
-      assert.match(res.body, /Tracked sessions/);
-      assert.match(res.body, />Ancora-Labs\/Box</);
-      assert.doesNotMatch(res.body, /quality-worker|governance-worker/);
+      assert.match(res.body, /What should ATLAS do next\?/);
+      assert.match(res.body, /Focused session detail/);
+      assert.match(res.body, /quality-worker/);
+      assert.match(res.body, /feat\/home-detail/);
+      assert.match(res.body, /https:\/\/example\.com\/pr\/home/);
+      assert.match(res.body, /src\/atlas\/routes\/home\.ts/);
+      assert.match(res.body, /ready for snapshot refresh/);
+      assert.match(res.body, /window\.fetch\("\/api\/snapshot\?"/);
+      assert.match(res.body, /data-role="product-composer-input"/);
       assert.doesNotMatch(res.body, /hero-panel|metric-card|BOX Mission Control|dashboard|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
   });
 
-  it("[NEGATIVE] falls back to start readiness when no session can be resumed", async () => {
+  it("[NEGATIVE] keeps the home workspace stable when no session can be resumed", async () => {
     const tempRoot = await createTempRoot();
 
     try {
@@ -168,12 +185,10 @@ describe("atlas home route", () => {
       });
 
       assert.equal(res.statusCode, 200);
-      assert.match(res.body, />Ready to start</);
-      assert.match(res.body, />Open sessions</);
-      assert.match(res.body, /No resumable session is active yet/);
-      assert.match(res.body, /Desktop continuity/);
+      assert.match(res.body, /What should ATLAS do next\?/);
+      assert.match(res.body, /Focused session detail/);
+      assert.match(res.body, /Readable log excerpt/);
       assert.match(res.body, /data-role="product-composer-input"/);
-      assert.doesNotMatch(res.body, /quality-worker|integration-worker/);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
@@ -197,12 +212,10 @@ describe("atlas home route", () => {
 
       assert.equal(res.statusCode, 200);
       assert.match(res.body, /aria-label="ATLAS desktop surface"/);
-      assert.match(res.body, /aria-label="ATLAS desktop sidebar"/);
+      assert.match(res.body, /aria-label="ATLAS session sidebar"/);
       assert.match(res.body, /aria-label="ATLAS work canvas"/);
-      assert.match(res.body, /data-role="product-composer-input"/);
       assert.match(res.body, /No session state is available yet\./);
-      assert.match(res.body, />Ready to start</);
-      assert.match(res.body, />0 tracked sessions</);
+      assert.match(res.body, /No live session focus yet/);
       assert.doesNotMatch(res.body, /dashboard-card|metric-card|window-controls|traffic-light/i);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });

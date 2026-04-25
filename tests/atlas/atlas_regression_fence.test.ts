@@ -106,7 +106,9 @@ describe("atlas regression fence", () => {
     assert.match(rendererSource, /aria-label="ATLAS work canvas"/);
     assert.match(rendererSource, /aria-label="Desktop composer"/);
     assert.match(rendererSource, /Persistent left sidebar/);
-    assert.match(rendererSource, /Refresh clarification/);
+    assert.match(rendererSource, /Focused session detail/);
+    assert.match(rendererSource, /Readable log excerpt/);
+    assert.match(rendererSource, /\/api\/snapshot/);
     assert.doesNotMatch(rendererSource, /dashboard-card|hero-panel|metric-card|window-controls|traffic-light/i);
     assert.match(desktopMain, /requestSingleInstanceLock\(\)/);
     assert.match(desktopMain, /app\.on\("second-instance"/);
@@ -115,7 +117,8 @@ describe("atlas regression fence", () => {
     assert.match(desktopMain, /isPackaged:\s*app\.isPackaged/);
     assert.match(desktopMain, /exePath:\s*app\.getPath\("exe"\)/);
     assert.match(desktopMain, /atlasDesktopResources\.onboardingHtmlPath/);
-    assert.match(desktopMain, /window\.loadFile\(atlasDesktopResources\.onboardingHtmlPath\)/);
+    assert.match(desktopMain, /buildAtlasDesktopLocationPath\(getPersistedProductLocation\(\)\)/);
+    assert.match(desktopMain, /window\.loadURL\(new URL\(buildAtlasDesktopLocationPath\(getPersistedProductLocation\(\)\), atlasBootstrap\.serverUrl\)\.toString\(\)\)/);
   });
 
   it("[NEGATIVE] rejects empty portable folder names so the release folder cannot lose the root ATLAS.exe contract", () => {

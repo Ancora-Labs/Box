@@ -25,6 +25,8 @@ export interface AtlasHomeRouteOptions {
   desktopSessionId?: string;
 }
 
+type AtlasSnapshotView = "home" | "sessions";
+
 interface AtlasDesktopBuildInfo {
   sessionId?: unknown;
   builtAt?: unknown;
@@ -70,20 +72,28 @@ export function deriveAtlasHomeReadiness(
   const hasResumableSessions = sessions.some((session) => session.isResumable);
   return hasResumableSessions
     ? {
-        homePrimaryActionLabel: "Resume session flow",
+        homePrimaryActionLabel: "Resume active session",
         homeReadinessHeading: "Ready to resume",
-        homeReadinessDetail: "One or more roles can continue from their recorded state.",
+        homeReadinessDetail: "Pick a tracked session from the left rail or write a new objective to start the next flow.",
       }
     : {
-        homePrimaryActionLabel: "Open sessions",
+        homePrimaryActionLabel: "Start a session",
         homeReadinessHeading: "Ready to start",
-        homeReadinessDetail: "No resumable session is active yet. Open Sessions to begin the next role handoff.",
+        homeReadinessDetail: "Write one outcome in the composer to start the next session from the main workspace.",
       };
 }
 
 export function writeAtlasHtmlResponse(res: ServerResponse, html: string): void {
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(html);
+}
+
+export function writeAtlasJsonResponse(res: ServerResponse, payload: unknown): void {
+  res.writeHead(200, {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  });
+  res.end(JSON.stringify(payload));
 }
 
 export function renderClarificationRequiredHtml(): string {
@@ -205,6 +215,17 @@ export async function buildAtlasPageData(
   return pageData as AtlasPageData;
 }
 
+function resolveAtlasSnapshotLocation(requestUrl: string | undefined): AtlasDesktopLocation {
+  const parsedUrl = new URL(String(requestUrl || "/api/snapshot"), "http://127.0.0.1");
+  const requestedView = String(parsedUrl.searchParams.get("view") || "").trim().toLowerCase();
+  const surface: AtlasSnapshotView = requestedView === "sessions" ? "sessions" : "home";
+  const focusedSessionRole = String(parsedUrl.searchParams.get("focusRole") || "").trim() || null;
+  return {
+    surface,
+    focusedSessionRole,
+  };
+}
+
 export async function handleAtlasHomeRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -217,15 +238,36 @@ export async function handleAtlasHomeRequest(
   }
 
   try {
-    if (await respondWithClarificationGateIfNeeded(res, options)) {
-      return;
-    }
-
     const pageData = await buildAtlasPageData(options, resolveAtlasDesktopPageLocation(req.url, "home"));
     writeAtlasHtmlResponse(res, renderAtlasHomeHtml(pageData));
   } catch (error) {
     console.error(`[atlas] home route failed: ${String((error as Error)?.message || error)}`);
     res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
     res.end("<!doctype html><html><body><h1>ATLAS Home unavailable</h1><p>Review the route logs and try again.</p></body></html>");
+  }
+}
+
+export async function handleAtlasSnapshotRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: AtlasHomeRouteOptions,
+): Promise<void> {
+  if (String(req.method || "GET").toUpperCase() !== "GET") {
+    res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
+    return;
+  }
+
+  try {
+    const pageData = await buildAtlasPageData(options, resolveAtlasSnapshotLocation(req.url));
+    writeAtlasJsonResponse(res, {
+      ok: true,
+      pageData,
+      snapshotAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error(`[atlas] snapshot route failed: ${String((error as Error)?.message || error)}`);
+    res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "ATLAS snapshot unavailable" }));
   }
 }

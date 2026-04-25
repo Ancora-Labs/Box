@@ -3,7 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type AtlasClarificationRunner } from "./clarification.js";
-import { handleAtlasHomeRequest, type AtlasHomeRouteOptions } from "./routes/home.js";
+import {
+  handleAtlasHomeRequest,
+  handleAtlasSnapshotRequest,
+  type AtlasHomeRouteOptions,
+} from "./routes/home.js";
 import { handleAtlasLifecycleRequest } from "./routes/lifecycle.js";
 import { handleAtlasOnboardingRequest } from "./routes/onboarding.js";
 import { handleAtlasSessionsRequest } from "./routes/sessions.js";
@@ -62,6 +66,11 @@ async function routeAtlasRequest(
 
     if (url.pathname === "/") {
       await handleAtlasHomeRequest(req, res, options);
+      return;
+    }
+
+    if (url.pathname === "/api/snapshot") {
+      await handleAtlasSnapshotRequest(req, res, options);
       return;
     }
 

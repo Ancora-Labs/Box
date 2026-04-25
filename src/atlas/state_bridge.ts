@@ -12,6 +12,10 @@ export interface BoxTargetSessionHistoryEntry {
   role?: string;
   status?: string;
   task?: string;
+  summary?: string;
+  message?: string;
+  detail?: string;
+  action?: string;
 }
 
 export interface BoxTargetSessionRecord {
@@ -48,21 +52,43 @@ export interface AtlasSessionDto {
   role: string;
   name: string;
   lane: string | null;
+  resolvedRole: string | null;
+  logicalRole: string | null;
+  workerIdentityLabel: string;
   status: AtlasSessionStatus;
   statusLabel: string;
   readiness: AtlasSessionReadiness;
   readinessLabel: string;
+  currentStage: string;
+  currentStageLabel: string;
   lastTask: string;
   lastActiveAt: string | null;
+  latestMeaningfulAction: string;
+  latestMeaningfulActionAt: string | null;
+  recentActions: AtlasSessionActionDto[];
   historyLength: number;
   lastThinking: string;
   currentBranch: string | null;
+  pullRequests: string[];
   pullRequestCount: number;
+  touchedFiles: string[];
   touchedFileCount: number;
+  logExcerpt: string[];
+  logSource: string | null;
+  logUpdatedAt: string | null;
+  freshnessAt: string | null;
   needsInput: boolean;
   isResumable: boolean;
   isPaused: boolean;
   canArchive: boolean;
+}
+
+export interface AtlasSessionActionDto {
+  at: string | null;
+  actor: string | null;
+  status: AtlasSessionStatus;
+  statusLabel: string;
+  summary: string;
 }
 
 export interface AtlasArchivedSessionDto extends AtlasSessionDto {
@@ -124,6 +150,8 @@ const STATUS_LABELS: Record<AtlasSessionStatus, string> = {
 
 const TERMINAL_HISTORY_STATUSES = new Set<AtlasSessionStatus>(["blocked", "done", "error", "partial"]);
 const SYSTEM_HISTORY_ACTORS = new Set(["athena", "orchestrator"]);
+const RECENT_ACTION_LIMIT = 4;
+const LOG_EXCERPT_LINE_LIMIT = 6;
 const INTERNAL_SESSION_STAGE_TO_STATUS: Record<string, AtlasSessionStatus> = {
   blocked: "blocked",
   complete: "done",
@@ -151,6 +179,42 @@ function normalizeHistoryEntry(entry: unknown): BoxTargetSessionHistoryEntry | n
   return entry as BoxTargetSessionHistoryEntry;
 }
 
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value
+      .split(/\r?\n|,/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function compareIsoTimestampDescending(left: string | null, right: string | null): number {
+  const leftValue = left ? Date.parse(left) : Number.NaN;
+  const rightValue = right ? Date.parse(right) : Number.NaN;
+  if (Number.isFinite(leftValue) && Number.isFinite(rightValue)) {
+    return rightValue - leftValue;
+  }
+  if (Number.isFinite(leftValue)) return -1;
+  if (Number.isFinite(rightValue)) return 1;
+  return 0;
+}
+
+function pickFreshestTimestamp(...values: Array<string | null | undefined>): string | null {
+  return values
+    .map((value) => normalizeOptionalString(value))
+    .sort(compareIsoTimestampDescending)[0] || null;
+}
+
 function getSessionHistory(session: BoxTargetSessionRecord): BoxTargetSessionHistoryEntry[] {
   const history = Array.isArray(session.history)
     ? session.history
@@ -158,6 +222,23 @@ function getSessionHistory(session: BoxTargetSessionRecord): BoxTargetSessionHis
         ? session.activityLog
         : (Array.isArray(session._activityLog) ? session._activityLog : []));
   return history.map(normalizeHistoryEntry).filter((entry): entry is BoxTargetSessionHistoryEntry => entry !== null);
+}
+
+function getMeaningfulHistoryEntries(history: BoxTargetSessionHistoryEntry[]): BoxTargetSessionHistoryEntry[] {
+  return history.filter((entry) => {
+    const actor = normalizeWorkerName(String(entry.from || entry.role || ""));
+    if (actor && SYSTEM_HISTORY_ACTORS.has(actor)) {
+      return false;
+    }
+    return Boolean(
+      normalizeOptionalString(entry.task)
+      || normalizeOptionalString(entry.summary)
+      || normalizeOptionalString(entry.message)
+      || normalizeOptionalString(entry.detail)
+      || normalizeOptionalString(entry.action)
+      || normalizeOptionalString(entry.status),
+    );
+  });
 }
 
 function isAtlasSessionStatus(value: string): value is AtlasSessionStatus {
@@ -168,6 +249,75 @@ function normalizeRawStatus(status: unknown): AtlasSessionStatus {
   const normalized = String(status || "idle").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (isAtlasSessionStatus(normalized)) return normalized;
   return INTERNAL_SESSION_STAGE_TO_STATUS[normalized] || "idle";
+}
+
+function resolveWorkerIdentityLabel(role: string, resolvedRole: string | null, logicalRole: string | null): string {
+  if (resolvedRole && normalizeWorkerName(resolvedRole) !== normalizeWorkerName(role)) {
+    return `${role} via ${resolvedRole}`;
+  }
+  if (logicalRole && normalizeWorkerName(logicalRole) !== normalizeWorkerName(role)) {
+    return `${role} for ${logicalRole}`;
+  }
+  return role;
+}
+
+function resolveSessionStage(
+  session: BoxTargetSessionRecord,
+  effectiveStatus: AtlasSessionStatus,
+): { currentStage: string; currentStageLabel: string } {
+  const stageValue = normalizeOptionalString(session.currentStage)
+    || normalizeOptionalString(session.stage)
+    || normalizeOptionalString(session.phase)
+    || normalizeOptionalString(session.status)
+    || effectiveStatus;
+  const stageLabel = normalizeOptionalString(session.currentStageLabel)
+    || normalizeOptionalString(session.stageLabel)
+    || toTitleCase(stageValue.replace(/[\s_-]+/g, " "));
+  return {
+    currentStage: stageValue,
+    currentStageLabel: stageLabel,
+  };
+}
+
+function resolveHistorySummary(entry: BoxTargetSessionHistoryEntry): string {
+  return normalizeOptionalString(entry.task)
+    || normalizeOptionalString(entry.summary)
+    || normalizeOptionalString(entry.message)
+    || normalizeOptionalString(entry.detail)
+    || normalizeOptionalString(entry.action)
+    || getAtlasSessionStatusLabel(normalizeRawStatus(entry.status));
+}
+
+function buildRecentActions(history: BoxTargetSessionHistoryEntry[]): AtlasSessionActionDto[] {
+  return [...getMeaningfulHistoryEntries(history)]
+    .reverse()
+    .map((entry) => {
+      const status = normalizeRawStatus(entry.status);
+      return {
+        at: normalizeOptionalString(entry.at),
+        actor: normalizeOptionalString(entry.from) || normalizeOptionalString(entry.role),
+        status,
+        statusLabel: getAtlasSessionStatusLabel(status),
+        summary: resolveHistorySummary(entry),
+      };
+    })
+    .slice(0, RECENT_ACTION_LIMIT);
+}
+
+function normalizeCurrentBranch(session: BoxTargetSessionRecord): string | null {
+  return normalizeOptionalString(session.currentBranch)
+    || normalizeOptionalString(session.branch);
+}
+
+function normalizePullRequests(session: BoxTargetSessionRecord): string[] {
+  return normalizeStringList(session.createdPRs)
+    .concat(normalizeStringList(session.prUrl))
+    .concat(normalizeStringList(session.pr));
+}
+
+function normalizeTouchedFiles(session: BoxTargetSessionRecord): string[] {
+  return normalizeStringList(session.filesTouched)
+    .concat(normalizeStringList(session.filesChanged));
 }
 
 function resolveSessionLane(role: string): string | null {
@@ -376,6 +526,74 @@ export function getAtlasSessionReadiness(
   }
 }
 
+function buildLiveWorkerLogCandidates(session: AtlasSessionDto): string[] {
+  const candidates = new Set<string>();
+  for (const value of [session.role, session.resolvedRole, session.logicalRole]) {
+    const normalized = normalizeWorkerName(String(value || ""));
+    if (!normalized) continue;
+    candidates.add(`live_worker_${normalized}.log`);
+  }
+  return [...candidates];
+}
+
+function normalizeLogLine(line: string): string {
+  const normalized = line.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
+}
+
+async function readSessionLogDetails(
+  stateDir: string,
+  session: AtlasSessionDto,
+): Promise<Pick<AtlasSessionDto, "logExcerpt" | "logSource" | "logUpdatedAt" | "freshnessAt">> {
+  const candidateNames = buildLiveWorkerLogCandidates(session);
+  for (const candidateName of candidateNames) {
+    const logPath = path.join(stateDir, candidateName);
+    try {
+      const stats = await fs.stat(logPath);
+      if (!stats.isFile()) continue;
+      const raw = await fs.readFile(logPath, "utf8");
+      const excerpt = raw
+        .split(/\r?\n/)
+        .map(normalizeLogLine)
+        .filter(Boolean)
+        .slice(-LOG_EXCERPT_LINE_LIMIT);
+      if (excerpt.length === 0) {
+        continue;
+      }
+      const logUpdatedAt = stats.mtime.toISOString();
+      return {
+        logExcerpt: excerpt,
+        logSource: path.relative(stateDir, logPath) || path.basename(logPath),
+        logUpdatedAt,
+        freshnessAt: pickFreshestTimestamp(session.lastActiveAt, session.latestMeaningfulActionAt, logUpdatedAt),
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[atlas] failed to read worker log for ${session.role}: ${String((error as Error)?.message || error)}`);
+      }
+    }
+  }
+
+  return {
+    logExcerpt: [],
+    logSource: null,
+    logUpdatedAt: null,
+    freshnessAt: pickFreshestTimestamp(session.lastActiveAt, session.latestMeaningfulActionAt),
+  };
+}
+
+async function hydrateSessionLogDetails(
+  stateDir: string,
+  sessions: Record<string, AtlasSessionDto>,
+): Promise<Record<string, AtlasSessionDto>> {
+  const hydratedEntries = await Promise.all(Object.entries(sessions).map(async ([roleKey, session]) => {
+    const logDetails = await readSessionLogDetails(stateDir, session);
+    return [roleKey, { ...session, ...logDetails }] as const;
+  }));
+  return Object.fromEntries(hydratedEntries);
+}
+
 export function resolveAtlasSessionSnapshotContinuity(
   sessions: AtlasSessionDto[],
   focusedSessionRole: string | null,
@@ -426,23 +644,48 @@ export function bridgeBoxTargetSessionState(
     const lastTask = String(session.lastTask || "").trim();
     const role = String(session.role || roleKey).trim() || roleKey;
     const lane = resolveSessionLane(role);
+    const resolvedRole = normalizeOptionalString(session.resolvedRole);
+    const logicalRole = normalizeOptionalString(session.logicalRole);
     const { readiness, readinessLabel } = getAtlasSessionReadiness(status, lastTask);
+    const { currentStage, currentStageLabel } = resolveSessionStage(session, status);
+    const recentActions = buildRecentActions(history);
+    const latestMeaningfulAction = recentActions[0]?.summary || lastTask || "Waiting for the next product-facing task.";
+    const latestMeaningfulActionAt = recentActions[0]?.at || (typeof session.lastActiveAt === "string" ? session.lastActiveAt : null);
+    const pullRequests = normalizePullRequests(session);
+    const touchedFiles = normalizeTouchedFiles(session);
 
     cleaned[roleKey] = {
       role,
       name: getAtlasSessionDisplayName(role),
       lane,
+      resolvedRole,
+      logicalRole,
+      workerIdentityLabel: resolveWorkerIdentityLabel(role, resolvedRole, logicalRole),
       status,
       statusLabel: getAtlasSessionStatusLabel(status),
       readiness,
       readinessLabel,
+      currentStage,
+      currentStageLabel,
       lastTask,
       lastActiveAt: typeof session.lastActiveAt === "string" ? session.lastActiveAt : null,
+      latestMeaningfulAction,
+      latestMeaningfulActionAt,
+      recentActions,
       historyLength: history.length,
       lastThinking: String(thinkingMap[roleKey] || ""),
-      currentBranch: typeof session.currentBranch === "string" ? session.currentBranch : null,
-      pullRequestCount: Array.isArray(session.createdPRs) ? session.createdPRs.filter(Boolean).length : 0,
-      touchedFileCount: Array.isArray(session.filesTouched) ? session.filesTouched.filter(Boolean).length : 0,
+      currentBranch: normalizeCurrentBranch(session),
+      pullRequests,
+      pullRequestCount: pullRequests.length,
+      touchedFiles,
+      touchedFileCount: touchedFiles.length,
+      logExcerpt: [],
+      logSource: null,
+      logUpdatedAt: null,
+      freshnessAt: pickFreshestTimestamp(
+        typeof session.lastActiveAt === "string" ? session.lastActiveAt : null,
+        latestMeaningfulActionAt,
+      ),
       needsInput: readiness === "action_needed",
       isResumable: isResumable(status, lastTask),
       isPaused: Boolean(lane && pausedLanes[lane]),
@@ -473,12 +716,14 @@ export async function readAtlasSessionReadModel(
     ? {}
     : await readLegacyOpenSessionRecords(options.stateDir);
 
+  const openSessions = bridgeBoxTargetSessionState(
+    Object.keys(canonicalOpenSessions).length > 0 ? canonicalOpenSessions : fallbackOpenSessions,
+    options.thinkingMap,
+    pausedLanes,
+  );
+
   return {
-    openSessions: bridgeBoxTargetSessionState(
-      Object.keys(canonicalOpenSessions).length > 0 ? canonicalOpenSessions : fallbackOpenSessions,
-      options.thinkingMap,
-      pausedLanes,
-    ),
+    openSessions: await hydrateSessionLogDetails(options.stateDir, openSessions),
     archivedSessions: await readArchivedSessionRecords(options.stateDir),
   };
 }
