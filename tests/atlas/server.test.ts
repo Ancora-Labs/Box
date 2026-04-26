@@ -686,10 +686,12 @@ describe("atlas server", () => {
     try {
       const homeResponse = await requestText(legacyOnlyPort, "/?focusRole=quality-worker");
       const snapshotResponse = await requestText(legacyOnlyPort, "/api/atlas/snapshot?focusRole=quality-worker");
+      const homeMarkup = homeResponse.text.split("<script>")[0] || homeResponse.text;
 
       assert.equal(homeResponse.status, 200);
-      assert.match(homeResponse.text, /data-role="new-session-view"/);
-      assert.doesNotMatch(homeResponse.text, /data-role="selected-session-view"/);
+      assert.match(homeMarkup, /data-main-pane-mode="new-session"/);
+      assert.match(homeMarkup, /data-role="new-session-view"/);
+      assert.doesNotMatch(homeMarkup, /data-role="selected-session-view"/);
 
       assert.equal(snapshotResponse.status, 200);
       const payload = JSON.parse(snapshotResponse.text) as {
