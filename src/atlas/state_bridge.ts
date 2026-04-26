@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { getPausedLanes } from "../core/medic_agent.js";
 import { getLaneForWorkerName, normalizeWorkerName } from "../core/role_registry.js";
-import { READ_JSON_REASON, readJsonSafe } from "../core/fs_utils.js";
+import { readJsonSafe } from "../core/fs_utils.js";
 import { listOpenTargetSessions } from "../core/target_session_state.js";
 
 export interface BoxTargetSessionHistoryEntry {
@@ -438,20 +438,9 @@ function buildInlineLogExcerpt(session: BoxTargetSessionRecord): string[] {
     .slice(-LOG_EXCERPT_LINE_LIMIT);
 }
 
-type AtlasSessionSource = "canonical" | "legacy";
-
 function resolveSessionFreshnessPolicy(
   freshnessAt: string | null,
-  source: AtlasSessionSource,
 ): Pick<AtlasSessionDto, "freshnessState" | "freshnessLabel" | "freshnessPolicyDetail"> {
-  if (source === "legacy") {
-    return {
-      freshnessState: "stale",
-      freshnessLabel: "Legacy fallback snapshot",
-      freshnessPolicyDetail: "ATLAS restored this session from legacy fallback state, so it is shown as recorded context instead of current live state.",
-    };
-  }
-
   if (!freshnessAt) {
     return {
       freshnessState: "unknown",
@@ -604,18 +593,6 @@ function extractSessionRecordMap(raw: unknown, fallbackPrefix: string): Record<s
     extracted[resolveSessionRoleKey(value, key)] = value;
   }
   return extracted;
-}
-
-async function readLegacyOpenSessionRecords(stateDir: string): Promise<Record<string, unknown>> {
-  const openSessionsPath = path.join(stateDir, "open_target_sessions.json");
-  const openSessionsResult = await readJsonSafe(openSessionsPath);
-  if (!openSessionsResult.ok) {
-    if (openSessionsResult.reason === READ_JSON_REASON.INVALID) {
-      console.error(`[atlas] failed to read open session state: ${String(openSessionsResult.error?.message || openSessionsResult.error)}`);
-    }
-    return {};
-  }
-  return extractSessionRecordMap(openSessionsResult.data, "atlas-session");
 }
 
 async function readCanonicalOpenSessionRecords(stateDir: string): Promise<Record<string, unknown>> {
@@ -867,7 +844,6 @@ export function bridgeBoxTargetSessionState(
   workerSessions: Record<string, unknown>,
   thinkingMap: Record<string, string> = {},
   pausedLanes: Record<string, unknown> = {},
-  source: AtlasSessionSource = "canonical",
 ): Record<string, AtlasSessionDto> {
   const cleaned: Record<string, AtlasSessionDto> = {};
 
@@ -909,7 +885,7 @@ export function bridgeBoxTargetSessionState(
       logUpdatedAt,
       normalizeOptionalString(session.updatedAt),
     );
-    const freshnessPolicy = resolveSessionFreshnessPolicy(freshnessAt, source);
+    const freshnessPolicy = resolveSessionFreshnessPolicy(freshnessAt);
 
     cleaned[roleKey] = {
       role,
@@ -968,17 +944,10 @@ export async function readAtlasSessionReadModel(
     console.error(`[atlas] failed to read paused lanes: ${String((error as Error)?.message || error)}`);
   }
 
-  const canonicalOpenSessions = await readCanonicalOpenSessionRecords(options.stateDir);
-  const fallbackOpenSessions = Object.keys(canonicalOpenSessions).length > 0
-    ? {}
-    : await readLegacyOpenSessionRecords(options.stateDir);
-  const sessionSource: AtlasSessionSource = Object.keys(canonicalOpenSessions).length > 0 ? "canonical" : "legacy";
-
   const openSessions = bridgeBoxTargetSessionState(
-    Object.keys(canonicalOpenSessions).length > 0 ? canonicalOpenSessions : fallbackOpenSessions,
+    await readCanonicalOpenSessionRecords(options.stateDir),
     options.thinkingMap,
     pausedLanes,
-    sessionSource,
   );
 
   return {
