@@ -163,7 +163,7 @@ describe("atlas workspace shell", () => {
 
     for (const html of [homeHtml, sessionsHtml]) {
       const documentMarkup = html.split("<script>")[0] || html;
-      assert.match(documentMarkup, /<title>ATLAS Workspace<\/title>/);
+      assert.match(documentMarkup, /<title>Atlas<\/title>/);
       assert.match(documentMarkup, /aria-label="ATLAS desktop surface"/);
       assert.match(documentMarkup, /aria-label="ATLAS desktop sidebar"/);
       assert.match(documentMarkup, /aria-label="ATLAS work canvas"/);
