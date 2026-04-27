@@ -173,7 +173,7 @@ describe("atlas desktop shell refactor", () => {
     const html = renderAtlasSessionsHtml(buildPageData());
     const documentMarkup = html.split("<script>")[0] || html;
 
-    assert.match(documentMarkup, /<title>ATLAS Workspace<\/title>/);
+    assert.match(documentMarkup, /<title>Atlas<\/title>/);
     assert.match(documentMarkup, /data-role="selected-session-view"/);
     assert.match(documentMarkup, /method="post" action="\/lifecycle"/);
     assert.match(documentMarkup, /Archive session/);
@@ -197,8 +197,8 @@ describe("atlas desktop shell refactor", () => {
     }));
     const documentMarkup = html.split("<script>")[0] || html;
 
-    assert.match(documentMarkup, /No session state is available yet\./);
-    assert.match(documentMarkup, /Where should ATLAS start\?/);
+    assert.match(documentMarkup, /No live rows yet\./);
+    assert.match(documentMarkup, /What do you want Atlas to deliver today\?/);
     assert.match(documentMarkup, /data-role="product-composer-input"/);
     assert.doesNotMatch(documentMarkup, /<unsafe repo>|<script>alert\(1\)<\/script>/);
   });

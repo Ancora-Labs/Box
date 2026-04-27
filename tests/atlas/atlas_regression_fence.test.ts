@@ -215,7 +215,7 @@ describe("atlas regression fence", () => {
     }
   });
 
-  it("falls back to open_target_sessions.json, maps legacy BOX stages, and aggregates archived sessions", async () => {
+  it("ignores legacy open_target_sessions.json for live rows while still aggregating archived sessions", async () => {
     const tempRoot = await createTempRoot();
     const stateDir = path.join(tempRoot, "state");
 
@@ -261,19 +261,8 @@ describe("atlas regression fence", () => {
       const readModel = await readAtlasSessionReadModel({ stateDir });
       const openSessions = await listAtlasSessions({ stateDir });
 
-      assert.equal(openSessions["integration-worker"]?.status, "done");
-      assert.equal(openSessions["integration-worker"]?.statusLabel, "Completed");
-      assert.equal(openSessions["quality-worker"]?.status, "blocked");
-      assert.equal(openSessions["quality-worker"]?.workerIdentityLabel, "Quality archive worker");
-      assert.equal(openSessions["quality-worker"]?.currentStageLabel, "Reviewing archive notes");
-      assert.equal(openSessions["quality-worker"]?.latestMeaningfulAction, "Queued the archive follow-up");
-      assert.equal(openSessions["quality-worker"]?.readinessLabel, "Needs your input");
-      assert.equal(openSessions["quality-worker"]?.touchedFileCount, 2);
-      assert.deepEqual(openSessions["quality-worker"]?.pullRequests, ["https://example.com/pr/archive"]);
-      assert.deepEqual(openSessions["quality-worker"]?.logExcerpt, ["archive follow-up queued"]);
-      assert.equal(openSessions["quality-worker"]?.freshnessAt, "2026-04-22T10:56:30.000Z");
-
-      assert.equal(Object.keys(readModel.openSessions).length, 2);
+      assert.equal(Object.keys(openSessions).length, 0);
+      assert.equal(Object.keys(readModel.openSessions).length, 0);
       assert.equal(readModel.archivedSessions.length, 1);
       assert.equal(readModel.archivedSessions[0]?.status, "partial");
       assert.equal(readModel.archivedSessions[0]?.readinessLabel, "Ready to continue");
