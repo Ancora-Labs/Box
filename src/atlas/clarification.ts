@@ -3,12 +3,14 @@ import path from "node:path";
 
 import { loadConfig } from "../config.js";
 import { READ_JSON_REASON, readJsonSafe, writeJson } from "../core/fs_utils.js";
+import type { AtlasDesktopAttachment } from "./desktop_state.js";
 
 export interface AtlasClarificationPacket {
   sessionId: string;
   targetRepo: string;
   objective: string;
   summary: string;
+  attachments: AtlasDesktopAttachment[];
   openQuestions: string[];
   executionNotes: string[];
   provider: string;
@@ -43,6 +45,7 @@ export interface CreateAtlasClarificationPacketOptions {
   sessionId: string;
   targetRepo: string;
   objective: string;
+  attachments?: AtlasDesktopAttachment[];
   command?: string;
   runner?: AtlasClarificationRunner;
 }
@@ -75,6 +78,39 @@ function normalizeStringList(value: unknown, maxItems: number): string[] {
     .slice(0, maxItems);
 }
 
+function normalizeAttachments(value: unknown): AtlasDesktopAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const normalized: AtlasDesktopAttachment[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+
+    const candidate = entry as Record<string, unknown>;
+    const id = String(candidate.id || "").trim();
+    const name = String(candidate.name || "").trim();
+    const sourcePath = String(candidate.sourcePath || "").trim();
+    const storedPath = String(candidate.storedPath || "").trim();
+    if (!id || !name || !sourcePath || !storedPath || seen.has(id)) {
+      continue;
+    }
+
+    seen.add(id);
+    normalized.push({
+      id,
+      name,
+      sourcePath,
+      storedPath,
+      sizeBytes: typeof candidate.sizeBytes === "number" && Number.isFinite(candidate.sizeBytes)
+        ? candidate.sizeBytes
+        : null,
+      addedAt: typeof candidate.addedAt === "string" && candidate.addedAt.trim() ? candidate.addedAt.trim() : null,
+    });
+  }
+  return normalized;
+}
+
 export function getAtlasClarificationPacketPath(stateDir: string, sessionId: string): string {
   return path.join(
     stateDir,
@@ -82,6 +118,16 @@ export function getAtlasClarificationPacketPath(stateDir: string, sessionId: str
     "desktop_sessions",
     sanitizeSessionId(sessionId),
     "clarification_packet.json",
+  );
+}
+
+export function getAtlasClarificationAttachmentDirectory(stateDir: string, sessionId: string): string {
+  return path.join(
+    stateDir,
+    "atlas",
+    "desktop_sessions",
+    sanitizeSessionId(sessionId),
+    "attachments",
   );
 }
 
@@ -306,13 +352,24 @@ export async function createAtlasSessionStartPacket(
     throw new AtlasClarificationError("Objective is required to start an ATLAS desktop session.", 400, "missing_objective");
   }
 
+  const attachments = normalizeAttachments(options.attachments);
+  const attachmentLabel = attachments.length > 0
+    ? `${attachments.length} attached file${attachments.length === 1 ? "" : "s"}`
+    : "";
+
   const packet: AtlasClarificationPacket = {
     sessionId: options.sessionId,
     targetRepo: options.targetRepo,
     objective,
-    summary: objective,
+    summary: attachmentLabel ? `${objective} · ${attachmentLabel}` : objective,
+    attachments,
     openQuestions: [],
-    executionNotes: ["Desktop session started directly from the ATLAS workspace composer."],
+    executionNotes: [
+      "Desktop session started directly from the ATLAS workspace composer.",
+      ...(attachments.length > 0
+        ? [`Attached files prepared for this desktop session: ${attachments.map((attachment) => attachment.name).join(", ")}.`]
+        : []),
+    ],
     provider: "atlas-desktop",
     rawResponse: "",
     createdAt: new Date().toISOString(),
@@ -367,6 +424,7 @@ export async function createAtlasClarificationPacket(
     targetRepo: options.targetRepo,
     objective,
     summary: clarified.summary,
+    attachments: normalizeAttachments(options.attachments),
     openQuestions: clarified.openQuestions,
     executionNotes: clarified.executionNotes,
     provider: command,
