@@ -196,8 +196,8 @@ describe("update the existing atlas test suite so it stops protecting the old sh
       scripts?: Record<string, string>;
     };
 
-    assert.match(homeMarkup, /No session state is available yet\./);
-    assert.match(homeMarkup, /Where should ATLAS start\?/);
+    assert.match(homeMarkup, /No live rows yet\./);
+    assert.match(homeMarkup, /What do you want Atlas to deliver today\?/);
     assert.match(homeMarkup, /data-has-live-sessions="false"/);
     assert.equal(layout.portableRoot, path.join("C:", "ATLAS Release Root", "dist", "ATLAS"));
     assert.equal(layout.portableExePath, path.join("C:", "ATLAS Release Root", "dist", "ATLAS", "ATLAS.exe"));

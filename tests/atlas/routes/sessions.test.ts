@@ -152,7 +152,7 @@ describe("atlas sessions route", () => {
 
       assert.equal(res.statusCode, 200);
       assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
-      assert.match(documentMarkup, /<title>ATLAS Workspace<\/title>/);
+      assert.match(documentMarkup, /<title>Atlas<\/title>/);
       assert.match(documentMarkup, /data-role="selected-session-view"/);
       assert.match(documentMarkup, /data-role="selected-session-status-light"/);
       assert.match(documentMarkup, /live-status-attention[\s\S]*?data-role="selected-session-status-light"/);
@@ -220,7 +220,7 @@ describe("atlas sessions route", () => {
       assert.equal(res.statusCode, 200);
       assert.match(documentMarkup, /data-role="new-session-view"/);
       assert.match(documentMarkup, /href="\/"[\s\S]*?data-role="new-session-link"/);
-      assert.match(documentMarkup, /The selected session is waiting for its next live update/);
+      assert.match(documentMarkup, /The saved focus is not present in the current live snapshot/);
       assert.match(documentMarkup, /Selected detail unavailable/);
       assert.doesNotMatch(documentMarkup, /missing-worker/);
     } finally {
@@ -247,7 +247,7 @@ describe("atlas sessions route", () => {
       assert.equal(res.statusCode, 200);
       assert.match(documentMarkup, /data-role="brand-reset"/);
       assert.match(documentMarkup, /data-role="new-session-view"/);
-      assert.match(documentMarkup, /No session state is available yet\./);
+      assert.match(documentMarkup, /No live rows yet\./);
       assert.doesNotMatch(documentMarkup, /data-role="selected-session-view"/);
       assert.doesNotMatch(documentMarkup, /dashboard-card|window-controls|traffic-light/i);
     } finally {

@@ -8,6 +8,7 @@ export interface AtlasDesktopResourcePaths {
   rendererHtmlPath: string;
   rendererScriptPath: string;
   rendererLayoutPath: string;
+  appIconPath: string;
 }
 
 export interface ResolveAtlasDesktopShellCommandOptions {
@@ -84,5 +85,8 @@ export function resolveAtlasDesktopResourcePaths(
     rendererHtmlPath: path.join(appRoot, "electron", "renderer", "index.html"),
     rendererScriptPath: path.join(appRoot, "electron", "renderer", "app.js"),
     rendererLayoutPath: path.join(appRoot, "electron", "renderer", "layout.js"),
+    appIconPath: isPackaged
+      ? path.join(resolvePackagedWorkingDirectory(packagedExePath), "atlas-logo.ico")
+      : path.join(appRoot, "atlas-logo.ico"),
   };
 }

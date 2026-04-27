@@ -142,7 +142,7 @@ describe("atlas home route", () => {
 
       assert.equal(res.statusCode, 200);
       assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
-      assert.match(documentMarkup, /<title>ATLAS Workspace<\/title>/);
+      assert.match(documentMarkup, /<title>Atlas<\/title>/);
       assert.match(documentMarkup, /data-main-pane-mode="new-session"/);
       assert.match(documentMarkup, /data-role="brand-reset"/);
       assert.match(documentMarkup, /data-role="new-session-link"/);
@@ -151,8 +151,7 @@ describe("atlas home route", () => {
       assert.match(documentMarkup, /href="\/"[\s\S]*?data-role="new-session-link"[\s\S]*?data-focus-role=""/);
       assert.match(documentMarkup, /href="\/\?focusRole=quality-worker"[\s\S]*?data-focus-role="quality-worker"[\s\S]*?data-session-role="quality-worker"/);
       assert.match(documentMarkup, /data-role="new-session-view"/);
-      assert.match(documentMarkup, /Start a new session from a clean workspace/);
-      assert.match(documentMarkup, /What should ATLAS do next\?/);
+      assert.match(documentMarkup, /What do you want Atlas to deliver today\?/);
       assert.match(documentMarkup, /data-role="product-composer-input"/);
       assert.match(documentMarkup, /data-session-role="quality-worker"/);
       assert.match(documentMarkup, /Quality lane/);
@@ -242,7 +241,7 @@ describe("atlas home route", () => {
       assert.equal(res.statusCode, 200);
       assert.match(documentMarkup, /data-main-pane-mode="new-session"/);
       assert.match(documentMarkup, /data-role="new-session-view"/);
-       assert.match(documentMarkup, /The selected session is waiting for its next live update/);
+       assert.match(documentMarkup, /The saved focus is not present in the current live snapshot/);
        assert.match(documentMarkup, /Selected detail unavailable/);
        assert.doesNotMatch(documentMarkup, /data-role="selected-session-view"/);
        assert.doesNotMatch(documentMarkup, /missing-worker/);
@@ -271,8 +270,8 @@ describe("atlas home route", () => {
       assert.equal(res.statusCode, 200);
       assert.match(documentMarkup, /data-main-pane-mode="new-session"/);
       assert.match(documentMarkup, /data-role="new-session-view"/);
-      assert.match(documentMarkup, /Where should ATLAS start\?/);
-      assert.match(documentMarkup, /No session state is available yet\./);
+      assert.match(documentMarkup, /What do you want Atlas to deliver today\?/);
+      assert.match(documentMarkup, /No live rows yet\./);
       assert.doesNotMatch(documentMarkup, /data-role="selected-session-view"/);
       assert.doesNotMatch(documentMarkup, /dashboard-card|metric-card|window-controls|traffic-light/i);
     } finally {

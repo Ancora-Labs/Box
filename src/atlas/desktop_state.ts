@@ -16,9 +16,19 @@ export interface AtlasDesktopLocation {
   focusedSessionRole: string | null;
 }
 
+export interface AtlasDesktopAttachment {
+  id: string;
+  name: string;
+  sourcePath: string;
+  storedPath: string;
+  sizeBytes: number | null;
+  addedAt: string | null;
+}
+
 export interface AtlasDesktopState {
   sessionId: string | null;
   workspaceDraft: string;
+  workspaceAttachments: AtlasDesktopAttachment[];
   workspaceComposerFocused: boolean;
   windowBounds: AtlasDesktopWindowBounds | null;
   lastWorkspaceSurface: AtlasDesktopProductSurface;
@@ -43,12 +53,13 @@ export interface ResolveAtlasDesktopStateRootOptions {
   cwd: string;
 }
 
-const ATLAS_DESKTOP_STATE_SCHEMA_VERSION = 3;
+const ATLAS_DESKTOP_STATE_SCHEMA_VERSION = 4;
 
 export function createDefaultAtlasDesktopState(): AtlasDesktopState {
   return {
     sessionId: null,
     workspaceDraft: "",
+    workspaceAttachments: [],
     workspaceComposerFocused: false,
     windowBounds: null,
     lastWorkspaceSurface: "workspace",
@@ -87,6 +98,51 @@ function normalizeOptionalString(value: unknown): string | null {
 
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
+}
+
+function normalizeAtlasDesktopAttachment(value: unknown): AtlasDesktopAttachment | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeOptionalString(value.id);
+  const name = normalizeOptionalString(value.name);
+  const sourcePath = normalizeOptionalString(value.sourcePath);
+  const storedPath = normalizeOptionalString(value.storedPath);
+  if (!id || !name || !sourcePath || !storedPath) {
+    return null;
+  }
+
+  const sizeBytes = typeof value.sizeBytes === "number" && Number.isFinite(value.sizeBytes)
+    ? value.sizeBytes
+    : null;
+
+  return {
+    id,
+    name,
+    sourcePath,
+    storedPath,
+    sizeBytes,
+    addedAt: normalizeOptionalString(value.addedAt),
+  };
+}
+
+function normalizeAtlasDesktopAttachments(value: unknown): AtlasDesktopAttachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const normalized: AtlasDesktopAttachment[] = [];
+  for (const entry of value) {
+    const attachment = normalizeAtlasDesktopAttachment(entry);
+    if (!attachment || seen.has(attachment.id)) {
+      continue;
+    }
+    seen.add(attachment.id);
+    normalized.push(attachment);
+  }
+  return normalized;
 }
 
 export function normalizeAtlasDesktopProductSurface(value: unknown): AtlasDesktopProductSurface {
@@ -173,6 +229,7 @@ function normalizeAtlasDesktopState(value: unknown): AtlasDesktopState | null {
   return {
     sessionId,
     workspaceDraft,
+    workspaceAttachments: normalizeAtlasDesktopAttachments(value.workspaceAttachments),
     workspaceComposerFocused: typeof value.workspaceComposerFocused === "boolean"
       ? value.workspaceComposerFocused
       : normalizeBoolean(value.productComposerFocused),
